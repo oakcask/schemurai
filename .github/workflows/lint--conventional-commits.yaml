@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      payload: ${{ steps.subjects.outputs.payload }}
+      payload: ${{ steps.metadata.outputs.payload }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - name: Collect commit subjects
-        id: subjects
+      - name: Collect commit metadata
+        id: metadata
         shell: bash
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -25,11 +25,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          delimiter="commit_subjects_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          delimiter="commit_metadata_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          git log --format=%B "${PR_BASE_SHA}..${PR_HEAD_SHA}" > commit-messages.txt
           payload="$(
             git log --format=%s "${PR_BASE_SHA}..${PR_HEAD_SHA}" \
-              | jq -R -s --arg label "commit subject" \
-                  '{label: $label, subjects: (split("\n") | map(select(length > 0)))}'
+              | jq -R -s \
+                  --arg label "commit subject" \
+                  --arg text_label "commit message" \
+                  --rawfile messages commit-messages.txt \
+                  '{
+                    label: $label,
+                    subjects: (split("\n") | map(select(length > 0))),
+                    text_label: $text_label,
+                    texts: [$messages]
+                  }'
           )"
 
           {

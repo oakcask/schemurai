@@ -16,4 +16,5 @@ jobs:
     uses: ./.github/workflows/shared--conventional-commits.yaml
     with:
       payload: >-
-        {"label":"PR title","subjects":[${{ toJSON(github.event.pull_request.title) }}]}
+        {"label":"PR title","subjects":[${{ toJSON(github.event.pull_request.title) }}],
+        "text_label":"PR body","texts":[${{ toJSON(github.event.pull_request.body || '') }}]}
