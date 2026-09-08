@@ -6,8 +6,10 @@
     "docker:pinDigests",
     "helpers:pinGitHubActionDigests"
   ],
+  "fetchChangeLogs": "off",
   "internalChecksFilter": "strict",
   "platformAutomerge": false,
+  "prBodyColumns": ["Package", "Update", "Change"],
   "prCreation": "immediate",
   "prConcurrentLimit": 1,
   "packageRules": [
