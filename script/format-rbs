@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "pathname"
+require "rbs"
+require "stringio"
+
+check = ARGV.delete("--check")
+paths = ARGV.empty? ? Dir["sig/**/*.rbs"] : ARGV
+unformatted = []
+
+paths.each do |path_string|
+  path = Pathname(path_string)
+  source = path.read
+  buffer = RBS::Buffer.new(name: path, content: source)
+  _, directives, declarations = RBS::Parser.parse_signature(buffer)
+  output = StringIO.new
+  RBS::Writer.new(out: output).write(directives + declarations)
+  formatted = output.string
+
+  if check
+    unformatted << path unless source == formatted
+  elsif source != formatted
+    path.write(formatted)
+  end
+end
+
+if unformatted.any?
+  warn "RBS files are not formatted:"
+  unformatted.each { |path| warn "  #{path}" }
+  warn "Run `bundle exec ruby script/format-rbs`."
+  exit 1
+end

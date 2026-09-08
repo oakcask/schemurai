@@ -8,12 +8,14 @@ on:
       - .github/workflows/lint--rbs.yaml
       - Gemfile
       - Gemfile.lock
+      - script/format-rbs
       - sig/**/*
   pull_request:
     paths:
       - .github/workflows/lint--rbs.yaml
       - Gemfile
       - Gemfile.lock
+      - script/format-rbs
       - sig/**/*
 
 permissions:
@@ -36,3 +38,5 @@ jobs:
           cache-version: ${{ hashFiles('Gemfile.lock') }}
       - name: Validate RBS signatures
         run: bundle exec rbs -I sig validate
+      - name: Check RBS formatting
+        run: bundle exec ruby script/format-rbs --check
