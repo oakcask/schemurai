@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/oakcask/schemurai/compare/v2.2.0...v2.2.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* preserve RBS types in generated docs ([#101](https://github.com/oakcask/schemurai/issues/101)) ([75d56b2](https://github.com/oakcask/schemurai/commit/75d56b29afa82e642937080eb9efc027b09e0bba))
+
 ## [2.2.0](https://github.com/oakcask/schemurai/compare/v2.1.0...v2.2.0) (2026-09-02)
 
 
