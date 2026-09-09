@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    schemurai (2.2.0)
+    schemurai (2.2.1)
       base64
 
 GEM
