@@ -1,6 +1,6 @@
 source "https://rubygems.org"
 git_source(:github) { |repo_name| "https://github.com/#{repo_name}" }
-ruby ">= 3.4.10"
+ruby ">= 4.0.6"
 gemspec
 
 group :test do
