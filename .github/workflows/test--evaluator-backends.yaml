@@ -11,7 +11,9 @@ on:
       - Gemfile.lock
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
       - oracle/**/*
+      - spec/vm_spec.rb
       - test/evaluator_backend_test.rb
   pull_request:
     paths: *backend_paths
@@ -24,13 +26,13 @@ env:
 
 jobs:
   vm-differential:
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         ruby-version: ["3.4", "4.0"]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,7 +42,75 @@ jobs:
           ruby-version: ${{ matrix.ruby-version }}
           bundler-cache: true
           cache-version: vm-${{ matrix.os }}-${{ matrix.ruby-version }}-${{ hashFiles('Gemfile.lock') }}
-      - name: Compare VM evaluator with the Ruby oracle
-        run: bundle exec rspec -Ilib test/evaluator_backend_test.rb
+      - name: Build native VM evaluator
+        run: bundle exec rake compile
+        env:
+          CFLAGS: -Werror
+      - name: Test and compare VM evaluator with the Ruby oracle
+        run: bundle exec rspec -Ilib spec/vm_spec.rb test/evaluator_backend_test.rb
+        env:
+          SCHEMURAI_DIFFERENTIAL_BACKEND: vm
+
+  address-sanitizer:
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ["3.4", "4.0"]
+    runs-on: ubuntu-24.04
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+          cache-version: vm-address-sanitizer-${{ matrix.ruby-version }}-${{ hashFiles('Gemfile.lock') }}
+      - name: Build gem
+        run: gem build schemurai.gemspec --output schemurai.gem
+      - name: Install gem with AddressSanitizer
+        run: gem install --local schemurai.gem --no-document
+        env:
+          CFLAGS: -Werror -fsanitize=address -fno-omit-frame-pointer -O1
+          DLDFLAGS: -fsanitize=address
+      - name: Exercise packaged native VM under AddressSanitizer
+        run: |
+          native_extension_dir="$(ruby -e 'puts Gem::Specification.find_by_name("schemurai").extension_dir')"
+          env RUBYLIB="$native_extension_dir" LD_PRELOAD="$(gcc -print-file-name=libasan.so)" bundle exec rspec -Ilib spec/vm_spec.rb test/evaluator_backend_test.rb
+        env:
+          SCHEMURAI_DIFFERENTIAL_BACKEND: vm
+
+  undefined-behavior-sanitizer:
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby-version: ["3.4", "4.0"]
+    runs-on: ubuntu-latest
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+          cache-version: vm-undefined-sanitizer-${{ matrix.ruby-version }}-${{ hashFiles('Gemfile.lock') }}
+      - name: Build gem
+        run: gem build schemurai.gemspec --output schemurai.gem
+      - name: Install gem with UndefinedBehaviorSanitizer
+        run: gem install --local schemurai.gem --no-document
+        env:
+          CFLAGS: -Werror -fsanitize=undefined -fno-omit-frame-pointer -O1
+          DLDFLAGS: -fsanitize=undefined
+      - name: Exercise packaged native VM under UndefinedBehaviorSanitizer
+        run: |
+          native_extension_dir="$(ruby -e 'puts Gem::Specification.find_by_name("schemurai").extension_dir')"
+          env RUBYLIB="$native_extension_dir" bundle exec rspec -Ilib spec/vm_spec.rb test/evaluator_backend_test.rb
         env:
           SCHEMURAI_DIFFERENTIAL_BACKEND: vm

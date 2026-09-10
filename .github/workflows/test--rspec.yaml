@@ -9,6 +9,7 @@ on:
       - .gitmodules
       - Gemfile.lock
       - lib/**/*
+      - ext/**/*
       - oracle/**/*
       - script/oracle-*
       - spec/**/*
@@ -18,6 +19,7 @@ on:
       - .gitmodules
       - Gemfile.lock
       - lib/**/*
+      - ext/**/*
       - oracle/**/*
       - script/oracle-*
       - spec/**/*
@@ -42,6 +44,10 @@ jobs:
         with:
           bundler-cache: true
           cache-version: ${{ hashFiles('Gemfile.lock') }}
+      - name: Build native VM evaluator
+        run: bundle exec rake compile
+        env:
+          CFLAGS: -Werror
       - name: Run Ruby tests
         run: bundle exec rspec
       - name: Verify oracle case catalog

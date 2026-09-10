@@ -10,6 +10,7 @@ on:
       - Gemfile.lock
       - schemurai.gemspec
       - benchmark/**/*
+      - ext/**/*
       - lib/**/*
       - references/JSON-Schema-Test-Suite
       - script/benchmark-compare
@@ -40,6 +41,10 @@ jobs:
         with:
           bundler-cache: true
           cache-version: benchmark-${{ hashFiles('Gemfile.lock') }}
+      - name: Build native VM evaluator
+        run: bundle exec rake compile
+        env:
+          CFLAGS: -Werror
       - name: Compare base and merge benchmarks
         run: bundle exec ruby script/benchmark-compare
         env:
