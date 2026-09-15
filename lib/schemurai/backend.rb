@@ -2,7 +2,7 @@
 
 module Schemurai
   module Backend
-    VM_FEATURE = "vm/evaluator"
+    VM_FEATURE = "vm/native"
     CHOICES = %i[default ruby vm].freeze
 
     module_function def requested

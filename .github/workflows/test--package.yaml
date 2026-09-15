@@ -9,6 +9,7 @@ on:
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
       - sig/**/*
       - README.md
       - test/package_smoke_test.rb
@@ -18,6 +19,7 @@ on:
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
       - sig/**/*
       - README.md
       - test/package_smoke_test.rb
@@ -62,5 +64,7 @@ jobs:
           name: schemurai-package
       - name: Install gem
         run: gem install --local schemurai.gem --no-document
+        env:
+          CFLAGS: -Werror
       - name: Run package smoke test
         run: ruby test/package_smoke_test.rb

@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
   spec.authors = ["Kuya KOHARA (oakcask)"]
   spec.email = ["kuya.kohara@gmail.com"]
 
-  spec.summary = "A fast, Ractor-safe, pure Ruby JSON Schema Draft 7+ validator"
+  spec.summary = "A fast, Ractor-safe JSON Schema Draft 7+ validator"
   spec.description = "Validates Ruby values against JSON Schema Draft 7, 2019-09, and 2020-12 schemas."
   spec.homepage = "https://github.com/oakcask/schemurai"
   spec.license = "MIT"
@@ -20,7 +20,8 @@ Gem::Specification.new do |spec|
     "documentation_uri" => "https://rubydoc.info/gems/#{spec.name}/#{spec.version}",
     "rubygems_mfa_required" => "true"
   }
-  spec.files = Dir["lib/**/*", "sig/**/*", "README.md", "LICENSE"]
+  spec.files = Dir["ext/**/*.{c,h,rb}", "lib/**/*", "sig/**/*", "README.md", "LICENSE"]
+  spec.extensions = ["ext/schemurai_native/extconf.rb"]
   spec.extra_rdoc_files = %w[README.md LICENSE]
   spec.rdoc_options = [
     "--main", "README.md",
