@@ -4,8 +4,14 @@
 registries expose the backend captured when they were created.
 
 The `backend:` keyword and `SCHEMURAI_BACKEND` accept `ruby`, `vm`, or
-`default`. The production default is explicitly `ruby`. The `vm` backend
-compiles schema nodes into immutable Ruby instruction streams as the schema
-graph is built and executes them with the validator VM. Validators from the
-same VM registry reuse those streams. Both backends retain the same compiled
-Ruby schema graph and public result objects.
+`default`. The production default is explicitly `ruby`. The `vm` backend is a
+native extension: it compiles schema nodes into immutable C instruction and
+rule structures, then executes them in the native evaluator. Validators from
+the same VM registry reuse those programs. Both backends retain the same Ruby
+schema graph and public result objects; format callbacks and detailed error
+messages also remain Ruby integration boundaries.
+
+Installing Schemurai therefore requires the normal Ruby native-extension build
+toolchain even when the Ruby backend is selected. The Ruby backend remains the
+compatibility oracle, including a cold fallback used by the VM for the explicit
+out-of-domain instance cases documented in `compatibility-domain.md`.

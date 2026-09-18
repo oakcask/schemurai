@@ -1,0 +1,14 @@
+# Ruby's C API represents VALUE as a tagged integer, so its supported pointer
+# conversion macros trigger performance-no-int-to-ptr.
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-no-int-to-ptr
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(^|/)ext/schemurai_native/'
+SystemHeaders: false
+FormatStyle: file
