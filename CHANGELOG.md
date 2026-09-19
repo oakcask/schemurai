@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/oakcask/schemurai/compare/v2.2.1...v2.2.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* use gemspec Ruby requirement ([#124](https://github.com/oakcask/schemurai/issues/124)) ([167e3d3](https://github.com/oakcask/schemurai/commit/167e3d3d82809f0029ae81224389c5dcec12e7ed))
+
 ## [2.2.1](https://github.com/oakcask/schemurai/compare/v2.2.0...v2.2.1) (2026-09-09)
 
 
