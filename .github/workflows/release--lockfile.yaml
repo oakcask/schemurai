@@ -34,7 +34,7 @@ jobs:
       # release-please does not update the Bundler 4 CHECKSUMS entry for the
       # gem being released. Regenerate it whenever the release PR is updated.
       - run: bundle lock
-      - uses: int128/update-generated-files-action@943b8967da5d16e73f082cc3ae2cb78cd9d933af # v2.112.0
+      - uses: int128/update-generated-files-action@835eef6e15a044354d9f4b403ad83a0fabe46b0e # v2.113.0
         with:
           commit-message: "chore: regenerate lockfile"
           token: ${{ steps.gh-token-gen.outputs.token }}
