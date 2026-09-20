@@ -18,6 +18,11 @@
       "minimumReleaseAge": "5 day"
     },
     {
+      "matchDatasources": ["npm"],
+      "matchDepNames": ["renovate"],
+      "schedule": ["* * * * 0"]
+    },
+    {
       "matchUpdateTypes": ["patch", "minor"],
       "matchCurrentAge": "> 5 days",
       "automerge": true
