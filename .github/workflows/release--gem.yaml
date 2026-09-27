@@ -43,7 +43,7 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag_name }}
       - name: Set up Ruby
-        uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1.325.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
       - name: Build gem
         run: gem build schemurai.gemspec --output schemurai-${{ needs.release.outputs.version }}.gem
       - name: Upload gem
@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Set up Ruby
-        uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1.325.0
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
         with:
           ruby-version: ruby
       - name: Download gem
