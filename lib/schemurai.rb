@@ -149,8 +149,7 @@ module Schemurai
 
     private def build_validator(root, content:, format:)
       evaluator = if @compiler
-        program = @compiler.compile(root)
-        VM::Evaluator.new(@graph, @compiler, program, content: content, format: format)
+        @compiler.evaluator(root, content: content, format: format)
       else
         Internal::Evaluator.new(@graph, root, content: content, format: format)
       end

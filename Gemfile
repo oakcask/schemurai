@@ -1,6 +1,7 @@
 source "https://rubygems.org"
 git_source(:github) { |repo_name| "https://github.com/#{repo_name}" }
 gemspec
+gem "rake", require: false, groups: %i[default documentation]
 
 group :test do
   gem "rspec", require: false
@@ -17,7 +18,6 @@ group :type_check do
 end
 
 group :documentation do
-  gem "rake", require: false
   # Installing rdoc by bundler causes plugin loading issue.
   # https://github.com/ruby/rubygems/issues/9250
   # https://github.com/ruby/rubygems/issues/9285

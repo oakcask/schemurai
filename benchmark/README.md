@@ -90,6 +90,28 @@ bundle exec ruby benchmark/repeated_validation.rb
 through the compiled validators. Schema compilation is outside the measured
 section.
 
+`memory_retention.rb` repeatedly uses one native validator and prints a CSV row
+after each full GC. It reports RSS on Linux, Ruby heap state, native evaluator
+size, and the containers retained directly by the evaluator. The default run
+performs one million successful `valid?` calls in 20 batches:
+
+```sh
+bundle exec ruby benchmark/memory_retention.rb
+```
+
+Use `BENCHMARK_OPERATION` (`valid?` or `validate`), `BENCHMARK_INSTANCE`
+(`valid` or `invalid`), and `BENCHMARK_SCHEMA` (`recursive` or `dynamic`) to
+select the path. Set `BENCHMARK_FRESH=1` to allocate a new instance for every
+call. `BENCHMARK_BATCH_SIZE`, `BENCHMARK_BATCHES`, and `BENCHMARK_WARMUP`
+control the run length. For example, the long detailed-validation run used for
+the native-backend memory investigation can be reproduced with:
+
+```sh
+BENCHMARK_OPERATION=validate BENCHMARK_INSTANCE=invalid \
+  BENCHMARK_BATCH_SIZE=20000 BENCHMARK_BATCHES=100 \
+  bundle exec ruby benchmark/memory_retention.rb
+```
+
 `error_validation.rb` measures detailed validation over the Draft 2020-12
 official suite together with official-suite-shaped fixtures for a large object
 and a large `anyOf`. It reports both allocated objects and throughput. The large
