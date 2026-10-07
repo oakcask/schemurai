@@ -3,6 +3,41 @@
 The benchmark suite measures Schemurai performance for regression detection and
 performance development. Each runner verifies correctness before measuring.
 
+`unique_items.rb` reproduces the quadratic `uniqueItems` workload using distinct
+numbers and nested objects, plus duplicates at the end. It measures both Ruby
+and VM backends through `valid?` and `validate`, excluding schema compilation.
+Each result is the median elapsed time per call after a correctness/warmup call.
+
+```sh
+bundle exec ruby benchmark/unique_items.rb
+JSON_SCHEMA_VALIDATOR_LIB=../baseline/lib bundle exec ruby benchmark/unique_items.rb
+```
+
+`BENCHMARK_SIZE` (default 2000) and `BENCHMARK_ITERATIONS` (default 5) control
+the workload. Set `BENCHMARK_JSON` to save the size, iterations, and timings as
+JSON for comparison. Use the same Ruby version and settings for both runs.
+
+Measured on Ruby 4.0.6, x86_64-linux, with 2000 elements and 5 iterations,
+comparing the original pairwise implementation with fingerprint buckets:
+
+| Backend / `valid?` workload | Before (ms) | After (ms) | Speedup |
+| --- | ---: | ---: | ---: |
+| Ruby / distinct numbers | 392.484 | 0.351 | 1117x |
+| Ruby / distinct nested objects | 1685.353 | 3.635 | 464x |
+| VM / distinct numbers | 222.572 | 0.308 | 722x |
+| VM / distinct nested objects | 826.228 | 3.414 | 242x |
+
+Across all 16 combinations (including duplicates at the end and detailed
+`validate` calls), speedups ranged from 228x to 1290x. At 10000 elements,
+the new implementation took 1.5–1.9 ms for numbers and 17–19 ms for nested
+objects. These are local measurements, not portable performance guarantees.
+
+The index takes linear additional space and avoids pairwise comparisons when
+fingerprints differ. Matching fingerprints still use JSON equality, preserving
+numeric equality and object key order independence. Heavy hash collisions can
+still cause quadratic comparisons. Arrays of at most 16 items use direct
+comparisons to avoid indexing overhead.
+
 `draft7.rb`, `draft2019_09.rb`, and `draft2020_12.rb` measure all supported
 required and top-level optional cases from the corresponding official suite.
 They report validator construction, end-to-end suite execution, and validation
