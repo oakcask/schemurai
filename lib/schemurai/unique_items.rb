@@ -13,15 +13,25 @@ module Schemurai
         end
 
         buckets = {}
-        values.each do |item|
+        # Store a single index until a collision needs a bucket array.
+        index = 0
+        while index < values.length
+          item = values[index]
           fingerprint = json_fingerprint(item)
           if (bucket = buckets[fingerprint])
-            return false if bucket.any? { |previous| json_equal?(previous, item) }
+            if bucket.is_a?(Integer)
+              return false if json_equal?(values[bucket], item)
 
-            bucket << item
+              buckets[fingerprint] = [bucket, index]
+            else
+              return false if bucket.any? { |previous| json_equal?(values[previous], item) }
+
+              bucket << index
+            end
           else
-            buckets[fingerprint] = [item]
+            buckets[fingerprint] = index
           end
+          index += 1
         end
         true
       end
@@ -36,14 +46,19 @@ module Schemurai
           number = value.to_f
           (number.finite? && number == number.to_i) ? number.to_i.hash : number.hash
         when Array
-          [value.class, value.map { |item| json_fingerprint(item) }].hash
+          # Mask before multiplication to keep intermediate values immediate
+          # integers; hash each step to retain order without temporary arrays.
+          fingerprint = value.class.hash
+          value.each { |item| fingerprint = (((fingerprint & 0x1fffffff) * 31) ^ json_fingerprint(item)).hash }
+          fingerprint
         when Hash
           # Object key order is immaterial. Hash collisions are resolved using
           # json_equal?, so this fingerprint never decides equality itself.
-          entries = value.reduce(0) { |hash, (key, item)| hash ^ [key, json_fingerprint(item)].hash }
-          [value.class, value.length, entries].hash
+          entries = 0
+          value.each_pair { |key, item| entries ^= (((key.hash & 0x1fffffff) * 31) ^ json_fingerprint(item)).hash }
+          (value.class.hash ^ value.length ^ entries).hash
         else
-          [value.class, value].hash
+          value.hash
         end
       end
     end

@@ -16,6 +16,7 @@ cases = {
   "objects/duplicate-at-end" => [objects + [{"nested" => [numbers.last.to_f, {"active" => true}], "id" => numbers.last.to_f}], false]
 }
 results = {}
+allocations = {}
 puts "Ruby #{RUBY_VERSION}; size=#{size}; iterations=#{iterations} (median seconds/call)"
 [:ruby, :vm].each do |backend|
   validator = Schemurai.compile({"uniqueItems" => true}, backend: backend)
@@ -32,8 +33,12 @@ puts "Ruby #{RUBY_VERSION}; size=#{size}; iterations=#{iterations} (median secon
       seconds = samples.fetch(iterations / 2)
       key = "#{backend}/#{method}/#{name}"
       results[key] = seconds
-      puts "%s: %.6f" % [key, seconds]
+      GC.start
+      before = GC.stat(:total_allocated_objects)
+      iterations.times { run.call }
+      allocations[key] = (GC.stat(:total_allocated_objects) - before).fdiv(iterations)
+      puts "%s: %.6f; %.1f objects/call" % [key, seconds, allocations[key]]
     end
   end
 end
-File.write(ENV.fetch("BENCHMARK_JSON"), JSON.pretty_generate({size: size, iterations: iterations, results: results})) if ENV["BENCHMARK_JSON"]
+File.write(ENV.fetch("BENCHMARK_JSON"), JSON.pretty_generate({size: size, iterations: iterations, results: results, allocations: allocations})) if ENV["BENCHMARK_JSON"]

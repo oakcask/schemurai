@@ -13,6 +13,11 @@ RSpec.describe "uniqueItems" do
         ["signed zero", [0, -0.0]],
         ["fractional numbers", [1.5, 1.5]],
         ["large integral float", [2**100, (2**100).to_f]],
+        ["empty arrays", [[], []]],
+        ["empty objects", [{}, {}]],
+        ["strings", ["same", "same"]],
+        ["booleans", [false, false]],
+        ["nulls", [nil, nil]],
         ["nested numbers and reordered keys", [{"a" => [1, {"b" => 2}], "c" => nil}, {"c" => nil, "a" => [1.0, {"b" => 2.0}]}]]
       ].each do |name, pair|
         it "rejects duplicate #{name} in both array sizes", :aggregate_failures do
@@ -24,7 +29,7 @@ RSpec.describe "uniqueItems" do
       end
 
       it "keeps types, array order, and large integer precision distinct", :aggregate_failures do
-        instance = padding + [true, 1, "1", nil, false, [1, 2], [2, 1], 2**53, 2**53 + 1, 10**400, 10**400 + 1]
+        instance = padding + [true, 1, "1", nil, false, [], {}, [1, 2], [2, 1], 2**53, 2**53 + 1, 10**400, 10**400 + 1]
         expect(validator.valid?(instance)).to be(true)
         expect(validator.validate(instance)).to be_valid
       end
