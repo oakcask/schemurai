@@ -4,6 +4,7 @@ require "base64"
 require "json"
 require_relative "../evaluation"
 require_relative "../error_message"
+require_relative "../unique_items"
 require_relative "compiler"
 
 module Schemurai
@@ -49,6 +50,8 @@ module Schemurai
     private_constant :EvaluationBuffer
 
     class Evaluator
+      include Internal::UniqueItems
+
       MISSING_SEGMENT = Object.new.freeze
       DECIMAL_CACHE_LIMIT = 16
 
@@ -552,17 +555,7 @@ module Schemurai
         length = value.length
         return false if rules.max_items && length > rules.max_items
         return false if rules.min_items && length < rules.min_items
-        if rules.unique
-          index = 1
-          while index < length
-            previous_index = 0
-            while previous_index < index
-              return false if json_equal?(value[previous_index], value[index])
-              previous_index += 1
-            end
-            index += 1
-          end
-        end
+        return false if rules.unique && !unique_items?(value)
 
         if (prefix_items = rules.prefix_items)
           prefix_items.each_with_index do |child, index|
@@ -616,25 +609,10 @@ module Schemurai
 
           add_error("minItems") { Internal::ErrorMessage.size("minItems", rules.min_items, value.length) }
         end
-        if rules.unique
-          duplicate = false
-          index = 1
-          while index < value.length && !duplicate
-            previous_index = 0
-            while previous_index < index
-              if json_equal?(value[previous_index], value[index])
-                duplicate = true
-                break
-              end
-              previous_index += 1
-            end
-            index += 1
-          end
-          if duplicate
-            return Evaluation.invalid unless @errors
+        if rules.unique && !unique_items?(value)
+          return Evaluation.invalid unless @errors
 
-            add_error("uniqueItems") { Internal::ErrorMessage.unique_items }
-          end
+          add_error("uniqueItems") { Internal::ErrorMessage.unique_items }
         end
 
         if (prefix_items = rules.prefix_items)

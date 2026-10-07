@@ -4,10 +4,13 @@ require "json"
 require "base64"
 require_relative "evaluation"
 require_relative "error_message"
+require_relative "unique_items"
 
 module Schemurai
   module Internal
     class Evaluator
+      include UniqueItems
+
       MISSING_SEGMENT = Object.new.freeze
 
       def backend = :ruby
@@ -226,11 +229,7 @@ module Schemurai
         length = value.length
         return false if schema.key?("maxItems") && length > schema["maxItems"]
         return false if schema.key?("minItems") && length < schema["minItems"]
-        if schema["uniqueItems"]
-          value.each_with_index do |item, index|
-            return false if value[0...index].any? { |previous| json_equal?(previous, item) }
-          end
-        end
+        return false if schema["uniqueItems"] && !unique_items?(value)
 
         prefix_items = schema["prefixItems"]
         if prefix_items.is_a?(Array)
@@ -555,12 +554,7 @@ module Schemurai
         limit(schema, "maxItems", value.length) { |actual, expected| actual <= expected }
         limit(schema, "minItems", value.length) { |actual, expected| actual >= expected }
 
-        if schema["uniqueItems"]
-          duplicate = value.each_with_index.any? do |item, index|
-            value[0...index].any? { |previous| json_equal?(previous, item) }
-          end
-          add_error("uniqueItems") { ErrorMessage.unique_items } if duplicate
-        end
+        add_error("uniqueItems") { ErrorMessage.unique_items } if schema["uniqueItems"] && !unique_items?(value)
 
         prefix_items = schema["prefixItems"]
         if prefix_items.is_a?(Array)
