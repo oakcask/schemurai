@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.3](https://github.com/oakcask/schemurai/compare/v2.2.2...v2.2.3) (2026-10-07)
+
+
+### Performance Improvements
+
+* optimize VM evaluation tracking ([#152](https://github.com/oakcask/schemurai/issues/152)) ([835943e](https://github.com/oakcask/schemurai/commit/835943e92e5231b3644ce13f4fd495cfe842bb60))
+
 ## [2.2.2](https://github.com/oakcask/schemurai/compare/v2.2.1...v2.2.2) (2026-10-07)
 
 
