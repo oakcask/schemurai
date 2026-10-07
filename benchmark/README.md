@@ -7,6 +7,8 @@ performance development. Each runner verifies correctness before measuring.
 numbers and nested objects, plus duplicates at the end. It measures both Ruby
 and VM backends through `valid?` and `validate`, excluding schema compilation.
 Each result is the median elapsed time per call after a correctness/warmup call.
+It also reports average allocated objects per call using
+`GC.stat(:total_allocated_objects)` in a separate measurement after `GC.start`.
 
 ```sh
 bundle exec ruby benchmark/unique_items.rb
@@ -15,7 +17,8 @@ JSON_SCHEMA_VALIDATOR_LIB=../baseline/lib bundle exec ruby benchmark/unique_item
 
 `BENCHMARK_SIZE` (default 2000) and `BENCHMARK_ITERATIONS` (default 5) control
 the workload. Set `BENCHMARK_JSON` to save the size, iterations, and timings as
-JSON for comparison. Use the same Ruby version and settings for both runs.
+JSON for comparison, including an `allocations` map alongside the timing
+`results` map. Use the same Ruby version and settings for both runs.
 
 Measured on Ruby 4.0.6, x86_64-linux, with 2000 elements and 5 iterations,
 comparing the original pairwise implementation with fingerprint buckets:
@@ -37,6 +40,28 @@ fingerprints differ. Matching fingerprints still use JSON equality, preserving
 numeric equality and object key order independence. Heavy hash collisions can
 still cause quadratic comparisons. Arrays of at most 16 items use direct
 comparisons to avoid indexing overhead.
+
+The allocation optimization stores a single index per fingerprint and creates
+a bucket array only for collisions. Structural fingerprints combine integer
+hashes directly instead of allocating intermediate arrays.
+
+Compared with the initial fingerprint implementation (`d8edff2`), on Ruby 4.0.6,
+x86_64-linux, with 2000 elements and 101 iterations:
+
+| Ruby / `valid?` workload | Before objects/call | After objects/call | Before (ms) | After (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Distinct numbers | 2001 | 1 | 0.302 | 0.268 |
+| Numbers, duplicate at end | 2002 | 1 | 0.287 | 0.269 |
+| Distinct nested objects | 18001 | 1 | 3.343 | 1.910 |
+| Nested objects, duplicate at end | 18017 | 8 | 3.441 | 1.905 |
+
+Across all 16 backend/method/workload combinations, allocations fell by
+99.06–99.99% and elapsed time fell by 6–45%. At 10000 elements and 31
+iterations, allocations fell by at least 99.81% and elapsed time fell by
+10–44%. At 17 elements (just above the indexing threshold), all 16 timings
+also improved; fixed validation/error overhead limited allocation reduction
+for Ruby `validate` with duplicate numbers to 49%. Arrays of at most 16 items
+still use the unchanged direct comparison path. These are local measurements.
 
 `draft7.rb`, `draft2019_09.rb`, and `draft2020_12.rb` measure all supported
 required and top-level optional cases from the corresponding official suite.
