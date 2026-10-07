@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.2](https://github.com/oakcask/schemurai/compare/v2.2.1...v2.2.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* use gemspec Ruby requirement ([#124](https://github.com/oakcask/schemurai/issues/124)) ([167e3d3](https://github.com/oakcask/schemurai/commit/167e3d3d82809f0029ae81224389c5dcec12e7ed))
+
+
+### Performance Improvements
+
+* index unique items by JSON fingerprints ([#150](https://github.com/oakcask/schemurai/issues/150)) ([61cd425](https://github.com/oakcask/schemurai/commit/61cd4252f0cb7895328e31287476368ee2a48b69))
+* reduce unique items allocations ([#151](https://github.com/oakcask/schemurai/issues/151)) ([c4f6f77](https://github.com/oakcask/schemurai/commit/c4f6f77a8cd5ac111f10622b4b92eaa47eb12916))
+
 ## [2.2.1](https://github.com/oakcask/schemurai/compare/v2.2.0...v2.2.1) (2026-09-09)
 
 
