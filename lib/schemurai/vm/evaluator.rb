@@ -2,6 +2,7 @@
 
 require "base64"
 require "json"
+require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ruby 3.4.
 require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
@@ -13,8 +14,10 @@ module Schemurai
       attr_reader :evaluated_properties, :evaluated_items
 
       def initialize
-        @evaluated_properties = []
-        @evaluated_items = []
+        # Applicators can overlap. Array membership makes collecting and merging
+        # their annotations quadratic in the number of instance locations.
+        @evaluated_properties = Set.new
+        @evaluated_items = Set.new
       end
 
       def valid? = true
@@ -26,25 +29,23 @@ module Schemurai
       end
 
       def record_property(name)
-        @evaluated_properties << name unless @evaluated_properties.include?(name)
+        @evaluated_properties.add(name)
         self
       end
 
       def record_item(index)
-        @evaluated_items << index unless @evaluated_items.include?(index)
+        @evaluated_items.add(index)
         self
       end
 
       def merge(other)
         return Evaluation.invalid unless other.valid?
 
-        merge_locations(@evaluated_properties, other.evaluated_properties)
-        merge_locations(@evaluated_items, other.evaluated_items)
+        properties = other.evaluated_properties
+        items = other.evaluated_items
+        @evaluated_properties.merge(properties) unless properties.empty?
+        @evaluated_items.merge(items) unless items.empty?
         self
-      end
-
-      private def merge_locations(target, locations)
-        locations.each { |location| target << location unless target.include?(location) }
       end
     end
     private_constant :EvaluationBuffer
@@ -652,7 +653,7 @@ module Schemurai
           matched = nil
           index = 0
           while index < value.length
-            (matched ||= []) << index if trial_at(contains, value[index], index, "contains").valid?
+            (matched ||= []) << index if trial(contains, value[index]).valid?
             index += 1
           end
           matched_count = matched ? matched.length : 0
@@ -873,7 +874,7 @@ module Schemurai
           matches = 0
           index = 0
           while index < operand.length
-            result = trial_at(operand[index], value, MISSING_SEGMENT, "anyOf", index)
+            result = trial(operand[index], value)
             if result.valid?
               matches += 1
               evaluation = evaluation.merge(result)
@@ -886,7 +887,7 @@ module Schemurai
           matched_evaluation = nil
           index = 0
           while index < operand.length
-            result = trial_at(operand[index], value, MISSING_SEGMENT, "oneOf", index)
+            result = trial(operand[index], value)
             if result.valid?
               matches += 1
               matched_evaluation = result
@@ -899,9 +900,9 @@ module Schemurai
             add_error("oneOf") { Internal::ErrorMessage.one_of(matches) }
           end
         when :not
-          add_error("not") { Internal::ErrorMessage.not } if trial_at(operand, value, MISSING_SEGMENT, "not").valid?
+          add_error("not") { Internal::ErrorMessage.not } if trial(operand, value).valid?
         when :conditional
-          condition = trial_at(operand.condition, value, MISSING_SEGMENT, "if")
+          condition = trial(operand.condition, value)
           condition_valid = condition.valid?
           evaluation = evaluation.merge(condition) if condition_valid
           if condition_valid && operand.then_branch
@@ -916,12 +917,24 @@ module Schemurai
       private def trial(program, value)
         saved_errors = @errors
         saved_count = @error_count
+        saved_instance_path = @instance_path
         @errors = nil
         @error_count = 0
+        # Trials retain annotations, but discard errors. Descendants therefore
+        # need neither instance nor schema paths until the trial has returned.
+        if saved_instance_path
+          saved_schema_path = @schema_path
+          @instance_path = nil
+          @schema_path = nil
+        end
         evaluate(program, value)
       ensure
         @errors = saved_errors
         @error_count = saved_count
+        if saved_instance_path
+          @instance_path = saved_instance_path
+          @schema_path = saved_schema_path
+        end
       end
 
       private def evaluate_at(program, instance, instance_segment, schema_segment, child_segment = MISSING_SEGMENT)
@@ -943,23 +956,6 @@ module Schemurai
         @schema_path << schema_segment
         @schema_path << child_segment unless child_segment.equal?(MISSING_SEGMENT)
         evaluate(program, instance)
-      ensure
-        @schema_path.pop unless child_segment.equal?(MISSING_SEGMENT)
-        @schema_path.pop
-        @instance_path.pop unless instance_segment.equal?(MISSING_SEGMENT)
-      end
-
-      private def trial_at(program, instance, instance_segment, schema_segment, child_segment = MISSING_SEGMENT)
-        return trial(program, instance) unless @instance_path
-
-        trial_at_with_path(program, instance, instance_segment, schema_segment, child_segment)
-      end
-
-      private def trial_at_with_path(program, instance, instance_segment, schema_segment, child_segment)
-        @instance_path << instance_segment unless instance_segment.equal?(MISSING_SEGMENT)
-        @schema_path << schema_segment
-        @schema_path << child_segment unless child_segment.equal?(MISSING_SEGMENT)
-        trial(program, instance)
       ensure
         @schema_path.pop unless child_segment.equal?(MISSING_SEGMENT)
         @schema_path.pop

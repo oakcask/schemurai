@@ -3,6 +3,50 @@
 require_relative "spec_helper"
 
 RSpec.describe "the VM backend" do
+  it "unions overlapping annotations and clears them between validations", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
+    schemas_and_instances = [
+      [
+        {"anyOf" => [
+          {"properties" => {"a" => true}},
+          {"properties" => {"a" => true, "b" => true}},
+          {"properties" => {"extra" => true}, "required" => ["missing"]}
+        ], "unevaluatedProperties" => false},
+        {"a" => 1, "b" => 2}, {"extra" => 3}
+      ],
+      [
+        {"allOf" => [
+          {"prefixItems" => [true]},
+          {"contains" => {"type" => "integer"}}
+        ], "unevaluatedItems" => false},
+        [1, 2, 3], [1, "extra"]
+      ]
+    ]
+    schemas_and_instances.each do |schema, valid, invalid|
+      schema = schema.merge("$schema" => "https://json-schema.org/draft/2020-12/schema")
+      vm = Schemurai.compile(schema, backend: :vm)
+      ruby = Schemurai.compile(schema, backend: :ruby)
+      [valid, invalid, valid, invalid].each do |instance|
+        expect(vm.valid?(instance)).to eq(ruby.valid?(instance))
+        expect(vm.validate(instance).errors.map(&:to_h)).to eq(ruby.validate(instance).errors.map(&:to_h))
+      end
+    end
+  end
+
+  it "restores error paths after nested speculative branches", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
+    schema = {"properties" => {"a/b" => {
+      "if" => {"anyOf" => [{"contains" => {"type" => "integer"}}, false]},
+      "then" => {"items" => {"oneOf" => [{"type" => "integer"}, {"type" => "boolean"}]}},
+      "else" => {"not" => true}
+    }, "~key" => false}}
+    vm = Schemurai.compile(schema, backend: :vm)
+    ruby = Schemurai.compile(schema, backend: :ruby)
+
+    [{"a/b" => [1, "bad"], "~key" => nil}, {"a/b" => ["bad"]}].each do |instance|
+      expect(vm.validate(instance).errors.map(&:to_h)).to eq(ruby.validate(instance).errors.map(&:to_h))
+      expect(vm.valid?(instance)).to be(false)
+    end
+  end
+
   it "compiles schema nodes into frozen instruction streams", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
     validator = Schemurai.compile(
       {"type" => "object", "properties" => {"name" => {"type" => "string"}}},
