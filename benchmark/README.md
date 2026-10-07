@@ -3,6 +3,80 @@
 The benchmark suite measures Schemurai performance for regression detection and
 performance development. Each runner verifies correctness before measuring.
 
+## VM evaluation tracking
+
+`vm_evaluation.rb` measures `valid?` and detailed `validate` on large objects
+and arrays whose schemas need evaluated locations. The object combines two
+overlapping `anyOf` branches with `unevaluatedProperties`; the array combines
+`contains` with `unevaluatedItems`. Each has a valid instance and an invalid
+instance with one trailing unevaluated location. The runner checks validity
+and the exact error keyword and paths before measuring, and excludes compilation.
+
+```sh
+bundle exec ruby benchmark/vm_evaluation.rb
+JSON_SCHEMA_VALIDATOR_LIB=../baseline/lib bundle exec ruby benchmark/vm_evaluation.rb
+BENCHMARK_WIDTH=2000 BENCHMARK_ITERATIONS=31 BENCHMARK_JSON=vm-results.json \
+  bundle exec ruby benchmark/vm_evaluation.rb
+```
+
+The backend is explicitly VM. `BENCHMARK_WIDTH` defaults to 1000 and
+`BENCHMARK_ITERATIONS` to 31. Results are median elapsed time per call after
+five warmup calls, plus average allocated objects per call measured separately
+after `GC.start`. JSON output includes Ruby version, width, and iterations.
+
+Compared with `e767a05` on Ruby 4.0.6, x86_64-linux, without YJIT,
+using 1000 locations and 31 iterations:
+
+| VM workload | Before (ms) | After (ms) | Speedup |
+| --- | ---: | ---: | ---: |
+| Object / `valid?` / valid | 15.676 | 0.767 | 20.4x |
+| Object / `validate` / invalid | 15.248 | 0.782 | 19.5x |
+| Array / `valid?` / valid | 4.003 | 0.556 | 7.2x |
+| Array / `validate` / invalid | 4.126 | 0.600 | 6.9x |
+
+All eight method/validity combinations improved by 6.9–20.4x. At 2000
+locations, the range was 12.8–33.1x; at 16 locations, it was 1.09–1.30x.
+Warmed allocation counts were unchanged (1–15 objects per call).
+
+VM evaluation buffers now use sets for recording, merging, and looking up
+evaluated locations, avoiding repeated linear scans. This changes annotation
+collection and membership checks from quadratic to expected linear work.
+Sets require linear hash storage and are reused between validations.
+Speculative branches retain annotations but skip error path maintenance;
+paths are restored before reporting errors outside the branch.
+
+The existing workloads were also compared with 5 seconds of measurement,
+2 seconds of warmup, `SCHEMURAI_BACKEND=vm`, and `BENCHMARK_ONLY=validate`:
+
+| Workload | Before | After | Speedup |
+| --- | ---: | ---: | ---: |
+| Draft 7 / `valid?`, full suite | 0.944 ms | 0.942 ms | 1.00x |
+| Draft 2019-09 / `valid?`, full suite | 2.08 ms | 2.10 ms | 0.99x |
+| Draft 2020-12 / `valid?`, full suite | 2.17 ms | 2.20 ms | 0.99x |
+| Repeated document / `valid?` | 3.20 μs | 3.21 μs | 1.00x |
+| Official suite / `validate` | 5.83 ms | 5.89 ms | 0.99x |
+| Large fixtures / `valid?` | 0.601 ms | 0.618 ms | 0.97x |
+| Large fixtures / `validate` | 9.88 ms | 2.52 ms | 3.93x |
+
+The last three rows use `error_validation.rb` with width 1000 and 20 allocation
+iterations. These times are inverse mean throughput from `benchmark-ips`;
+unlike the tracking table above, they are not medians.
+
+The 2x target is exceeded for large annotation workloads and the existing
+large detailed-validation workload, not for every VM operation. Small official
+cases and ordinary repeated validation remain close to baseline, with measured
+differences of up to about 3%. These are local measurements, not portable
+performance guarantees.
+
+Validation: the default RSpec suite passes (6522 examples, 1287 pending), as do
+the complete-catalog Ruby/VM differential and Ractor tests, and RuboCop.
+Forcing VM globally with `SCHEMURAI_BACKEND=vm bundle exec rspec` leaves two
+pre-existing failures, both reproduced against the baseline: invalid schema
+types in `spec/schemurai_spec.rb` and out-of-domain numeric coercion in
+`spec/compatibility_domain_spec.rb`. No new failures were introduced.
+
+## Unique items
+
 `unique_items.rb` reproduces the quadratic `uniqueItems` workload using distinct
 numbers and nested objects, plus duplicates at the end. It measures both Ruby
 and VM backends through `valid?` and `validate`, excluding schema compilation.
