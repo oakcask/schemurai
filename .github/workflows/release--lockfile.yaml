@@ -34,7 +34,20 @@ jobs:
       # release-please does not update the Bundler 4 CHECKSUMS entry for the
       # gem being released. Regenerate it whenever the release PR is updated.
       - run: bundle lock
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Sync native crate version with the gem
+        run: |
+          ruby -Ilib -rschemurai/version <<'RUBY'
+          path = "ext/schemurai_native/Cargo.toml"
+          manifest = File.read(path)
+          manifest.sub!(/^(\[package\]\nname = "schemurai-native"\n)version = "[^"]+"$/) do
+            "#{$1}version = #{Schemurai::VERSION.dump}"
+          end || abort("schemurai-native package version not found")
+          File.write(path, manifest)
+          RUBY
+          cargo update --manifest-path ext/schemurai_native/Cargo.toml --workspace
       - uses: int128/update-generated-files-action@1d6d8fac356eabbd925f4c3cab43d871bab249cd # v2.114.0
         with:
-          commit-message: "chore: regenerate lockfile"
+          commit-message: "chore: sync release versions and lockfiles"
           token: ${{ steps.gh-token-gen.outputs.token }}
