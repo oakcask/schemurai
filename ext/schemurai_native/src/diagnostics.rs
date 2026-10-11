@@ -111,6 +111,20 @@ impl Execution<'_> {
         if kind == TYPE_UNSUPPORTED {
             return Err(Unsupported);
         }
+        self.collect_kind::<ANNOTATIONS>(report, node, value, depth, active, kind)
+    }
+    fn collect_kind<const ANNOTATIONS: bool>(
+        &self,
+        report: &mut Report,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind: i32,
+    ) -> Result<Tracked, Verdict> {
+        if depth > MAX_EVALUATION_DEPTH {
+            return Err(Unsupported);
+        }
         let frame = scope::ScopeFrame {
             resource: self.metadata[node].resource,
             parent: active.scope,
@@ -630,9 +644,9 @@ impl Execution<'_> {
                     for (index, &child) in nodes.iter().enumerate() {
                         let result = report.scoped(&format!("allOf/{index}"), None, |r| {
                             if tracked {
-                                self.collect::<true>(r, child, value, depth + 1, active)
+                                self.collect_kind::<true>(r, child, value, depth + 1, active, kind)
                             } else {
-                                self.collect::<false>(r, child, value, depth + 1, active)
+                                self.collect_kind::<false>(r, child, value, depth + 1, active, kind)
                             }
                         })?;
                         if tracked {
@@ -661,7 +675,9 @@ impl Execution<'_> {
                         let result = evaluation::scan_branches(
                             nodes,
                             evaluation::BranchPolicy::Complete,
-                            |child| self.eval(child, value, depth + 1, active),
+                            |child| {
+                                self.eval_with_kind(child, value, depth + 1, active, Some(kind))
+                            },
                         )?;
                         evaluation::BranchMatches {
                             matches: result.matches,
@@ -674,16 +690,24 @@ impl Execution<'_> {
                         prior.merge_diagnostics(result.coverage)?;
                     }
                 }
-                Op::Not(child) => match self.eval(*child, value, depth + 1, active) {
-                    Unsupported => return Err(Unsupported),
-                    Valid => report.add("not", source, value, 0),
-                    Invalid => {}
-                },
+                Op::Not(child) => {
+                    match self.eval_with_kind(*child, value, depth + 1, active, Some(kind)) {
+                        Unsupported => return Err(Unsupported),
+                        Valid => report.add("not", source, value, 0),
+                        Invalid => {}
+                    }
+                }
                 Op::Conditional(condition, yes, no) => {
                     let condition = if tracked {
                         self.eval_tracked_kind(*condition, value, depth + 1, active, kind)
                     } else {
-                        Tracked::new(self.eval(*condition, value, depth + 1, active))
+                        Tracked::new(self.eval_with_kind(
+                            *condition,
+                            value,
+                            depth + 1,
+                            active,
+                            Some(kind),
+                        ))
                     };
                     let mut coverage = Tracked::new(Valid);
                     let (child, segment) = match condition.status {
@@ -699,9 +723,16 @@ impl Execution<'_> {
                     if let Some(child) = child {
                         let result = report.scoped(segment, None, |r| {
                             if tracked {
-                                self.collect::<true>(r, *child, value, depth + 1, active)
+                                self.collect_kind::<true>(r, *child, value, depth + 1, active, kind)
                             } else {
-                                self.collect::<false>(r, *child, value, depth + 1, active)
+                                self.collect_kind::<false>(
+                                    r,
+                                    *child,
+                                    value,
+                                    depth + 1,
+                                    active,
+                                    kind,
+                                )
                             }
                         })?;
                         if tracked {
@@ -733,9 +764,9 @@ impl Execution<'_> {
                     };
                     let result = report.scoped(keyword, None, |r| {
                         if tracked {
-                            self.collect::<true>(r, target, value, depth + 1, active)
+                            self.collect_kind::<true>(r, target, value, depth + 1, active, kind)
                         } else {
-                            self.collect::<false>(r, target, value, depth + 1, active)
+                            self.collect_kind::<false>(r, target, value, depth + 1, active, kind)
                         }
                     })?;
                     if tracked {

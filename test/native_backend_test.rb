@@ -39,6 +39,23 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "reuses guarded kinds across same-location applicators and rechecks mutations" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    integer = {"type" => "integer", "minimum" => 1}
+    object = {"properties" => {"x" => integer}, "required" => ["x"]}
+    schemas = [{"anyOf" => [integer, object]}, {"oneOf" => [integer, object]},
+      {"allOf" => [object, {"not" => integer}]}, {"if" => integer, "then" => false, "else" => object},
+      {"$defs" => {"object" => object}, "$ref" => "#/$defs/object"}].map { |schema| dialect.merge(schema) }
+    expect_native_policy_results(schemas, [{"x" => 1}, {"x" => 0}, {}, 1, "bad"])
+    native = Schemurai.compile(schemas.first, backend: :native)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    value = {"x" => 1}
+    expect(runner.valid?(value)).to be(true)
+    value[:foreign] = 1
+    expect(runner.valid?(value)).to be_nil
+    expect(runner.diagnostics(value)).to be_nil
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}
