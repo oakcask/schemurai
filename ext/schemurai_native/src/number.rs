@@ -96,14 +96,13 @@ pub(super) fn integer_fingerprint(integer: Value) -> u64 {
     let mut words = [0_u64; 16];
     let sign = unsafe { sn_integer1024(integer, words.as_mut_ptr()) };
     if sign.abs() > 1 {
-        // No finite Float can equal this magnitude. Mix bounded low words,
-        // sign, and magnitude size; full equality resolves all collisions,
-        // including integers that differ only in unsampled high digits.
-        let len = words
-            .iter()
-            .rposition(|&word| word != 0)
-            .map_or(0, |index| index + 1);
-        return integer_bucket(&words[..len], sign, unsafe { sn_integer_bytes(integer) });
+        // No finite Float can equal this magnitude, so the full native digit
+        // hash needs no Float normalization. Sampling only low digits makes
+        // mixed/nested uniqueItems quadratic for differences above bit 1024
+        // and collapses large enum indexes into a single candidate bucket.
+        // The adapter hashes the original Bignum without Ruby dispatch or
+        // allocation; exact equality still decides every hash collision.
+        return mix(big_only_fingerprint(integer).unwrap() ^ TYPE_NUMBER as u64);
     }
     exact_integer_fingerprint(&words, sign)
 }

@@ -331,7 +331,6 @@ int sn_wide_integer_compare(VALUE value, VALUE bound) {
     if (FIXNUM_P(value)) return rb_big_sign(bound) ? -1 : 1;
     return FIX2INT(rb_big_cmp(value, bound));
 }
-size_t sn_integer_bytes(VALUE value) { return rb_absint_size(value, NULL); }
 int sn_integer1024(VALUE value, uint64_t *words) {
     return rb_integer_pack(value, words, 16, sizeof(uint64_t), 0,
         INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);

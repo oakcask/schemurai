@@ -58,7 +58,6 @@ unsafe extern "C" {
     fn sn_big_equal(big: Value, other: Value) -> i32;
     fn sn_big_order(left: Value, right: Value) -> i32;
     fn sn_wide_integer_compare(value: Value, bound: Value) -> i32;
-    fn sn_integer_bytes(value: Value) -> usize;
     fn sn_float(value: Value) -> f64;
     fn sn_is_float(value: Value) -> i32;
     fn sn_is_rational(value: Value) -> i32;
