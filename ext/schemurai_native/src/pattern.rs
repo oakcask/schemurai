@@ -55,17 +55,17 @@ impl Pattern {
     }
 
     pub(super) fn compile(value: Value) -> Self {
-        if unsafe { sn_kind(value) } != 64 {
+        if unsafe { sn_kind(value) } != TYPE_STRING {
             return Self::Unsupported;
         }
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
-        if encoding == 0 {
+        if encoding == ENCODING_OTHER {
             return Self::Unsupported;
         }
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        if encoding == 2 && !bytes.is_ascii() {
+        if encoding == ENCODING_ASCII && !bytes.is_ascii() {
             return Self::Unsupported;
         }
         let Some(source) = std::str::from_utf8(bytes).ok().and_then(translate) else {
@@ -116,7 +116,7 @@ impl Pattern {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
-        if encoding == 0 {
+        if encoding == ENCODING_OTHER {
             return Unsupported;
         }
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
@@ -124,11 +124,12 @@ impl Pattern {
     }
 
     pub(super) fn eval_bytes(&self, bytes: &[u8], encoding: i32) -> Verdict {
-        if encoding == 0 || matches!(self, Self::Unsupported) {
+        if encoding == ENCODING_OTHER || matches!(self, Self::Unsupported) {
             return Unsupported;
         }
-        if encoding != 3
-            && ((encoding == 2 && !bytes.is_ascii()) || std::str::from_utf8(bytes).is_err())
+        if encoding != ENCODING_SEVEN_BIT
+            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
+                || std::str::from_utf8(bytes).is_err())
         {
             return Unsupported;
         }
@@ -156,7 +157,7 @@ fn scan_items(
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
-        if encoding == -128 {
+        if encoding == -TYPE_UNSUPPORTED {
             return Unsupported;
         }
         if encoding < 0 {
@@ -168,12 +169,13 @@ fn scan_items(
             }
             continue;
         }
-        if encoding == 0 {
+        if encoding == ENCODING_OTHER {
             return Unsupported;
         }
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        if encoding != 3
-            && ((encoding == 2 && !bytes.is_ascii()) || std::str::from_utf8(bytes).is_err())
+        if encoding != ENCODING_SEVEN_BIT
+            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
+                || std::str::from_utf8(bytes).is_err())
         {
             return Unsupported;
         }

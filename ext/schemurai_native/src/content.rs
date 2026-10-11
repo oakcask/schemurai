@@ -45,7 +45,8 @@ impl Content {
             } else {
                 unsafe { sn_format_item_view(value, data.as_mut_ptr(), len.as_mut_ptr()) }
             };
-            let result = if kind == -128 || (JSON && !BASE64 && kind == 0) {
+            let result = if kind == -TYPE_UNSUPPORTED || (JSON && !BASE64 && kind == ENCODING_OTHER)
+            {
                 Unsupported
             } else if kind < 0 {
                 verdict(required == 0)
@@ -53,7 +54,7 @@ impl Content {
                 // Only the successful String view initializes these outputs.
                 let bytes = unsafe { byte_view(data.assume_init(), len.assume_init()) };
                 if JSON && !BASE64 {
-                    if kind == 2 && !bytes.is_ascii() {
+                    if kind == ENCODING_ASCII && !bytes.is_ascii() {
                         Unsupported
                     } else {
                         json(bytes)
@@ -136,11 +137,11 @@ impl Content {
         } else {
             if JSON {
                 let encoding = match (BORROWED, encoding) {
-                    (true, 1 | 3) => 1,
-                    (true, 2) => 2,
+                    (true, ENCODING_UTF8 | ENCODING_SEVEN_BIT) => ENCODING_UTF8,
+                    (true, ENCODING_ASCII) => ENCODING_ASCII,
                     _ => unsafe { sn_json_encoding(value) },
                 };
-                if encoding == 0 || (encoding == 2 && !bytes.is_ascii()) {
+                if encoding == ENCODING_OTHER || (encoding == ENCODING_ASCII && !bytes.is_ascii()) {
                     return Unsupported;
                 }
             }

@@ -17,7 +17,7 @@ pub(super) enum Format {
 }
 impl Format {
     pub(super) fn compile(name: Value) -> Self {
-        if unsafe { sn_kind(name) } != 64 {
+        if unsafe { sn_kind(name) } != TYPE_STRING {
             return Self::Unsupported;
         }
         let bytes = unsafe { string_bytes(name) };
@@ -91,7 +91,7 @@ fn scan_items(
         let mut data = std::ptr::null();
         let mut len = 0;
         let kind = unsafe { sn_format_item_view(value, &mut data, &mut len) };
-        let result = if kind == -128 {
+        let result = if kind == -TYPE_UNSUPPORTED {
             Unsupported
         } else if kind < 0 {
             verdict(required == 0)

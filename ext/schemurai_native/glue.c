@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <math.h>
 #include "big_sample.h"
+#include "protocol.h"
 
 /* The C layer adapts CRuby APIs to Rust's opaque VALUEs. */
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
@@ -66,7 +67,7 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
         sn_free(h->engine);
         h->engine = NULL;
         h->roots = NULL;
-        if (status == -2) rb_exc_raise(error);
+        if (status == SN_STATUS_EXCEPTION) rb_exc_raise(error);
         rb_raise(rb_eRuntimeError, "native compiler panicked");
     }
     return self;
@@ -79,7 +80,7 @@ static VALUE valid(VALUE self, VALUE instance) {
     int status = sn_valid(h->engine, instance);
     RB_GC_GUARD(instance);
     if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
-    return status == 2 ? Qnil : (status ? Qtrue : Qfalse);
+    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
 }
 void sn_pin(VALUE value) { rb_gc_mark(value); }
 VALUE sn_nil(void) { return Qnil; }
@@ -93,24 +94,24 @@ static int ordinary_key(VALUE key, VALUE value, VALUE context) {
     return ST_CONTINUE;
 }
 int sn_shallow_kind(VALUE value) {
-    if (NIL_P(value)) return 1;
-    if (value == Qtrue || value == Qfalse) return 2;
+    if (NIL_P(value)) return SN_TYPE_NULL;
+    if (value == Qtrue || value == Qfalse) return SN_TYPE_BOOLEAN;
     if (RB_TYPE_P(value, T_HASH)) {
-        if (CLASS_OF(value) != rb_cHash) return 128;
-        return 4;
+        if (CLASS_OF(value) != rb_cHash) return SN_TYPE_UNSUPPORTED;
+        return SN_TYPE_OBJECT;
     }
-    if (RB_TYPE_P(value, T_ARRAY)) return CLASS_OF(value) == rb_cArray ? 8 : 128;
-    if (RB_INTEGER_TYPE_P(value)) return 16 | 32;
+    if (RB_TYPE_P(value, T_ARRAY)) return CLASS_OF(value) == rb_cArray ? SN_TYPE_ARRAY : SN_TYPE_UNSUPPORTED;
+    if (RB_INTEGER_TYPE_P(value)) return SN_TYPE_NUMBER | SN_TYPE_INTEGER;
     if (RB_TYPE_P(value, T_FLOAT)) {
         double n = RFLOAT_VALUE(value);
-        return 16 | ((isfinite(n) && trunc(n) == n) ? 32 : 0);
+        return SN_TYPE_NUMBER | ((isfinite(n) && trunc(n) == n) ? SN_TYPE_INTEGER : 0);
     }
-    if (RB_TYPE_P(value, T_STRING)) return CLASS_OF(value) == rb_cString ? 64 : 128;
-    return 128; /* Out-of-domain objects are handled by the Ruby VM. */
+    if (RB_TYPE_P(value, T_STRING)) return CLASS_OF(value) == rb_cString ? SN_TYPE_STRING : SN_TYPE_UNSUPPORTED;
+    return SN_TYPE_UNSUPPORTED; /* Out-of-domain objects are handled by the Ruby VM. */
 }
 int sn_kind(VALUE value) {
     int kind = sn_shallow_kind(value);
-    if (kind != 4) return kind;
+    if (kind != SN_TYPE_OBJECT) return kind;
     /* Lookup paths check every key before calling Ruby's hash API. A record
      * walk instead checks keys as it visits them and uses native lookups. */
     int ordinary = 1;
@@ -120,37 +121,37 @@ int sn_kind(VALUE value) {
 #else
     rb_hash_foreach(value, ordinary_key, (VALUE)&ordinary);
 #endif
-    return ordinary ? 4 : 128;
+    return ordinary ? SN_TYPE_OBJECT : SN_TYPE_UNSUPPORTED;
 }
 /* Classification and borrowed storage for structural fingerprints. Hash
  * keys are checked by the iterator; no preliminary key walk occurs here.
  * The caller keeps the GVL and must not allocate Ruby objects or call Ruby.
  * Only Array/String initialize data and length; Hash/Boolean initialize
- * length; Float (kind 16) initializes number. Other kinds write no outputs. */
+ * length; Float (kind SN_TYPE_NUMBER) initializes number. Other kinds write no outputs. */
 int sn_fingerprint_view(VALUE value, const void **data, size_t *length, double *number) {
     if (RB_TYPE_P(value, T_ARRAY)) {
-        if (CLASS_OF(value) != rb_cArray) return 128;
+        if (CLASS_OF(value) != rb_cArray) return SN_TYPE_UNSUPPORTED;
         *data = RARRAY_CONST_PTR(value);
         *length = RARRAY_LEN(value);
-        return 8;
+        return SN_TYPE_ARRAY;
     }
     if (RB_TYPE_P(value, T_STRING)) {
-        if (CLASS_OF(value) != rb_cString) return 128;
+        if (CLASS_OF(value) != rb_cString) return SN_TYPE_UNSUPPORTED;
         *data = RSTRING_PTR(value);
         *length = RSTRING_LEN(value);
-        return 64;
+        return SN_TYPE_STRING;
     }
     if (RB_TYPE_P(value, T_HASH)) {
-        if (CLASS_OF(value) != rb_cHash) return 128;
+        if (CLASS_OF(value) != rb_cHash) return SN_TYPE_UNSUPPORTED;
         *length = RHASH_SIZE(value);
-        return 4;
+        return SN_TYPE_OBJECT;
     }
     if (RB_TYPE_P(value, T_FLOAT)) {
         *number = RFLOAT_VALUE(value);
-        return 16;
+        return SN_TYPE_NUMBER;
     }
     int kind = sn_shallow_kind(value);
-    if (kind == 2) {
+    if (kind == SN_TYPE_BOOLEAN) {
         *length = value == Qtrue;
     }
     return kind;
@@ -170,7 +171,7 @@ static int small_entry(VALUE key, VALUE value, VALUE context) {
 /* Only opaque borrowed handles go into a fixed stack buffer. No Ruby object,
  * instance tree, string, or number is copied or converted for Rust. */
 int sn_small_hash(VALUE value, VALUE *entries) {
-    if (RHASH_SIZE(value) > 8) return -2;
+    if (RHASH_SIZE(value) > 8) return SN_SMALL_HASH_TOO_LARGE;
     struct small_hash h = {entries, 0};
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
     rb_hash_stlike_foreach(value, small_entry, (st_data_t)&h);
@@ -182,7 +183,7 @@ int sn_small_hash(VALUE value, VALUE *entries) {
     /* Build-time verified CRuby 3.4/4.0 hint: identity Hashes use ST tables.
      * Only the public object flags are read; no private table is dereferenced.
      * Bit 4 tags ordinary semantics, independently of the initialized count. */
-    if (!RB_FL_TEST_RAW(value, RUBY_FL_USER3)) return h.count | 16;
+    if (!RB_FL_TEST_RAW(value, RUBY_FL_USER3)) return h.count | SN_SMALL_HASH_ORDINARY;
 #endif
     return h.count;
 }
@@ -226,25 +227,25 @@ int sn_number_bounds_view(VALUE value, uint64_t *words, int *kind, double *float
     if (RB_TYPE_P(value, T_FLOAT)) {
         double n = RFLOAT_VALUE(value);
         *floating = n;
-        *kind = 16;
+        *kind = SN_TYPE_NUMBER;
         /* Integer membership is only needed when the required mask excludes
          * general numbers. Keep NaN/Infinity outside the Integer domain. */
-        if ((required & 32) && !(required & 16) && isfinite(n) && trunc(n) == n)
-            *kind |= 32;
-        return 3;
+        if ((required & SN_TYPE_INTEGER) && !(required & SN_TYPE_NUMBER) && isfinite(n) && trunc(n) == n)
+            *kind |= SN_TYPE_INTEGER;
+        return SN_ADAPTER_UNSUPPORTED;
     }
     if (RB_TYPE_P(value, T_BIGNUM)) {
-        *kind = 48;
+        *kind = SN_TYPE_INTEGRAL_NUMBER;
         if (rb_absint_size(value, NULL) > 16)
             return rb_big_sign(value) ? 2 : -2;
         return sn_integer128(value, words);
     }
     if (FIXNUM_P(value)) {
-        *kind = 48;
+        *kind = SN_TYPE_INTEGRAL_NUMBER;
         return sn_integer_bounds128(value, words);
     }
     *kind = sn_kind(value);
-    return 3;
+    return SN_ADAPTER_UNSUPPORTED;
 }
 /* Restricted to ordinary integers: rb_big_eql compares existing digits and
  * never enters the allocating/coercing integer-versus-Float comparison path. */
@@ -252,7 +253,7 @@ int sn_big_equal(VALUE big, VALUE other) { return RTEST(rb_big_eql(big, other));
 /* Compare only existing Big/Big digits. The Fixnum branch of rb_big_cmp can
  * normalize its left operand, and Float/coercion branches can allocate. */
 int sn_big_order(VALUE left, VALUE right) {
-    if (!RB_TYPE_P(left, T_BIGNUM) || !RB_TYPE_P(right, T_BIGNUM)) return 3;
+    if (!RB_TYPE_P(left, T_BIGNUM) || !RB_TYPE_P(right, T_BIGNUM)) return SN_ADAPTER_UNSUPPORTED;
     return FIX2INT(rb_big_cmp(left, right));
 }
 /* The bound is an ordinary Integer outside i128. A Fixnum is therefore
@@ -291,13 +292,13 @@ uint64_t sn_big_low_word(VALUE value) {
 #endif
 }
 int sn_big_low64_word(VALUE value, uint64_t *word) {
-    if (!RB_TYPE_P(value, T_BIGNUM)) return 3;
+    if (!RB_TYPE_P(value, T_BIGNUM)) return SN_ADAPTER_UNSUPPORTED;
     return rb_integer_pack(value, word, 1, sizeof(uint64_t), 0,
         INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);
 }
 int sn_big256(VALUE value, uint64_t *words) {
     /* 3 means the checked hint did not apply; no coercion or allocation. */
-    if (!RB_TYPE_P(value, T_BIGNUM)) return 3;
+    if (!RB_TYPE_P(value, T_BIGNUM)) return SN_ADAPTER_UNSUPPORTED;
     return rb_integer_pack(value, words, 4, sizeof(uint64_t), 0,
         INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);
 }
@@ -337,16 +338,18 @@ int sn_field(VALUE object, const char *name, VALUE *value) {
     if (state) { *value = rb_errinfo(); rb_set_errinfo(Qnil); }
     return state;
 }
-static ID opcode_ids[28];
-static const char *opcode_names[] = {"boolean", "type_null", "type_boolean", "type_object",
-    "type_array", "type_number", "type_integer", "type_string", "types",
-    "const", "enum", "allOf", "anyOf", "oneOf", "not", "conditional",
-    "number", "typed_number", "typed_integer", "string", "typed_string",
-    "array", "typed_array", "object", "typed_object", "ref", "recursive_ref", "dynamic_ref"};
+static struct { ID id; const char *symbol; int opcode; } opcodes[] = {
+#define SN_OPCODE(name, symbol, value) {0, #symbol, SN_OP_##name},
+#define SN_CONSTANT(name, value)
+#include "protocol.def"
+#undef SN_OPCODE
+#undef SN_CONSTANT
+};
 int sn_opcode(VALUE symbol) {
     ID id = SYM2ID(symbol);
-    for (int i = 0; i < 28; i++) if (id == opcode_ids[i]) return i;
-    return -1;
+    for (size_t i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); i++)
+        if (id == opcodes[i].id) return opcodes[i].opcode;
+    return SN_OPCODE_UNKNOWN;
 }
 /* Copy only the schema map's entry handles; instances are never copied. */
 static int append_pair(VALUE key, VALUE value, VALUE array) {
@@ -420,7 +423,7 @@ static VALUE diagnostics(VALUE self, VALUE instance) {
     int status = 0;
     h->report = sn_diagnose(engine->engine, instance, &status);
     if (status < 0) rb_raise(rb_eRuntimeError, "native diagnostics panicked");
-    if (status == 2) return Qnil;
+    if (status == SN_VERDICT_UNSUPPORTED) return Qnil;
     size_t count = sn_report_len(h->report);
     VALUE output = rb_ary_new_capa(count);
     for (size_t index = 0; index < count; index++) {
@@ -445,10 +448,17 @@ void Init_schemurai_native(void) {
     utf8_index = rb_utf8_encindex();
     ascii_index = rb_usascii_encindex();
     binary_index = rb_ascii8bit_encindex();
-    for (int i = 0; i < 28; i++) opcode_ids[i] = rb_intern(opcode_names[i]);
+    for (size_t i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); i++)
+        opcodes[i].id = rb_intern(opcodes[i].symbol);
     rb_ext_ractor_safe(true);
     VALUE schemurai = rb_define_module("Schemurai");
     VALUE native = rb_define_module_under(schemurai, "Native");
+    VALUE protocol = rb_define_module_under(native, "Protocol");
+#define SN_OPCODE(name, symbol, value) rb_define_const(protocol, "OP_" #name, INT2NUM(SN_OP_##name));
+#define SN_CONSTANT(name, value) rb_define_const(protocol, #name, INT2NUM(SN_##name));
+#include "protocol.def"
+#undef SN_OPCODE
+#undef SN_CONSTANT
     VALUE klass = rb_define_class_under(native, "Program", rb_cObject);
     rb_define_alloc_func(klass, allocate);
     rb_define_method(klass, "initialize", initialize, 4);
@@ -461,10 +471,10 @@ struct iteration { void *context; int result; };
 static int visit(VALUE key, VALUE value, VALUE arg) {
     struct iteration *iteration = (struct iteration *)arg;
     iteration->result = sn_object_entry(iteration->context, key, value);
-    return iteration->result == 1 ? ST_CONTINUE : ST_STOP;
+    return iteration->result == SN_VERDICT_VALID ? ST_CONTINUE : ST_STOP;
 }
 int sn_object_each(VALUE value, void *context) {
-    struct iteration iteration = {context, 1};
+    struct iteration iteration = {context, SN_VERDICT_VALID};
     rb_hash_foreach(value, visit, (VALUE)&iteration);
     return iteration.result;
 }
@@ -495,10 +505,10 @@ struct hash_walk { void *context; hash_callback callback; int result; };
 static int hash_visit(VALUE key, VALUE value, VALUE arg) {
     struct hash_walk *walk = (struct hash_walk *)arg;
     walk->result = walk->callback(walk->context, key, value);
-    return walk->result == 1 ? ST_CONTINUE : ST_STOP;
+    return walk->result == SN_VERDICT_VALID ? ST_CONTINUE : ST_STOP;
 }
 int sn_hash_each(VALUE value, void *context, hash_callback callback) {
-    struct hash_walk walk = {context, callback, 1};
+    struct hash_walk walk = {context, callback, SN_VERDICT_VALID};
     rb_hash_foreach(value, hash_visit, (VALUE)&walk);
     return walk.result;
 }
@@ -507,17 +517,17 @@ struct key_view_walk { void *context; key_view_callback callback; int result; };
 static int key_view_visit(VALUE key, VALUE value, VALUE arg) {
     struct key_view_walk *walk = (struct key_view_walk *)arg;
     if (!RB_TYPE_P(key, T_STRING) || CLASS_OF(key) != rb_cString) {
-        walk->result = 2;
+        walk->result = SN_VERDICT_UNSUPPORTED;
         return ST_STOP;
     }
     /* The Rust callback borrows these original bytes under the GVL and must
      * neither allocate Ruby objects nor call back into Ruby. */
     walk->result = walk->callback(walk->context,
         (const unsigned char *)RSTRING_PTR(key), RSTRING_LEN(key), value);
-    return walk->result == 1 ? ST_CONTINUE : ST_STOP;
+    return walk->result == SN_VERDICT_VALID ? ST_CONTINUE : ST_STOP;
 }
 int sn_hash_each_key_view(VALUE value, void *context, key_view_callback callback) {
-    struct key_view_walk walk = {context, callback, 1};
+    struct key_view_walk walk = {context, callback, SN_VERDICT_VALID};
     rb_hash_foreach(value, key_view_visit, (VALUE)&walk);
     return walk.result;
 }
@@ -527,7 +537,7 @@ int sn_string_length_guarded(VALUE value, size_t *length) {
     if (!RB_TYPE_P(value, T_STRING) || CLASS_OF(value) != rb_cString)
         return sn_kind(value);
     *length = string_length(value);
-    return 64;
+    return SN_TYPE_STRING;
 }
 static void string_raw_view(VALUE value, const unsigned char **data, size_t *length) {
     *data = (const unsigned char *)RSTRING_PTR(value);
@@ -552,7 +562,7 @@ static int string_utf8(VALUE value) {
     /* Public inline alias, with CRuby fallback for extended indices.
      * Callers have already classified this VALUE as a String. */
     int encoding = RB_ENCODING_GET(value);
-    return encoding == utf8_index ? 1 : (encoding == ascii_index ? 2 : 0);
+    return encoding == utf8_index ? SN_ENCODING_UTF8 : (encoding == ascii_index ? SN_ENCODING_ASCII : SN_ENCODING_OTHER);
 }
 int sn_string_utf8(VALUE value) { return string_utf8(value); }
 static int string_view(VALUE value, const unsigned char **data, size_t *length) {
@@ -566,7 +576,7 @@ int sn_string_view(VALUE value, const unsigned char **data, size_t *length) {
 static int pattern_view(VALUE value, const unsigned char **data, size_t *length) {
     int encoding = string_view(value, data, length);
     /* Read CRuby's existing ASCII cache without scanning or changing it. */
-    if (encoding && RB_ENC_CODERANGE(value) == RUBY_ENC_CODERANGE_7BIT) return 3;
+    if (encoding && RB_ENC_CODERANGE(value) == RUBY_ENC_CODERANGE_7BIT) return SN_ENCODING_SEVEN_BIT;
     return encoding;
 }
 int sn_pattern_view(VALUE value, const unsigned char **data, size_t *length) {
@@ -581,7 +591,7 @@ int sn_pattern_item_view(VALUE value, const unsigned char **data, size_t *length
 }
 static int json_encoding(VALUE value) {
     int encoding = RB_ENCODING_GET(value);
-    return encoding == ascii_index ? 2 : (encoding == utf8_index || encoding == binary_index);
+    return encoding == ascii_index ? SN_ENCODING_ASCII : ((encoding == utf8_index || encoding == binary_index) ? SN_ENCODING_UTF8 : SN_ENCODING_OTHER);
 }
 int sn_json_encoding(VALUE value) { return json_encoding(value); }
 /* Ordinary String guard, original byte loan and JSON encoding metadata in one

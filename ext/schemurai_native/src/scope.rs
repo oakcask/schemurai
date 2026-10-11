@@ -44,7 +44,7 @@ impl Engine {
         let dynamic = self.field(program, b"dynamic_anchor\0")?;
         self.metadata[index] = Metadata {
             resource,
-            enters_scope: flags & 2 != 0,
+            enters_scope: flags & i64::from(TRACKS_DYNAMIC_SCOPE) != 0,
             recursive_anchor: unsafe { sn_true(recursive) } != 0,
             primary_binding: None,
             dynamic_anchor: (unsafe { sn_same(dynamic, sn_nil()) } == 0).then_some(dynamic),
@@ -70,13 +70,13 @@ impl Engine {
         target: usize,
     ) -> Result<Op, Value> {
         let fragment = self.field(operand, b"fragment\0")?;
-        let kind = if opcode == 26
+        let kind = if opcode == OP_RECURSIVE_REF
             && unsafe { sn_same(fragment, sn_nil()) } == 0
             && unsafe { sn_string_bytes(fragment) } == 0
             && self.metadata[target].recursive_anchor
         {
             ReferenceKind::Recursive
-        } else if opcode == 27 {
+        } else if opcode == OP_DYNAMIC_REF {
             let anchor = self.metadata[target].dynamic_anchor;
             match anchor {
                 Some(anchor)

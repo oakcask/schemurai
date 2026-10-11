@@ -140,11 +140,11 @@ impl Engine {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Tracked {
-        if depth > 256 {
+        if depth > MAX_EVALUATION_DEPTH {
             return Tracked::new(Unsupported);
         }
         let kind = if value & self.fixnum_flag != 0 {
-            48
+            TYPE_INTEGRAL_NUMBER
         } else {
             unsafe { sn_kind(value) }
         };
@@ -170,10 +170,10 @@ impl Engine {
                 .or(self.metadata[node].primary_binding),
         };
         let active = self.enter_scope(node, active, &frame);
-        if depth > 256 {
+        if depth > MAX_EVALUATION_DEPTH {
             return Tracked::new(Unsupported);
         }
-        if kind == 128 {
+        if kind == TYPE_UNSUPPORTED {
             return Tracked::new(Unsupported);
         }
         let mut evaluation = Tracked::new(Valid);
@@ -271,18 +271,18 @@ impl Engine {
                     }
                 }
                 Op::Array(required, rules) => {
-                    if *required != 0 && kind != 8 {
+                    if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
-                    } else if kind != 8 {
+                    } else if kind != TYPE_ARRAY {
                         Valid
                     } else {
                         self.array_tracked(rules, value, depth + 1, active, &mut evaluation)
                     }
                 }
                 Op::Object(required, rules) => {
-                    if *required != 0 && kind != 4 {
+                    if *required != 0 && kind != TYPE_OBJECT {
                         Invalid
-                    } else if kind != 4 {
+                    } else if kind != TYPE_OBJECT {
                         Valid
                     } else {
                         self.object_tracked(rules, value, depth + 1, active, &mut evaluation)
@@ -474,7 +474,7 @@ struct TrackingContext<'a> {
 unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<TrackingContext>() };
-        if unsafe { sn_kind(key) } != 64 {
+        if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
         let key_location = JsonKey::new(key);

@@ -22,7 +22,7 @@ pub(super) fn ordered_big_unique(values: &[Value]) -> Option<Verdict> {
         if order != direction {
             // A return to the first value is a duplicate even when it breaks
             // the order. Otherwise indexing must examine the entire input.
-            if order == 3 {
+            if order == ADAPTER_UNSUPPORTED {
                 return None;
             }
             if unsafe { sn_big_order(values[0], pair[1]) } == 0 {
@@ -47,7 +47,7 @@ fn ordered_tail_unique(values: &[Value], prefix: usize, direction: i32) -> Optio
             let middle = low + (high - low) / 2;
             match unsafe { sn_big_order(values[middle], values[at]) } {
                 0 => return Some(Invalid),
-                3 => return None,
+                ADAPTER_UNSUPPORTED => return None,
                 order if order == direction => low = middle + 1,
                 _ => high = middle,
             }
@@ -111,7 +111,7 @@ pub(super) fn integer_fingerprint(integer: Value) -> u64 {
 pub(super) fn big_fingerprint(integer: Value) -> Option<u64> {
     let mut words = [0_u64; 4];
     let sign = unsafe { sn_big256(integer, words.as_mut_ptr()) };
-    if sign == 3 {
+    if sign == ADAPTER_UNSUPPORTED {
         return None;
     }
     Some(if sign.abs() > 1 {
@@ -162,7 +162,7 @@ fn exact_integer_fingerprint(words: &[u64], sign: i32) -> u64 {
         } else {
             words[0]
         };
-        return mix(bits ^ 16);
+        return mix(bits ^ TYPE_NUMBER as u64);
     }
     let exponent = top * 64 + 63 - words[top].leading_zeros() as usize;
     let shift = exponent - 52;
@@ -184,13 +184,13 @@ fn exact_integer_fingerprint(words: &[u64], sign: i32) -> u64 {
     let bits = ((sign < 0) as u64) << 63
         | ((exponent + 1023) as u64) << 52
         | (mantissa & ((1_u64 << 52) - 1));
-    mix(bits ^ 16)
+    mix(bits ^ TYPE_NUMBER as u64)
 }
 
 // Callers supply the prefix ending at the last nonzero word. It may be empty
 // when all sampled low words of an oversized integer are zero.
 fn integer_bucket(words: &[u64], sign: i32, bytes: usize) -> u64 {
-    let mut hash = bytes as u64 ^ 16 ^ ((sign < 0) as u64);
+    let mut hash = bytes as u64 ^ TYPE_NUMBER as u64 ^ ((sign < 0) as u64);
     // Independent lanes shorten the multiplication dependency chain while
     // retaining every sampled word. Full VALUE equality resolves collisions.
     let mut other = hash ^ 0x9e37_79b9_7f4a_7c15;
@@ -381,13 +381,13 @@ impl FastMultiple {
         let mut bits = if self.numerator > 0 && n % self.numerator == 0 {
             0
         } else {
-            16
+            MULTIPLE_OF
         };
         for &(bit, limit) in &self.limits {
             if match bit {
-                1 => n > limit,
-                2 => n < limit,
-                4 => n >= limit,
+                MAXIMUM => n > limit,
+                MINIMUM => n < limit,
+                EXCLUSIVE_MAXIMUM => n >= limit,
                 _ => n <= limit,
             } {
                 bits |= bit;
@@ -404,23 +404,23 @@ impl FastMultiple {
 impl Engine {
     pub(super) fn compile_number(&mut self, operand: Value) -> Result<Option<Rules>, Value> {
         let mask = self.field(operand, b"mask\0")?;
-        let mask = unsafe { sn_integer(mask) };
+        let mask = unsafe { sn_integer(mask) } as i32;
         let mut limits = vec![];
         for (bit, name) in [
-            (1, b"maximum\0".as_slice()),
-            (2, b"minimum\0"),
-            (4, b"exclusive_maximum\0"),
-            (8, b"exclusive_minimum\0"),
+            (MAXIMUM, b"maximum\0".as_slice()),
+            (MINIMUM, b"minimum\0"),
+            (EXCLUSIVE_MAXIMUM, b"exclusive_maximum\0"),
+            (EXCLUSIVE_MINIMUM, b"exclusive_minimum\0"),
         ] {
             if mask & bit != 0 {
                 let value = self.field(operand, name)?;
                 let Some(limit) = self.numeric_limit(value)? else {
                     return Ok(None);
                 };
-                limits.push((bit as i32, limit));
+                limits.push((bit, limit));
             }
         }
-        let multiple = if mask & 16 == 0 {
+        let multiple = if mask & MULTIPLE_OF == 0 {
             None
         } else {
             let value = self.field(operand, b"multiple_of\0")?;
@@ -463,8 +463,12 @@ impl Engine {
         let bounded_signs = (bounds_view && limits.iter().all(|(_, limit)| limit.exact.is_some()))
             .then(|| {
                 [
-                    !limits.iter().any(|(bit, _)| matches!(bit, 2 | 8)),
-                    !limits.iter().any(|(bit, _)| matches!(bit, 1 | 4)),
+                    !limits
+                        .iter()
+                        .any(|(bit, _)| matches!(*bit, MINIMUM | EXCLUSIVE_MINIMUM)),
+                    !limits
+                        .iter()
+                        .any(|(bit, _)| matches!(*bit, MAXIMUM | EXCLUSIVE_MAXIMUM)),
                 ]
             });
         Ok(Some(Rules {
@@ -479,7 +483,7 @@ impl Engine {
     }
 
     fn numeric_limit(&mut self, value: Value) -> Result<Option<Limit>, Value> {
-        let integer = unsafe { sn_kind(value) } & 32 != 0;
+        let integer = unsafe { sn_kind(value) } & TYPE_INTEGER != 0;
         if !integer && unsafe { sn_is_rational(value) } == 0 {
             return Ok(None);
         }
@@ -528,7 +532,7 @@ fn read_integer_status(value: Value) -> Result<i128, i32> {
     if unsafe { sn_fixnum(value) } != 0 {
         return Ok(unsafe { sn_integer(value) } as i128);
     }
-    if unsafe { sn_kind(value) } & 32 == 0 || unsafe { sn_is_float(value) } != 0 {
+    if unsafe { sn_kind(value) } & TYPE_INTEGER == 0 || unsafe { sn_is_float(value) } != 0 {
         return Err(0);
     }
     unpack_integer_status(value)
@@ -629,9 +633,9 @@ fn wide_multiple_words(words: &[u64; 16], divisor: Fraction, sum_words: bool) ->
 
 fn fixnum_bounds(n: i64, limits: &[(i32, i64)]) -> Verdict {
     verdict(limits.iter().all(|&(bit, limit)| match bit {
-        1 => n <= limit,
-        2 => n >= limit,
-        4 => n < limit,
+        MAXIMUM => n <= limit,
+        MINIMUM => n >= limit,
+        EXCLUSIVE_MAXIMUM => n < limit,
         _ => n > limit,
     }))
 }
@@ -700,7 +704,7 @@ impl Rules {
     pub(super) fn eval_guarded(&self, required: i32, value: Value) -> Verdict {
         let fixnum = value & self.fixnum_flag != 0;
         if fixnum {
-            if required != 0 && required & 48 == 0 {
+            if required != 0 && required & TYPE_INTEGRAL_NUMBER == 0 {
                 return Invalid;
             }
             if let Some(multiple) = &self.fast_multiple {
@@ -714,15 +718,15 @@ impl Rules {
             return self.eval_bounds_guarded(required, value);
         }
         let kind = if fixnum {
-            48
+            TYPE_INTEGRAL_NUMBER
         } else {
             unsafe { sn_kind(value) }
         };
-        if kind == 128 {
+        if kind == TYPE_UNSUPPORTED {
             Unsupported
         } else if required != 0 && kind & required == 0 {
             Invalid
-        } else if kind & 16 == 0 {
+        } else if kind & TYPE_NUMBER == 0 {
             Valid
         } else {
             self.eval(value)
@@ -739,11 +743,11 @@ impl Rules {
             let order = unsafe { sn_big_order(value, bound) };
             if order != 3 {
                 return verdict(
-                    (required == 0 || required & 48 != 0)
-                        && match bit {
-                            1 => order <= 0,
-                            2 => order >= 0,
-                            4 => order < 0,
+                    (required == 0 || required & TYPE_INTEGRAL_NUMBER != 0)
+                        && match *bit {
+                            MAXIMUM => order <= 0,
+                            MINIMUM => order >= 0,
+                            EXCLUSIVE_MAXIMUM => order < 0,
                             _ => order > 0,
                         },
                 );
@@ -764,16 +768,16 @@ impl Rules {
         // The adapter always initializes kind, but only initializes the
         // operand selected by its kind and sign. Never read unused outputs.
         let kind = unsafe { kind.assume_init() };
-        if kind == 128 {
+        if kind == TYPE_UNSUPPORTED {
             return Unsupported;
         }
         if required != 0 && kind & required == 0 {
             return Invalid;
         }
-        if kind & 16 == 0 {
+        if kind & TYPE_NUMBER == 0 {
             return Valid;
         }
-        if sign == 3 {
+        if sign == ADAPTER_UNSUPPORTED {
             let floating = unsafe { floating.assume_init() };
             for &(bit, ref limit) in &self.limits {
                 let order = match limit.float_order(floating) {
@@ -781,9 +785,9 @@ impl Rules {
                     Err(status) => return status,
                 };
                 if match bit {
-                    1 => order == Some(Ordering::Greater),
-                    2 => order == Some(Ordering::Less),
-                    4 => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
+                    MAXIMUM => order == Some(Ordering::Greater),
+                    MINIMUM => order == Some(Ordering::Less),
+                    EXCLUSIVE_MAXIMUM => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
                     _ => matches!(order, Some(Ordering::Less | Ordering::Equal)),
                 } {
                     return Invalid;
@@ -808,9 +812,9 @@ impl Rules {
                 return Unsupported;
             };
             if match bit {
-                1 => order == Ordering::Greater,
-                2 => order == Ordering::Less,
-                4 => order != Ordering::Less,
+                MAXIMUM => order == Ordering::Greater,
+                MINIMUM => order == Ordering::Less,
+                EXCLUSIVE_MAXIMUM => order != Ordering::Less,
                 _ => order != Ordering::Greater,
             } {
                 return Invalid;
@@ -845,9 +849,9 @@ impl Rules {
             let n = immediate_integer(value);
             return Ok(limits.iter().fold(0, |bits, &(bit, limit)| {
                 bits | if match bit {
-                    1 => n > limit,
-                    2 => n < limit,
-                    4 => n >= limit,
+                    MAXIMUM => n > limit,
+                    MINIMUM => n < limit,
+                    EXCLUSIVE_MAXIMUM => n >= limit,
                     _ => n <= limit,
                 } {
                     bit
@@ -884,9 +888,9 @@ impl Rules {
                 return Unsupported;
             };
             if match bit {
-                1 => order == Ordering::Greater,
-                2 => order == Ordering::Less,
-                4 => order != Ordering::Less,
+                MAXIMUM => order == Ordering::Greater,
+                MINIMUM => order == Ordering::Less,
+                EXCLUSIVE_MAXIMUM => order != Ordering::Less,
                 _ => order != Ordering::Greater,
             } {
                 invalid = true;
@@ -912,7 +916,7 @@ impl Rules {
             Unsupported => return Unsupported,
             Invalid => {
                 invalid = true;
-                failure(16);
+                failure(MULTIPLE_OF);
             }
             Valid => {}
         }
@@ -949,10 +953,10 @@ impl Rules {
                 let Some(order) = limit.integer_order(value, None, large_sign) else {
                     return Unsupported;
                 };
-                let violates = match bit {
-                    1 => order == Ordering::Greater,
-                    2 => order == Ordering::Less,
-                    4 => order != Ordering::Less,
+                let violates = match *bit {
+                    MAXIMUM => order == Ordering::Greater,
+                    MINIMUM => order == Ordering::Less,
+                    EXCLUSIVE_MAXIMUM => order != Ordering::Less,
                     _ => order != Ordering::Greater,
                 };
                 if violates {
@@ -970,7 +974,7 @@ impl Rules {
                     Unsupported => return Unsupported,
                     Invalid => {
                         invalid = true;
-                        failure(16);
+                        failure(MULTIPLE_OF);
                     }
                     Valid => {}
                 }
@@ -1024,10 +1028,10 @@ impl Rules {
                     n.partial_cmp(&limit.rounded)
                 }
             };
-            let violates = match bit {
-                1 => order == Some(Ordering::Greater),
-                2 => order == Some(Ordering::Less),
-                4 => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
+            let violates = match *bit {
+                MAXIMUM => order == Some(Ordering::Greater),
+                MINIMUM => order == Some(Ordering::Less),
+                EXCLUSIVE_MAXIMUM => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
                 _ => matches!(order, Some(Ordering::Less | Ordering::Equal)),
             };
             if violates {
@@ -1043,7 +1047,7 @@ impl Rules {
             };
             if !decimal.unwrap().multiple_of(exact) {
                 invalid = true;
-                failure(16);
+                failure(MULTIPLE_OF);
             }
         }
         verdict(!invalid)

@@ -102,9 +102,9 @@ File.open("Makefile", "a") do |file|
 
     $(TARGET_SO): $(srcdir)/target/release/libschemurai_native.a
 
-    glue.o: $(srcdir)/big_sample.h
+    glue.o: $(srcdir)/big_sample.h $(srcdir)/protocol.h $(srcdir)/protocol.def
 
-    $(srcdir)/target/release/libschemurai_native.a: $(srcdir)/Cargo.toml $(srcdir)/Cargo.lock $(wildcard $(srcdir)/src/*.rs)
+    $(srcdir)/target/release/libschemurai_native.a: $(srcdir)/Cargo.toml $(srcdir)/Cargo.lock $(srcdir)/build.rs $(srcdir)/protocol.def $(wildcard $(srcdir)/src/*.rs)
     \tcargo build --manifest-path $(srcdir)/Cargo.toml --release --locked
   MAKE
 end

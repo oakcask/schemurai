@@ -5,8 +5,10 @@ module Schemurai
     # Render native diagnostic output using the messages shared by every backend.
     # The instance remains an original Ruby object; this layer never traverses it.
     module Diagnostics
-      TYPE_NAMES = {1 => "null", 2 => "boolean", 3 => "object", 4 => "array", 5 => "number", 6 => "integer", 7 => "string",
-                    17 => "number", 18 => "integer", 20 => "string", 22 => "array", 24 => "object"}.freeze
+      TYPE_NAMES = {Protocol::OP_TYPE_NULL => "null", Protocol::OP_TYPE_BOOLEAN => "boolean", Protocol::OP_TYPE_OBJECT => "object",
+                    Protocol::OP_TYPE_ARRAY => "array", Protocol::OP_TYPE_NUMBER => "number", Protocol::OP_TYPE_INTEGER => "integer",
+                    Protocol::OP_TYPE_STRING => "string", Protocol::OP_TYPED_NUMBER => "number", Protocol::OP_TYPED_INTEGER => "integer",
+                    Protocol::OP_TYPED_STRING => "string", Protocol::OP_TYPED_ARRAY => "array", Protocol::OP_TYPED_OBJECT => "object"}.freeze
       ATTRIBUTES = {"maximum" => :maximum, "minimum" => :minimum, "exclusiveMaximum" => :exclusive_maximum, "exclusiveMinimum" => :exclusive_minimum,
                     "maxLength" => :max_length, "minLength" => :min_length, "maxItems" => :max_items, "minItems" => :min_items,
                     "maxProperties" => :max_properties, "minProperties" => :min_properties}.freeze
@@ -22,7 +24,7 @@ module Schemurai
         messages = Internal::ErrorMessage
         case keyword
         when "falseSchema" then messages.false_schema
-        when "type" then messages.type((opcode == 8) ? operand.names : TYPE_NAMES.fetch(opcode), instance)
+        when "type" then messages.type((opcode == Protocol::OP_TYPES) ? operand.names : TYPE_NAMES.fetch(opcode), instance)
         when "const" then messages.const
         when "enum" then messages.enum
         when "maximum", "minimum", "exclusiveMaximum", "exclusiveMinimum"

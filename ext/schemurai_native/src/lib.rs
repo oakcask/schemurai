@@ -10,6 +10,12 @@ mod diagnostics;
 mod format;
 mod number;
 mod pattern;
+// Some shared constants are consumed only by C or Ruby.
+#[allow(dead_code)]
+mod protocol {
+    include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
+}
+use protocol::*;
 mod scope;
 mod tracking;
 type Value = usize;
@@ -94,11 +100,12 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(i32)]
 enum Verdict {
-    Invalid = 0,
-    Valid = 1,
-    Unsupported = 2,
+    Invalid = VERDICT_INVALID,
+    Valid = VERDICT_VALID,
+    Unsupported = VERDICT_UNSUPPORTED,
 }
 use Verdict::*;
+const MAX_EVALUATION_DEPTH: usize = 256;
 #[derive(Debug)]
 enum Op {
     Unsupported,
@@ -186,7 +193,7 @@ impl StringRules {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
-        if encoding == -128 {
+        if encoding == -TYPE_UNSUPPORTED {
             Unsupported
         } else if encoding < 0 {
             verdict(required == 0)
@@ -460,7 +467,7 @@ impl Engine {
             // Count keywords allow integral JSON numbers such as 2.0.
             // Saturation is exact for comparisons against representable lengths.
             Some(unsafe { sn_float(n) } as usize)
-        } else if unsafe { sn_kind(n) } & 32 != 0 {
+        } else if unsafe { sn_kind(n) } & TYPE_INTEGER != 0 {
             Some(usize::MAX)
         } else {
             None // The only non-integral bound is maxContains' +Infinity.
@@ -550,7 +557,7 @@ impl Engine {
         self.metadata.push(scope::Metadata::default());
         let code = self.field(program, b"code\0")?;
         let flags = unsafe { sn_integer(sn_entry(code, 0)) };
-        self.tracks[index] = flags & 1 != 0;
+        self.tracks[index] = flags & i64::from(TRACKS_EVALUATION) != 0;
         self.compile_scope(program, index, flags)?;
         let mut ops = vec![];
         let mut error_operands = vec![];
@@ -559,19 +566,25 @@ impl Engine {
             let opcode = unsafe { sn_opcode(sn_entry(code, i)) };
             error_operands.push((opcode, operand));
             let op = match opcode {
-                0 => Op::Boolean(unsafe { sn_true(operand) } != 0),
-                1..=7 => Op::Type([1, 2, 4, 8, 16, 32, 64][opcode as usize - 1]),
-                8 => {
+                OP_BOOLEAN => Op::Boolean(unsafe { sn_true(operand) } != 0),
+                OP_TYPE_NULL => Op::Type(TYPE_NULL),
+                OP_TYPE_BOOLEAN => Op::Type(TYPE_BOOLEAN),
+                OP_TYPE_OBJECT => Op::Type(TYPE_OBJECT),
+                OP_TYPE_ARRAY => Op::Type(TYPE_ARRAY),
+                OP_TYPE_NUMBER => Op::Type(TYPE_NUMBER),
+                OP_TYPE_INTEGER => Op::Type(TYPE_INTEGER),
+                OP_TYPE_STRING => Op::Type(TYPE_STRING),
+                OP_TYPES => {
                     let mask = self.field(operand, b"mask\0")?;
                     Op::Type(unsafe { sn_integer(mask) } as i32)
                 }
-                9 => Op::Const(operand),
-                10 => Op::Enum(self.values(operand)),
-                11 => Op::All(self.children(operand)?),
-                12 => Op::Any(self.branches(operand)?),
-                13 => Op::One(self.branches(operand)?),
-                14 => Op::Not(self.compile(operand)?),
-                15 => {
+                OP_CONST => Op::Const(operand),
+                OP_ENUM => Op::Enum(self.values(operand)),
+                OP_ALL_OF => Op::All(self.children(operand)?),
+                OP_ANY_OF => Op::Any(self.branches(operand)?),
+                OP_ONE_OF => Op::One(self.branches(operand)?),
+                OP_NOT => Op::Not(self.compile(operand)?),
+                OP_CONDITIONAL => {
                     let condition = self.field(operand, b"condition\0")?;
                     Op::Conditional(
                         self.compile(condition)?,
@@ -579,15 +592,15 @@ impl Engine {
                         self.child(operand, b"else_branch\0")?,
                     )
                 }
-                16..=18 => {
+                OP_NUMBER | OP_TYPED_NUMBER | OP_TYPED_INTEGER => {
                     if let Some(rules) = self.compile_number(operand)? {
                         Op::Number(
-                            if opcode == 16 {
+                            if opcode == OP_NUMBER {
                                 0
-                            } else if opcode == 17 {
-                                16
+                            } else if opcode == OP_TYPED_NUMBER {
+                                TYPE_NUMBER
                             } else {
-                                32
+                                TYPE_INTEGER
                             },
                             Box::new(rules),
                         )
@@ -595,7 +608,7 @@ impl Engine {
                         Op::Unsupported
                     }
                 }
-                19 | 20 => {
+                OP_STRING | OP_TYPED_STRING => {
                     let pattern = self.field(operand, b"pattern\0")?;
                     let format = self.field(operand, b"format\0")?;
                     let base64 = self.field(operand, b"decode_base64\0")?;
@@ -625,7 +638,11 @@ impl Engine {
                             None
                         };
                         Op::String(
-                            if opcode == 20 { 64 } else { 0 },
+                            if opcode == OP_TYPED_STRING {
+                                TYPE_STRING
+                            } else {
+                                0
+                            },
                             Box::new(StringRules {
                                 format,
                                 content,
@@ -640,7 +657,7 @@ impl Engine {
                         )
                     }
                 }
-                21 | 22 => {
+                OP_ARRAY | OP_TYPED_ARRAY => {
                     let unique = self.field(operand, b"unique\0")?;
                     let prefix = self.field(operand, b"prefix_items\0")?;
                     let prefix = self.children(prefix)?;
@@ -655,7 +672,11 @@ impl Engine {
                         vec![self.compile(items)?]
                     };
                     Op::Array(
-                        if opcode == 22 { 8 } else { 0 },
+                        if opcode == OP_TYPED_ARRAY {
+                            TYPE_ARRAY
+                        } else {
+                            0
+                        },
                         Box::new(Array {
                             unique: unsafe { sn_true(unique) } != 0,
                             min: self.size_field(operand, b"min_items\0")?,
@@ -671,7 +692,7 @@ impl Engine {
                         }),
                     )
                 }
-                23 | 24 => {
+                OP_OBJECT | OP_TYPED_OBJECT => {
                     let patterns = self.field(operand, b"patterns\0")?;
                     let dependencies = self.field(operand, b"dependencies\0")?;
                     {
@@ -689,7 +710,7 @@ impl Engine {
                         if required
                             .iter()
                             .chain(properties.iter().map(|(key, _)| key))
-                            .any(|&key| unsafe { sn_kind(key) } != 64)
+                            .any(|&key| unsafe { sn_kind(key) } != TYPE_STRING)
                         {
                             ops.push(Op::Unsupported);
                             continue;
@@ -733,7 +754,7 @@ impl Engine {
                         for pair in self.values(dependencies) {
                             let name = self.retain(unsafe { sn_entry(pair, 0) });
                             let dependency = self.retain(unsafe { sn_entry(pair, 1) });
-                            if unsafe { sn_kind(dependency) } == 8 {
+                            if unsafe { sn_kind(dependency) } == TYPE_ARRAY {
                                 let names = self.values(dependency);
                                 diagnostic_dependencies.push(DiagnosticDependency::Required(
                                     name,
@@ -768,11 +789,13 @@ impl Engine {
                         }));
                         dependent_schemas.extend(schemas);
                         if dependent_required.iter().any(|(name, keys)| {
-                            (unsafe { sn_kind(*name) }) != 64
-                                || keys.iter().any(|&key| unsafe { sn_kind(key) } != 64)
+                            (unsafe { sn_kind(*name) }) != TYPE_STRING
+                                || keys
+                                    .iter()
+                                    .any(|&key| unsafe { sn_kind(key) } != TYPE_STRING)
                         }) || dependent_schemas
                             .iter()
-                            .any(|&(key, _)| unsafe { sn_kind(key) } != 64)
+                            .any(|&(key, _)| unsafe { sn_kind(key) } != TYPE_STRING)
                         {
                             ops.push(Op::Unsupported);
                             continue;
@@ -807,9 +830,9 @@ impl Engine {
                                                 let (min, max) = limits.iter().fold(
                                                     (i64::MIN, i64::MAX),
                                                     |(min, max), &(bit, limit)| match bit {
-                                                        1 => (min, max.min(limit)),
-                                                        2 => (min.max(limit), max),
-                                                        4 => {
+                                                        MAXIMUM => (min, max.min(limit)),
+                                                        MINIMUM => (min.max(limit), max),
+                                                        EXCLUSIVE_MAXIMUM => {
                                                             (min, max.min(limit.saturating_sub(1)))
                                                         }
                                                         _ => {
@@ -837,10 +860,17 @@ impl Engine {
                                 field.name = self.retain(key);
                             }
                         }
-                        Op::Object(if opcode == 24 { 4 } else { 0 }, Box::new(object))
+                        Op::Object(
+                            if opcode == OP_TYPED_OBJECT {
+                                TYPE_OBJECT
+                            } else {
+                                0
+                            },
+                            Box::new(object),
+                        )
                     }
                 }
-                25..=27 => {
+                OP_REF | OP_RECURSIVE_REF | OP_DYNAMIC_REF => {
                     let reference = self.field(operand, b"value\0")?;
                     let mut target = 0;
                     if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
@@ -876,7 +906,7 @@ impl Engine {
         if self.tracks[node] {
             return self.eval_tracked(node, value, depth, active).status;
         }
-        if depth > 256 {
+        if depth > MAX_EVALUATION_DEPTH {
             return Unsupported;
         }
         if let [Op::String(required, rules)] = self.nodes[node].as_slice()
@@ -885,11 +915,11 @@ impl Engine {
             return rules.eval_guarded(*required, value);
         }
         let kind = if value & self.fixnum_flag != 0 {
-            48
+            TYPE_INTEGRAL_NUMBER
         } else {
             self.instance_kind(node, value)
         };
-        if kind == 128 {
+        if kind == TYPE_UNSUPPORTED {
             return Unsupported;
         }
         for op in &self.nodes[node] {
@@ -966,18 +996,18 @@ impl Engine {
                     },
                 },
                 Op::Array(required, rules) => {
-                    if *required != 0 && kind != 8 {
+                    if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
-                    } else if kind != 8 {
+                    } else if kind != TYPE_ARRAY {
                         Valid
                     } else {
                         self.array(rules, value, depth + 1, active)
                     }
                 }
                 Op::Object(required, rules) => {
-                    if *required != 0 && kind != 4 {
+                    if *required != 0 && kind != TYPE_OBJECT {
                         Invalid
-                    } else if kind != 4 {
+                    } else if kind != TYPE_OBJECT {
                         Valid
                     } else {
                         self.object(rules, value, depth + 1, active)
@@ -1010,16 +1040,16 @@ impl Engine {
             Op::Number(required, rules) => {
                 if *required != 0 && kind & required == 0 {
                     Invalid
-                } else if kind & 16 == 0 {
+                } else if kind & TYPE_NUMBER == 0 {
                     Valid
                 } else {
                     rules.eval(value)
                 }
             }
             Op::String(required, rules) => {
-                if *required != 0 && kind != 64 {
+                if *required != 0 && kind != TYPE_STRING {
                     Invalid
-                } else if kind != 64 {
+                } else if kind != TYPE_STRING {
                     Valid
                 } else {
                     rules.eval(value)
@@ -1069,23 +1099,31 @@ impl Engine {
                 unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
             };
             let primitive = match self.nodes[child].as_slice() {
-                [Op::Type(mask)] if mask & 16 != 0 || mask & 32 != 0 => Some(&[][..]),
+                [Op::Type(mask)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
+                    Some(&[][..])
+                }
                 [Op::Number(_, rules)] => rules.fast_limits.as_deref(),
                 _ => None,
             };
             let number = match self.nodes[child].as_slice() {
-                [Op::Number(required, rules)] if depth <= 256 && !self.tracks[child] => {
+                [Op::Number(required, rules)]
+                    if depth <= MAX_EVALUATION_DEPTH && !self.tracks[child] =>
+                {
                     Some((*required, rules))
                 }
                 _ => None,
             };
             let string = match self.nodes[child].as_slice() {
-                [Op::String(required, rules)] if depth <= 256 => Some((*required, rules)),
+                [Op::String(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
+                    Some((*required, rules))
+                }
                 _ => None,
             };
             let object = match self.nodes[child].as_slice() {
                 [Op::Object(required, rules)]
-                    if depth <= 256 && !self.tracks[child] && rules.record.is_some() =>
+                    if depth <= MAX_EVALUATION_DEPTH
+                        && !self.tracks[child]
+                        && rules.record.is_some() =>
                 {
                     Some((*required, rules))
                 }
@@ -1161,9 +1199,9 @@ impl Engine {
                             rules.eval_length_guarded(required, item)
                         } else {
                             let kind = unsafe { sn_kind(item) };
-                            if kind == 128 {
+                            if kind == TYPE_UNSUPPORTED {
                                 Unsupported
-                            } else if kind != 64 {
+                            } else if kind != TYPE_STRING {
                                 verdict(required == 0)
                             } else {
                                 rules.eval(item)
@@ -1208,14 +1246,16 @@ impl Engine {
             limits.iter().fold(
                 (i64::MIN, i64::MAX),
                 |(min, max), &(bit, limit)| match bit {
-                    1 => (min, max.min(limit)),
-                    2 => (min.max(limit), max),
-                    4 => (min, max.min(limit.saturating_sub(1))),
+                    MAXIMUM => (min, max.min(limit)),
+                    MINIMUM => (min.max(limit), max),
+                    EXCLUSIVE_MAXIMUM => (min, max.min(limit.saturating_sub(1))),
                     _ => (min.max(limit.saturating_add(1)), max),
                 },
             );
         let number = match self.nodes[child].as_slice() {
-            [Op::Number(required, rules)] if depth <= 256 && !self.tracks[child] => {
+            [Op::Number(required, rules)]
+                if depth <= MAX_EVALUATION_DEPTH && !self.tracks[child] =>
+            {
                 Some((*required, rules))
             }
             _ => None,
@@ -1246,13 +1286,13 @@ impl Engine {
     ) -> Verdict {
         for &value in values {
             let kind = if value & self.fixnum_flag != 0 {
-                48
+                TYPE_INTEGRAL_NUMBER
             } else {
                 unsafe { sn_shallow_kind(value) }
             };
-            let result = if kind == 128 {
+            let result = if kind == TYPE_UNSUPPORTED {
                 Unsupported
-            } else if kind != 4 {
+            } else if kind != TYPE_OBJECT {
                 verdict(required == 0)
             } else {
                 self.object(rules, value, depth, active)
@@ -1275,8 +1315,8 @@ impl Engine {
             // tail is never read, including empty and unsupported records.
             let mut buffer = std::mem::MaybeUninit::<[Value; 16]>::uninit();
             let len = unsafe { sn_small_hash(value, buffer.as_mut_ptr().cast()) };
-            if len == -2 {
-                return if unsafe { sn_kind(value) } == 4 {
+            if len == SMALL_HASH_TOO_LARGE {
+                return if unsafe { sn_kind(value) } == TYPE_OBJECT {
                     self.object_general(r, value, depth, active)
                 } else {
                     Unsupported
@@ -1285,8 +1325,8 @@ impl Engine {
             if len < 0 {
                 return Unsupported;
             }
-            let ordinary = len & 16 != 0;
-            let len = len & 15;
+            let ordinary = len & SMALL_HASH_ORDINARY != 0;
+            let len = len & SMALL_HASH_COUNT_MASK;
             let status = bounds(len as usize, r.min, r.max);
             if status != Valid {
                 return status;
@@ -1378,7 +1418,7 @@ impl Engine {
             };
             let result =
                 unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) };
-            if result != 1 {
+            if result != VERDICT_VALID {
                 return if result == 0 { Invalid } else { Unsupported };
             }
         }
@@ -1416,10 +1456,14 @@ impl Engine {
         active: scope::Context<'_>,
     ) -> Verdict {
         match self.nodes[node].as_slice() {
-            [Op::String(required, rules)] if depth <= 256 && rules.length_only() => {
+            [Op::String(required, rules)]
+                if depth <= MAX_EVALUATION_DEPTH && rules.length_only() =>
+            {
                 rules.eval_length_guarded(*required, value)
             }
-            [Op::String(required, rules)] if depth <= 256 && rules.pattern.is_some() => {
+            [Op::String(required, rules)]
+                if depth <= MAX_EVALUATION_DEPTH && rules.pattern.is_some() =>
+            {
                 rules.eval_guarded(*required, value)
             }
             [
@@ -1429,13 +1473,13 @@ impl Engine {
                 | Op::String(..)
                 | Op::Const(_)
                 | Op::Enum(_)),
-            ] if depth <= 256 => {
+            ] if depth <= MAX_EVALUATION_DEPTH => {
                 let kind = if value & self.fixnum_flag != 0 {
-                    48
+                    TYPE_INTEGRAL_NUMBER
                 } else {
                     unsafe { sn_kind(value) }
                 };
-                if kind == 128 {
+                if kind == TYPE_UNSUPPORTED {
                     Unsupported
                 } else {
                     self.leaf(op, kind, value, depth)
@@ -1512,7 +1556,7 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
     if c.status == Valid
         && let Some(child) = child
     {
-        c.status = if c.depth <= 256 {
+        c.status = if c.depth <= MAX_EVALUATION_DEPTH {
             match field.and_then(|field| field.check) {
                 Some(RecordCheck::IntegerBounds(min, max)) if value & c.engine.fixnum_flag != 0 => {
                     let n = immediate_integer(value);
@@ -1559,8 +1603,8 @@ fn bounds(len: usize, min: Option<usize>, max: Option<usize>) -> Verdict {
 fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<usize>) -> Verdict {
     let mut len = 0;
     match unsafe { sn_string_length_guarded(value, &mut len) } {
-        128 => Unsupported,
-        64 => bounds(len, min, max),
+        TYPE_UNSUPPORTED => Unsupported,
+        TYPE_STRING => bounds(len, min, max),
         _ => verdict(required == 0),
     }
 }
@@ -1570,14 +1614,14 @@ fn immediate_integer(value: Value) -> i64 {
     (value as isize >> 1) as i64
 }
 fn equal(a: Value, b: Value, depth: usize) -> Verdict {
-    if depth > 256 {
+    if depth > MAX_EVALUATION_DEPTH {
         return Unsupported;
     }
     let (ka, kb) = unsafe { (sn_kind(a), sn_kind(b)) };
-    if ka == 128 || kb == 128 {
+    if ka == TYPE_UNSUPPORTED || kb == TYPE_UNSUPPORTED {
         return Unsupported;
     }
-    if ka & 16 != 0 && kb & 16 != 0 {
+    if ka & TYPE_NUMBER != 0 && kb & TYPE_NUMBER != 0 {
         let (ia, ib) = unsafe { (sn_fixnum(a) != 0, sn_fixnum(b) != 0) };
         let (fa, fb) = unsafe { (sn_is_float(a) != 0, sn_is_float(b) != 0) };
         if ia && ib {
@@ -1623,7 +1667,7 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
     }
     // JSON container equality visits every value, even for the same object:
     // nested NaN values are unequal and unsupported values need VM evaluation.
-    if ka != 8 && ka != 4 && unsafe { sn_same(a, b) } != 0 {
+    if ka != TYPE_ARRAY && ka != TYPE_OBJECT && unsafe { sn_same(a, b) } != 0 {
         return Valid;
     }
     if ka != kb {
@@ -1633,8 +1677,8 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
         return Invalid;
     }
     match ka {
-        64 => verdict(unsafe { sn_string_equal(a, b) } != 0),
-        8 => {
+        TYPE_STRING => verdict(unsafe { sn_string_equal(a, b) } != 0),
+        TYPE_ARRAY => {
             let len = unsafe { sn_len(a) };
             if len != unsafe { sn_len(b) } {
                 return Invalid;
@@ -1651,7 +1695,7 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
             }
             Valid
         }
-        4 => {
+        TYPE_OBJECT => {
             if unsafe { sn_len(a) != sn_len(b) } {
                 return Invalid;
             }
@@ -1667,14 +1711,14 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
                 )
             })
         }
-        128 => Unsupported,
+        TYPE_UNSUPPORTED => Unsupported,
         _ => Invalid,
     }
 }
 fn decode(result: i32) -> Verdict {
     match result {
-        0 => Invalid,
-        1 => Valid,
+        VERDICT_INVALID => Invalid,
+        VERDICT_VALID => Valid,
         _ => Unsupported,
     }
 }
@@ -1685,7 +1729,7 @@ struct EqualityContext {
 unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &*context.cast::<EqualityContext>() };
-        if unsafe { sn_kind(key) } != 64 {
+        if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
         let other = unsafe { sn_lookup(c.other, key) };
@@ -1763,23 +1807,23 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     let len = bytes.len();
     if len <= 8 {
         let word = short_word(bytes);
-        return mix(word ^ (len as u64).wrapping_mul(0x100000001b3) ^ 64);
+        return mix(word ^ (len as u64).wrapping_mul(0x100000001b3) ^ TYPE_STRING as u64);
     }
     let mut result = 0xcbf29ce484222325_u64;
     for &byte in bytes {
         result = (result ^ byte as u64).wrapping_mul(0x100000001b3);
     }
-    mix(result ^ 64)
+    mix(result ^ TYPE_STRING as u64)
 }
 fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -> Option<u64> {
-    if depth > 256 {
+    if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
     if value & fixnum_flag != 0 {
         // sn_fixnum_flag enables this hint only after the C headers confirm
         // the signed immediate encoding. Rust's signed shift is arithmetic.
         let integer = immediate_integer(value);
-        return Some(mix(integer as u64 ^ 16));
+        return Some(mix(integer as u64 ^ TYPE_NUMBER as u64));
     }
     if big_hint && let Some(hash) = number::big_fingerprint(value) {
         return Some(hash);
@@ -1792,28 +1836,28 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
     // Read only the fields the C adapter initialized for the returned kind.
     let kind =
         unsafe { sn_fingerprint_view(value, data.as_mut_ptr(), len.as_mut_ptr(), n.as_mut_ptr()) };
-    if kind == 16 {
+    if kind == TYPE_NUMBER {
         let n = unsafe { n.assume_init() };
         // Normalize integral floats without rounding distinct integers. Exact
         // JSON equality still resolves every collision before declaring duplicates.
         if n.is_finite() && n.trunc() == n && n >= i64::MIN as f64 && n < i64::MAX as f64 {
-            return Some(mix(n as i64 as u64 ^ 16));
+            return Some(mix(n as i64 as u64 ^ TYPE_NUMBER as u64));
         }
-        return Some(mix(n.to_bits() ^ 16));
+        return Some(mix(n.to_bits() ^ TYPE_NUMBER as u64));
     }
     match kind {
-        48 => Some(number::integer_fingerprint(value)),
-        1 => Some(mix(1)),
-        2 => Some(mix(if unsafe { len.assume_init() } != 0 {
+        TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
+        TYPE_NULL => Some(mix(TYPE_NULL as u64)),
+        TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
             2
         } else {
             3
         })),
-        64 => Some(bytes_fingerprint(unsafe {
+        TYPE_STRING => Some(bytes_fingerprint(unsafe {
             byte_view(data.assume_init().cast(), len.assume_init())
         })),
-        8 => {
-            let mut hash = mix(8);
+        TYPE_ARRAY => {
+            let mut hash = mix(TYPE_ARRAY as u64);
             let len = unsafe { len.assume_init() };
             let values = if len == 0 {
                 &[]
@@ -1827,7 +1871,7 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
             }
             Some(hash)
         }
-        4 => {
+        TYPE_OBJECT => {
             let len = unsafe { len.assume_init() };
             let mut c = FingerprintContext {
                 hash: 0,
@@ -1841,7 +1885,7 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
                     fingerprint_entry,
                 )
             };
-            (status == 1).then(|| mix(c.hash ^ len as u64 ^ 4))
+            (status == VERDICT_VALID).then(|| mix(c.hash ^ len as u64 ^ TYPE_OBJECT as u64))
         }
         _ => None,
     }
@@ -1906,12 +1950,12 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value) -> Verdict {
     // This is a checked optimization hint, not an instance shape assumption.
     let big_hint = unsafe { sn_is_bignum(values[0]) } != 0;
     if big_hint
-        && depth <= 256
+        && depth <= MAX_EVALUATION_DEPTH
         && let Some(result) = number::ordered_big_unique(values)
     {
         return result;
     }
-    if big_hint && depth <= 256 {
+    if big_hint && depth <= MAX_EVALUATION_DEPTH {
         let result = unordered_big_unique(values);
         if result != Unsupported {
             return result;
@@ -2150,7 +2194,7 @@ struct ObjectContext<'a> {
 pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &*context.cast::<ObjectContext>() };
-        if unsafe { sn_kind(key) } != 64 {
+        if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
         if let Some(child) = c.rules.names {
@@ -2209,12 +2253,12 @@ pub unsafe extern "C" fn sn_compile(
         e.bind_dynamic_anchors()?;
         Ok::<_, Value>(())
     })) {
-        Ok(Ok(())) => 1,
+        Ok(Ok(())) => VERDICT_VALID,
         Ok(Err(value)) => {
             unsafe { *error = value };
-            -2
+            STATUS_EXCEPTION
         }
-        Err(_) => -1,
+        Err(_) => STATUS_PANIC,
     }
 }
 /// # Safety
@@ -2225,7 +2269,7 @@ pub unsafe extern "C" fn sn_valid(engine: *const Engine, value: Value) -> i32 {
         let e = unsafe { &*engine };
         e.eval(e.root, value, 0, scope::Context::default()) as i32
     }))
-    .unwrap_or(-1)
+    .unwrap_or(STATUS_PANIC)
 }
 /// # Safety
 /// Engine must be an owned pointer returned by sn_new, freed exactly once.

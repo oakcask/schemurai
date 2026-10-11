@@ -58,6 +58,12 @@ cd ../..
 bundle exec ruby -Ilib -Iext/schemurai_native -rschemurai -e 'p Schemurai.compile(true, backend: :native).valid?(nil)'
 ```
 
+Native opcode identifiers, type masks, numeric-rule flags and adapter status
+codes are named in `ext/schemurai_native/protocol.def`. C includes that shared
+definition and Cargo generates Rust constants from it during the build; Ruby
+diagnostics use the constants exported by the extension. A compatibility test
+checks the shared masks against the Ruby VM compiler's constants.
+
 The existing Ruby compiler builds the dialect-aware immutable VM programs.
 Rust reads those programs once and stores native instructions plus opaque
 CRuby `VALUE` handles. Instances cross the boundary as a single `VALUE`;

@@ -77,14 +77,14 @@ impl Report {
 }
 
 fn pointer_name(value: Value) -> Result<String, Verdict> {
-    if unsafe { sn_kind(value) } != 64 {
+    if unsafe { sn_kind(value) } != TYPE_STRING {
         return Err(Unsupported);
     }
     let mut data = std::ptr::null();
     let mut len = 0;
     let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    if encoding == 0 || (encoding == 2 && !bytes.is_ascii()) {
+    if encoding == ENCODING_OTHER || (encoding == ENCODING_ASCII && !bytes.is_ascii()) {
         return Err(Unsupported);
     }
     let name = std::str::from_utf8(bytes).map_err(|_| Unsupported)?;
@@ -100,11 +100,11 @@ impl Engine {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Result<(), Verdict> {
-        if depth > 256 {
+        if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
         let kind = unsafe { sn_kind(value) };
-        if kind == 128 {
+        if kind == TYPE_UNSUPPORTED {
             return Err(Unsupported);
         }
         let frame = scope::ScopeFrame {
@@ -149,14 +149,14 @@ impl Engine {
                     if *required != 0 && kind & required == 0 {
                         report.add("type", source, value, 0);
                     }
-                    if kind & 16 != 0 {
+                    if kind & TYPE_NUMBER != 0 {
                         let bits = rules.failures(value)?;
                         for (bit, keyword) in [
-                            (1, "maximum"),
-                            (2, "minimum"),
-                            (4, "exclusiveMaximum"),
-                            (8, "exclusiveMinimum"),
-                            (16, "multipleOf"),
+                            (MAXIMUM, "maximum"),
+                            (MINIMUM, "minimum"),
+                            (EXCLUSIVE_MAXIMUM, "exclusiveMaximum"),
+                            (EXCLUSIVE_MINIMUM, "exclusiveMinimum"),
+                            (MULTIPLE_OF, "multipleOf"),
                         ] {
                             if bits & bit != 0 {
                                 report.add(keyword, source, value, 0);
@@ -165,10 +165,10 @@ impl Engine {
                     }
                 }
                 Op::String(required, rules) => {
-                    if *required != 0 && kind != 64 {
+                    if *required != 0 && kind != TYPE_STRING {
                         report.add("type", source, value, 0);
                     }
-                    if kind == 64 {
+                    if kind == TYPE_STRING {
                         let len = if rules.min.is_some() || rules.max.is_some() {
                             unsafe { sn_len(value) }
                         } else {
@@ -213,10 +213,10 @@ impl Engine {
                     }
                 }
                 Op::Array(required, rules) => {
-                    if *required != 0 && kind != 8 {
+                    if *required != 0 && kind != TYPE_ARRAY {
                         report.add("type", source, value, 0);
                     }
-                    if kind != 8 {
+                    if kind != TYPE_ARRAY {
                         continue;
                     }
                     let mut coverage = Tracked::new(Valid);
@@ -281,7 +281,11 @@ impl Engine {
                         }
                     } else if let Some(&child) = rules.items.first() {
                         let primitive = match self.nodes[child].as_slice() {
-                            [Op::Type(mask)] if mask & 16 != 0 || mask & 32 != 0 => Some(&[][..]),
+                            [Op::Type(mask)]
+                                if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 =>
+                            {
+                                Some(&[][..])
+                            }
                             [Op::Number(_, rules)] => rules.fast_limits.as_deref(),
                             _ => None,
                         };
@@ -291,25 +295,25 @@ impl Engine {
                             unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
                         };
                         let pattern = match self.nodes[child].as_slice() {
-                            [Op::String(required, string)] if depth < 256 => {
+                            [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.pattern_only().map(|pattern| (*required, pattern))
                             }
                             _ => None,
                         };
                         let number = match self.nodes[child].as_slice() {
-                            [Op::Number(required, number)] if depth < 256 => {
+                            [Op::Number(required, number)] if depth < MAX_EVALUATION_DEPTH => {
                                 Some((*required, number))
                             }
                             _ => None,
                         };
                         let format = match self.nodes[child].as_slice() {
-                            [Op::String(required, string)] if depth < 256 => {
+                            [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.format_only().map(|format| (*required, format))
                             }
                             _ => None,
                         };
                         let content = match self.nodes[child].as_slice() {
-                            [Op::String(required, string)] if depth < 256 => {
+                            [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.content_only().map(|content| (*required, content))
                             }
                             _ => None,
@@ -386,18 +390,18 @@ impl Engine {
                                 if tracked {
                                     coverage.item(index);
                                 }
-                                let needs = if let Some(limits) = primitive
-                                    .filter(|_| item & self.fixnum_flag != 0 && depth < 256)
-                                {
+                                let needs = if let Some(limits) = primitive.filter(|_| {
+                                    item & self.fixnum_flag != 0 && depth < MAX_EVALUATION_DEPTH
+                                }) {
                                     let n = if limits.is_empty() {
                                         0
                                     } else {
                                         immediate_integer(item)
                                     };
                                     !limits.iter().all(|&(bit, limit)| match bit {
-                                        1 => n <= limit,
-                                        2 => n >= limit,
-                                        4 => n < limit,
+                                        MAXIMUM => n <= limit,
+                                        MINIMUM => n >= limit,
+                                        EXCLUSIVE_MAXIMUM => n < limit,
                                         _ => n > limit,
                                     })
                                 } else if let Some((required, number)) = number {
@@ -463,10 +467,10 @@ impl Engine {
                     }
                 }
                 Op::Object(required, rules) => {
-                    if *required != 0 && kind != 4 {
+                    if *required != 0 && kind != TYPE_OBJECT {
                         report.add("type", source, value, 0);
                     }
-                    if kind != 4 {
+                    if kind != TYPE_OBJECT {
                         continue;
                     }
                     let mut coverage = Tracked::new(Valid);
@@ -503,7 +507,7 @@ impl Engine {
                                 (&mut context as *mut ObjectDiagnostics).cast(),
                                 object_diagnostic,
                             )
-                        } != 1
+                        } != VERDICT_VALID
                     {
                         return Err(Unsupported);
                     }
@@ -515,7 +519,7 @@ impl Engine {
                                 (&mut context as *mut ObjectDiagnostics).cast(),
                                 object_diagnostic,
                             )
-                        } != 1
+                        } != VERDICT_VALID
                         {
                             return Err(Unsupported);
                         }
@@ -583,7 +587,7 @@ impl Engine {
                                 (&mut context as *mut ObjectDiagnostics).cast(),
                                 object_diagnostic,
                             )
-                        } != 1
+                        } != VERDICT_VALID
                         {
                             return Err(Unsupported);
                         }
@@ -699,8 +703,8 @@ impl Engine {
                         parent: active.active,
                     };
                     let keyword = match source.0 {
-                        26 => "$recursiveRef",
-                        27 => "$dynamicRef",
+                        OP_RECURSIVE_REF => "$recursiveRef",
+                        OP_DYNAMIC_REF => "$dynamicRef",
                         _ => "$ref",
                     };
                     report.scoped(keyword, None, |r| {
@@ -741,16 +745,18 @@ impl Engine {
         active: scope::Context<'_>,
     ) -> Result<bool, Verdict> {
         let status = match self.nodes[node].as_slice() {
-            [Op::Number(required, rules)] if depth <= 256 => rules.eval_guarded(*required, value),
+            [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
+                rules.eval_guarded(*required, value)
+            }
             [op @ (Op::Type(_) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_))]
-                if depth <= 256 =>
+                if depth <= MAX_EVALUATION_DEPTH =>
             {
                 let kind = if value & self.fixnum_flag != 0 {
-                    48
+                    TYPE_INTEGRAL_NUMBER
                 } else {
                     unsafe { sn_kind(value) }
                 };
-                if kind == 128 {
+                if kind == TYPE_UNSUPPORTED {
                     Unsupported
                 } else {
                     self.leaf(op, kind, value, depth)
@@ -790,7 +796,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
             Ok::<_, Verdict>(())
         };
         let result = (|| {
-            if unsafe { sn_kind(key) } != 64 {
+            if unsafe { sn_kind(key) } != TYPE_STRING {
                 return Err(Unsupported);
             }
             if c.names {
@@ -839,7 +845,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
             Ok(())
         })();
         match result {
-            Ok(()) => 1,
+            Ok(()) => VERDICT_VALID,
             Err(_) => Unsupported as i32,
         }
     }))
@@ -881,11 +887,17 @@ pub unsafe extern "C" fn sn_diagnose(
     }));
     match result {
         Ok(Ok(report)) => {
-            unsafe { *status = 1 };
+            unsafe { *status = VERDICT_VALID };
             report
         }
         other => {
-            unsafe { *status = if other.is_err() { -1 } else { 2 } };
+            unsafe {
+                *status = if other.is_err() {
+                    STATUS_PANIC
+                } else {
+                    VERDICT_UNSUPPORTED
+                }
+            };
             std::ptr::null_mut()
         }
     }

@@ -8,6 +8,16 @@ require "rbconfig"
 require_relative "../oracle/lib/case_catalog"
 
 RSpec.describe "native VALUE execution" do
+  it "keeps native type, numeric and scope masks compatible with the Ruby compiler", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
+    Schemurai.compile(true, backend: :native)
+    native = Schemurai.const_get(:Native)::Protocol
+    vm = Schemurai.const_get(:VM)
+    %i[TYPE_NULL TYPE_BOOLEAN TYPE_OBJECT TYPE_ARRAY TYPE_NUMBER TYPE_INTEGER TYPE_STRING
+      MAXIMUM MINIMUM EXCLUSIVE_MAXIMUM EXCLUSIVE_MINIMUM MULTIPLE_OF TRACKS_EVALUATION TRACKS_DYNAMIC_SCOPE].each do |name|
+      expect(native.const_get(name)).to eq(vm.const_get(name)), name.to_s
+    end
+  end
+
   let(:vm_class) do
     Schemurai.const_get(:Backend).load_vm!
     Schemurai.const_get(:VM)::Evaluator
