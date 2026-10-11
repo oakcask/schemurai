@@ -3,7 +3,7 @@
 module Schemurai
   module Backend
     VM_FEATURE = "vm/evaluator"
-    CHOICES = %i[default ruby vm].freeze
+    CHOICES = %i[default ruby vm native].freeze
 
     module_function def requested
       value = ENV.fetch("SCHEMURAI_BACKEND", "default").to_sym
@@ -18,6 +18,7 @@ module Schemurai
 
       selection = production_default if selection == :default
       load_vm! if selection == :vm
+      require_relative "native/evaluator" if selection == :native
       selection
     end
 

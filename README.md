@@ -218,6 +218,12 @@ validator is retained.
 `Schemurai.backend`, `SchemaRegistry#backend`, and `Validator#backend` expose
 the actual backend. Pass `backend: :ruby` to force the Ruby oracle or
 `backend: :vm` to ahead-of-time compile schemas for the validator virtual machine.
+Pass `backend: :native` to use the experimental Rust VM extension. Building the
+native extension requires a C toolchain, Ruby development headers, and Rust
+1.93 or newer. If cargo is absent, gem installation skips the optional native
+extension and Ruby/VM remain available; explicitly selecting `:native` then
+raises `LoadError`. Native execution borrows Ruby values directly; its current coverage and
+remaining VM delegation are documented below.
 Schema graph construction remains shared Ruby infrastructure. Environment-based selection
 is documented in [`docs/backend-selection.md`](docs/backend-selection.md).
 

@@ -3,10 +3,13 @@
 require "spec_helper"
 require_relative "../oracle/lib/runner"
 require_relative "../oracle/lib/comparator"
+require_relative "../spec/support/backend_regressions"
 
 backend = ENV.fetch("SCHEMURAI_DIFFERENTIAL_BACKEND").to_sym
 
 RSpec.describe "the #{backend} evaluator" do
+  it_behaves_like "backend regressions", backend
+
   it "does not instantiate or copy the Ruby evaluator" do
     ruby_evaluator = Schemurai.const_get(:Internal).const_get(:Evaluator)
     allow(ruby_evaluator).to receive(:new).and_raise("Ruby evaluator fallback")
@@ -20,7 +23,9 @@ RSpec.describe "the #{backend} evaluator" do
   it "matches the Ruby result stream for the complete catalog" do
     inputs = SchemuraiOracle::CaseCatalog.new.each_case
       .select { |record| record.classification == "selected" }
-      .map { |record| {"catalog_case" => record.id} }
+      .flat_map do |record|
+        %w[valid validate].map { |operation| {"catalog_case" => record.id, "operation" => operation} }
+      end
     ruby_runner = SchemuraiOracle::Runner.new(backend: :ruby)
     backend_runner = SchemuraiOracle::Runner.new(backend: backend)
     ruby_records = inputs.map { |input| ruby_runner.run(input) }
@@ -32,15 +37,15 @@ RSpec.describe "the #{backend} evaluator" do
   end
 
   it "runs with validators owned by independent Ractors", :aggregate_failures do
-    schema = {"type" => "array", "items" => {"type" => "integer"}}
+    schema = {"type" => "array", "items" => {"$ref" => "#/$defs/item"}, "uniqueItems" => true, "$defs" => {"item" => {"type" => "integer"}}}
     registry = Schemurai::SchemaRegistry.new(schemas: {"urn:backend" => schema}, backend: backend)
     registry.make_shareable
     ractor = Ractor.new(registry) do |shared|
       validator = shared.validator_for("urn:backend")
-      [validator.backend, validator.valid?([1]), validator.valid?(["bad"])]
+      [validator.backend, validator.valid?([1]), validator.valid?(["bad"]), validator.valid?([1, 1])]
     end
     result = ractor.respond_to?(:value) ? ractor.value : ractor.take
 
-    expect(result).to eq([backend, true, false])
+    expect(result).to eq([backend, true, false, false])
   end
 end

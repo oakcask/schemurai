@@ -4,3 +4,4 @@
 /ext/**/*.log
 /ext/**/*.o
 /ext/**/*.so
+/ext/**/target
