@@ -4,7 +4,7 @@
 use super::*;
 use regex_automata::{
     Anchored, Input, MatchKind,
-    dfa::{Automaton, StartKind, dense},
+    dfa::{Automaton, OverlappingState, StartKind, dense},
     meta::{Cache, Regex},
     nfa::thompson,
 };
@@ -59,6 +59,82 @@ pub(super) enum Pattern {
     Unsupported,
     Dfa(Box<dense::DFA<Vec<u32>>>),
     Compiled { regex: Regex, index: usize },
+}
+
+// Preserve every overlapping match while scanning a key with one automaton.
+// Keep individual matchers for unsupported compilation/search configurations.
+#[derive(Debug)]
+pub(super) struct PatternGroup {
+    dfa: dense::DFA<Vec<u32>>,
+    all: u64,
+}
+impl PatternGroup {
+    pub(super) fn compile(names: &[Value], patterns: &[(Pattern, usize)]) -> Option<Self> {
+        if !(2..=64).contains(&patterns.len())
+            || !patterns
+                .iter()
+                .all(|(pattern, _)| matches!(pattern, Pattern::Dfa(_)))
+        {
+            return None;
+        }
+        // Existing DFA compilation already proved syntax, encoding, compatibility
+        // and full start anchoring. Reuse exactly the same translation.
+        let sources: Option<Vec<_>> = names
+            .iter()
+            .map(|&name| {
+                std::str::from_utf8(unsafe { string_bytes(name) })
+                    .ok()
+                    .and_then(translate)
+            })
+            .collect();
+        let dfa = dense::Builder::new()
+            .configure(
+                dense::Config::new()
+                    .match_kind(MatchKind::All)
+                    .start_kind(StartKind::Anchored)
+                    .dfa_size_limit(Some(1 << 20))
+                    .determinize_size_limit(Some(1 << 22)),
+            )
+            .thompson(thompson::Config::new().nfa_size_limit(Some(1 << 20)))
+            .build_many(&sources?)
+            .ok()?;
+        let all = u64::MAX >> (64 - patterns.len());
+        Some(Self { dfa, all })
+    }
+    pub(super) fn matches(&self, value: Value) -> Option<u64> {
+        let mut data = std::ptr::null();
+        let mut len = 0;
+        let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
+        if encoding == ENCODING_OTHER {
+            return None;
+        }
+        let bytes = unsafe { byte_view(data, len) };
+        if encoding != ENCODING_SEVEN_BIT
+            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
+                || std::str::from_utf8(bytes).is_err())
+        {
+            return None;
+        }
+        let input = Input::new(bytes).anchored(Anchored::Yes);
+        let mut state = OverlappingState::start();
+        let mut matches = 0;
+        loop {
+            self.dfa
+                .try_search_overlapping_fwd(&input, &mut state)
+                .ok()?;
+            let Some(found) = state.get_match() else {
+                break;
+            };
+            matches |= 1_u64 << found.pattern().as_usize();
+            if matches == self.all {
+                break;
+            }
+        }
+        Some(matches)
+    }
+    pub(super) fn memory_usage(&self) -> usize {
+        self.dfa.memory_usage()
+    }
 }
 
 impl Pattern {

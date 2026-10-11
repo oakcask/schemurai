@@ -96,6 +96,18 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate(value).errors.size).to eq(2)
   end
 
+  it "applies every grouped pattern in schema order including overlapping and empty matches" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    patterns = {"^a" => {"type" => "integer"}, "^a.*$" => {"minimum" => 2}, "^" => {"maximum" => 4},
+                "^b|^é" => {"type" => "string"}}
+    schema = dialect.merge("patternProperties" => patterns, "additionalProperties" => false)
+    wide = dialect.merge("patternProperties" => 64.times.to_h { |i| ["^p#{i}$", {"const" => i}] },
+      "additionalProperties" => false)
+    expect_native_policy_results([schema, schema.merge("unevaluatedProperties" => false), wide],
+      [{}, {"a" => 3}, {"a" => 1}, {"a" => "bad"}, {"b" => "ok", "é" => 8},
+        {"p63" => 63}, {"p63" => 62}, {"extra" => 1}])
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}
