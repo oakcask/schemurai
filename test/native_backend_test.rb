@@ -2067,8 +2067,6 @@ RSpec.describe "native VALUE execution" do
 
   it "resolves references during compilation under GC stress" do
     previous = GC.stress
-    # Load Ruby source before stressing native reference compilation.
-    Schemurai.compile(true, backend: :native)
     GC.stress = true
     validator = Schemurai.compile({"$ref" => "#/$defs/value", "$defs" => {"value" => {"const" => {"id" => 1}}}}, backend: :native)
     expect(validator.valid?({"id" => 1.0})).to be(true)
