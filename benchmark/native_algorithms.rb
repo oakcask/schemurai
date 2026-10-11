@@ -46,3 +46,7 @@ end
   end
   measure("shared-reference depth=#{depth}", {"$defs" => definitions, "$ref" => "#/$defs/d#{depth}"}, 1, calls: 5)
 end
+[1, 8, 32, 64].each do |patterns|
+  schema = {"patternProperties" => Array.new(patterns) { |i| ["^f#{i}_", {"type" => "integer"}] }.to_h}
+  measure("patterns=#{patterns} width=1024", schema, Array.new(1024) { |i| ["f0_#{i}", i] }.to_h, calls: 10)
+end

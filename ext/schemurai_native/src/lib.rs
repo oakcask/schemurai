@@ -269,6 +269,7 @@ struct Object {
     property_targets: HashMap<tracking::JsonKey, PropertyTarget, BuildHasherDefault<BucketHasher>>,
     patterns: Vec<(pattern::Pattern, usize)>,
     pattern_names: Vec<Value>,
+    pattern_group: Option<pattern::PatternGroup>,
     required_properties: Vec<bool>,
     required_property_indices: Vec<usize>,
     property_keys: tracking::KeySet,
@@ -443,13 +444,30 @@ impl Object {
             self.property_keys
                 .contains(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
         };
-        for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
-            match pattern.eval(caches, key) {
-                Unsupported => return Err(Unsupported),
-                Invalid => {}
-                Valid => {
-                    matched = true;
-                    visit("patternProperties", Some(name), *child)?;
+        if let Some(mut matches) = self
+            .pattern_group
+            .as_ref()
+            .and_then(|group| group.matches(key))
+        {
+            while matches != 0 {
+                let index = matches.trailing_zeros() as usize;
+                matches &= matches - 1;
+                matched = true;
+                visit(
+                    "patternProperties",
+                    Some(self.pattern_names[index]),
+                    self.patterns[index].1,
+                )?;
+            }
+        } else {
+            for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
+                match pattern.eval(caches, key) {
+                    Unsupported => return Err(Unsupported),
+                    Invalid => {}
+                    Valid => {
+                        matched = true;
+                        visit("patternProperties", Some(name), *child)?;
+                    }
                 }
             }
         }
@@ -834,8 +852,8 @@ impl Engine {
                     let dependencies = self.field(operand, b"dependencies\0")?;
                     {
                         let patterns = self.compile_map(patterns)?;
-                        let pattern_names = patterns.iter().map(|&(key, _)| key).collect();
-                        let patterns = patterns
+                        let pattern_names: Vec<_> = patterns.iter().map(|&(key, _)| key).collect();
+                        let patterns: Vec<_> = patterns
                             .into_iter()
                             .map(|(key, child)| {
                                 (
@@ -844,6 +862,8 @@ impl Engine {
                                 )
                             })
                             .collect();
+                        let pattern_group =
+                            pattern::PatternGroup::compile(&pattern_names, &patterns);
                         let required = self.field(operand, b"required\0")?;
                         let required = self.values(required);
                         let required_order = required.clone();
@@ -963,6 +983,7 @@ impl Engine {
                             property_targets,
                             patterns,
                             pattern_names,
+                            pattern_group,
                             required_properties,
                             required_property_indices,
                             property_keys,
@@ -2592,7 +2613,12 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
                             .map_or(0, pattern::Pattern::memory_usage)
                 }
                 Op::Object(_, rules) => {
-                    rules.patterns.capacity() * std::mem::size_of::<(pattern::Pattern, usize)>()
+                    rules
+                        .pattern_group
+                        .as_ref()
+                        .map_or(0, pattern::PatternGroup::memory_usage)
+                        + rules.patterns.capacity()
+                            * std::mem::size_of::<(pattern::Pattern, usize)>()
                         + rules
                             .patterns
                             .iter()
