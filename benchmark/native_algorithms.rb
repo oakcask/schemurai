@@ -32,3 +32,10 @@ puts RUBY_DESCRIPTION
     measure("key-guard width=#{width} branches=#{branches}", schema, Array.new(width) { |i| ["f#{i}", i] }.to_h)
   end
 end
+[0, 4096, 65536].each do |padding|
+  schema = {"allOf" => [
+    {"properties" => Array.new(padding) { |i| ["unused#{i}", true] }.to_h},
+    {"properties" => {"records" => {"items" => {"properties" => {"x" => true}, "unevaluatedProperties" => false}}}}
+  ]}
+  measure("global-property-ids padding=#{padding} records=1000", schema, {"records" => Array.new(1000) { {"x" => 1} }}, calls: 10)
+end

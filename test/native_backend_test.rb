@@ -56,6 +56,18 @@ RSpec.describe "native VALUE execution" do
     expect(runner.diagnostics(value)).to be_nil
   end
 
+  it "merges sparse property words across distant global IDs and overlapping branches" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    padding = 4096.times.to_h { |i| ["unused#{i}", true] }
+    item = {"anyOf" => [{"properties" => {"x" => true}}, {"properties" => {"x" => true, "y" => true}}],
+            "unevaluatedProperties" => false}
+    schema = dialect.merge("allOf" => [{"properties" => padding}, {"properties" => {"records" => {"items" => item}}}])
+    words = dialect.merge("allOf" => [{"properties" => {"x" => true}}, {"properties" => padding},
+      {"properties" => {"y" => true}}, {"properties" => {"x" => true}}], "unevaluatedProperties" => false)
+    expect_native_policy_results([schema, words], [{"records" => [{"x" => 1}, {"x" => 1, "y" => 2}]},
+      {"records" => [{"x" => 1, "extra" => 2}]}, {"records" => [{}]}, {"x" => 1, "y" => 2}, {}, {"extra" => 1}])
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}
