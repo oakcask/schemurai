@@ -106,6 +106,49 @@ RSpec.describe "native VALUE execution" do
     expect_native_policy_results(schemas, [1, "bad", {"x" => 1}, {"x" => "bad"}, {"x" => 1, "extra" => 2}, {}])
   end
 
+  it "separates shared dynamic reference results by effective single and multiple anchor bindings" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    cases = [1, 2].flat_map do |names|
+      definitions = names.times.to_h { |i| ["target#{i}", {"$dynamicAnchor" => "target#{i}", "type" => "integer", "minimum" => 2}] }
+      definitions["d0"] = {"allOf" => names.times.map { |i| {"$dynamicRef" => "#target#{i}"} }}
+      1.upto(4) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }
+      body = dialect.merge("$id" => "urn:body", "$defs" => definitions, "$ref" => "#/$defs/d4")
+      [false, true].flat_map do |annotations|
+        resources = %w[a b].each_with_index.to_h do |name, branch|
+          targets = names.times.to_h do |i|
+            leaf = if annotations
+              {"properties" => {"#{name}#{i}" => {"type" => "integer"}}}
+            else
+              {"type" => "integer", "minimum" => (i == names - 1) ? branch : 0}
+            end
+            ["target#{i}", leaf.merge("$dynamicAnchor" => "target#{i}")]
+          end
+          ["urn:#{name}", dialect.merge("$id" => "urn:#{name}", "$defs" => targets, "$ref" => "urn:body")]
+        end.merge("urn:body" => body)
+        values = annotations ? [{"a0" => 1}, {"a0" => 1, "b0" => 2},
+          {"a0" => 1, "b0" => 2, "a1" => 3, "b1" => 4}, {"a0" => "bad"}, {"extra" => 1}, {}] : [0, 1, -1, "bad"]
+        %w[allOf anyOf oneOf].map do |keyword|
+          root = dialect.merge(keyword => [{"$ref" => "urn:a"}, {"$ref" => "urn:b"}])
+          root["unevaluatedProperties"] = false if annotations
+          vm = Schemurai.compile(root, schemas: resources, backend: :vm)
+          [Schemurai.compile(root, schemas: resources, backend: :native),
+            values.map { |value| [value, vm.valid?(value), vm.validate(value).errors] }]
+        end
+      end
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, values|
+      runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      values.each do |value, valid, errors|
+        expect(runner.valid?(value)).to eq(valid)
+        expect(runner.diagnostics(value)).not_to be_nil
+        expect(native.validate(value).errors).to eq(errors)
+      end
+    end
+  end
+
   it "keeps shared reference annotations usable after invocation cache turnover" do # rubocop:disable RSpec/ExampleLength
     definitions = {"d0" => {"properties" => {"x" => {"type" => "integer"}}}}
     1.upto(8) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }

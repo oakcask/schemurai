@@ -1,9 +1,10 @@
-//! Invocation-local results for shared, acyclic, static reference targets.
+//! Invocation-local results for shared acyclic reference targets and scopes.
 use super::*;
 use std::cell::RefCell;
 use tracking::Tracked;
 
-type Key = (usize, Value, usize);
+pub(super) type Key = (usize, Value, usize);
+const MAX_SCOPE_SLOTS: usize = 65536;
 const MAX_ENTRIES: usize = 4096;
 const MAX_ANNOTATION_SLOTS: usize = 65536;
 
@@ -44,14 +45,93 @@ impl<K: Copy + Eq + std::hash::Hash, T: Clone> Cache<K, T> {
     }
 }
 
+// Exact effective bindings identify a scope, rather than its stack address or
+// a probabilistic digest. FIFO eviction bounds the signature buffers; IDs are
+// never reused, so still-running evaluations can safely record older keys.
+#[derive(Default)]
+struct Scopes {
+    bindings: HashMap<std::sync::Arc<[Option<usize>]>, usize>,
+    order: std::collections::VecDeque<std::sync::Arc<[Option<usize>]>>,
+    slots: usize,
+    next_id: usize,
+}
+impl Scopes {
+    fn intern(&mut self, bindings: Vec<Option<usize>>) -> Option<usize> {
+        if let Some(&id) = self.bindings.get(bindings.as_slice()) {
+            return Some(id);
+        }
+        if bindings.len() > MAX_SCOPE_SLOTS {
+            return None;
+        }
+        let id = self.next_id.checked_add(1)?;
+        while self.bindings.len() >= MAX_ENTRIES || bindings.len() > MAX_SCOPE_SLOTS - self.slots {
+            let oldest = self.order.pop_front().unwrap();
+            self.bindings.remove(oldest.as_ref());
+            self.slots -= oldest.len();
+        }
+        let bindings: std::sync::Arc<[Option<usize>]> = bindings.into();
+        self.slots += bindings.len();
+        self.bindings.insert(bindings.clone(), id);
+        self.order.push_back(bindings);
+        self.next_id = id;
+        Some(id)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Memo {
     verdicts: RefCell<Cache<Key, Verdict>>,
+    scopes: RefCell<Scopes>,
     // None is tracked validity; Some(bool) is the diagnostic annotation policy.
     // Coverage results share both admission order and the allocation budget.
     coverage: RefCell<Cache<(Key, Option<bool>), Tracked>>,
 }
 impl Memo {
+    pub(super) fn key(
+        &self,
+        engine: &Engine,
+        node: usize,
+        value: Value,
+        depth: usize,
+        context: scope::Context<'_>,
+    ) -> Option<Key> {
+        if !engine.memoizable[node] {
+            return None;
+        }
+        if !engine.memo_contextual[node] {
+            return Some((node, value, depth));
+        }
+        let scope = if engine.anchor_tables.len() == 1 {
+            // The existing frame already retains the outermost binding.
+            // Zero means unbound; compiled node IDs start at zero.
+            context
+                .scope
+                .and_then(|frame| frame.primary_binding)
+                .map_or(0, |target| target + 1)
+        } else {
+            let names = engine.anchor_tables.len();
+            if names > MAX_SCOPE_SLOTS {
+                return None;
+            }
+            let mut bindings = vec![None; names];
+            let mut current = context.scope;
+            while let Some(frame) = current {
+                for (name, binding) in bindings.iter_mut().enumerate() {
+                    if let Some(Some(target)) = engine.dynamic_bindings.get(&(frame.resource, name))
+                    {
+                        *binding = Some(*target);
+                    }
+                }
+                current = frame.parent;
+            }
+            self.scopes.borrow_mut().intern(bindings)?
+        };
+        // Each scope gets a disjoint block of native node IDs. Checked
+        // arithmetic keeps compact three-word result keys without aliasing
+        // after scope eviction, even if monotonic IDs eventually overflow.
+        let node = scope.checked_mul(engine.nodes.len())?.checked_add(node)?;
+        Some((node, value, depth))
+    }
     pub(super) fn verdict(&self, key: Key) -> Option<Verdict> {
         self.verdicts.borrow().get(key)
     }
@@ -87,6 +167,131 @@ impl Memo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_exact_outermost_bindings_and_reuses_equivalent_scopes() {
+        let memo = Memo::default();
+        let engine = Engine {
+            nodes: vec![vec![Op::Boolean(true)]],
+            memoizable: vec![true],
+            memo_contextual: vec![true],
+            anchor_tables: vec![vec![], vec![]],
+            dynamic_bindings: HashMap::from([
+                ((1, 0), Some(7)),
+                ((2, 0), Some(8)),
+                ((2, 1), Some(9)),
+                ((3, 0), Some(7)),
+            ]),
+            ..Engine::default()
+        };
+        let frame = |resource, parent| scope::ScopeFrame {
+            resource,
+            parent,
+            primary_binding: None,
+        };
+        let outer = frame(1, None);
+        let inner = frame(2, Some(&outer));
+        let equivalent_outer = frame(3, None);
+        let equivalent_inner = frame(2, Some(&equivalent_outer));
+        let different = frame(2, None);
+        let key = |frame| {
+            memo.key(
+                &engine,
+                0,
+                10,
+                2,
+                scope::Context {
+                    scope: Some(frame),
+                    ..scope::Context::default()
+                },
+            )
+            .unwrap()
+        };
+        let first = key(&inner);
+        assert_eq!(first, key(&equivalent_inner));
+        assert_ne!(first, key(&different));
+        memo.record_verdict(first, Valid);
+        assert_eq!(memo.verdict(key(&equivalent_inner)), Some(Valid));
+        assert_eq!(memo.verdict(key(&different)), None);
+        assert_eq!(memo.scopes.borrow().bindings.len(), 2);
+    }
+
+    #[test]
+    fn compact_scope_blocks_separate_nodes_and_decline_overflow() {
+        let engine = Engine {
+            nodes: vec![vec![], vec![], vec![]],
+            memoizable: vec![true; 3],
+            memo_contextual: vec![true, true, false],
+            anchor_tables: vec![vec![], vec![]],
+            dynamic_bindings: HashMap::from([((1, 0), Some(0)), ((2, 0), Some(1))]),
+            ..Engine::default()
+        };
+        let first = scope::ScopeFrame {
+            resource: 1,
+            parent: None,
+            primary_binding: None,
+        };
+        let second = scope::ScopeFrame {
+            resource: 2,
+            parent: None,
+            primary_binding: None,
+        };
+        let context = |frame| scope::Context {
+            scope: Some(frame),
+            ..scope::Context::default()
+        };
+        let memo = Memo::default();
+        let a = memo.key(&engine, 1, 10, 2, context(&first)).unwrap();
+        let b = memo.key(&engine, 0, 10, 2, context(&second)).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            memo.key(&engine, 2, 10, 2, context(&first)),
+            Some((2, 10, 2))
+        );
+        assert_eq!(
+            memo.key(&engine, 2, 10, 2, context(&second)),
+            Some((2, 10, 2))
+        );
+        let exhausted = Memo::default();
+        exhausted.scopes.borrow_mut().next_id = usize::MAX / 2;
+        assert!(exhausted.key(&engine, 0, 10, 2, context(&first)).is_none());
+        assert_eq!(
+            exhausted.key(&engine, 2, 10, 2, context(&first)),
+            Some((2, 10, 2))
+        );
+    }
+
+    #[test]
+    fn scope_turnover_never_reassigns_ids_still_used_by_results() {
+        let mut scopes = Scopes::default();
+        let old = scopes.intern(vec![Some(0)]).unwrap();
+        for binding in 1..MAX_ENTRIES * 2 {
+            scopes.intern(vec![Some(binding)]).unwrap();
+        }
+        assert_eq!(scopes.bindings.len(), MAX_ENTRIES);
+        assert_eq!(scopes.order.len(), MAX_ENTRIES);
+        assert_eq!(scopes.slots, MAX_ENTRIES);
+        let new = scopes.intern(vec![Some(0)]).unwrap();
+        assert_ne!(old, new);
+        assert_eq!(scopes.intern(vec![Some(0)]), Some(new));
+        let memo = Memo::default();
+        memo.record_verdict((old, 2, 3), Invalid);
+        assert_eq!(memo.verdict((new, 2, 3)), None);
+    }
+
+    #[test]
+    fn bounds_scope_buffers_and_skips_oversized_signatures_without_eviction() {
+        let mut scopes = Scopes::default();
+        let bindings = vec![Some(0); MAX_SCOPE_SLOTS / 2];
+        let first = scopes.intern(bindings.clone()).unwrap();
+        scopes.intern(vec![Some(1); bindings.len()]).unwrap();
+        scopes.intern(vec![Some(2); bindings.len()]).unwrap();
+        assert_eq!(scopes.slots, MAX_SCOPE_SLOTS);
+        assert_eq!(scopes.bindings.len(), 2);
+        assert!(scopes.intern(vec![None; MAX_SCOPE_SLOTS + 1]).is_none());
+        assert_eq!(scopes.slots, MAX_SCOPE_SLOTS);
+        assert_ne!(scopes.intern(bindings), Some(first));
+    }
 
     #[test]
     fn separates_annotation_policies_and_returns_independent_coverage() {
@@ -166,8 +371,14 @@ mod tests {
 impl Engine {
     pub(super) fn compile_memoization(&mut self) {
         let mut incoming = vec![0_usize; self.nodes.len()];
-        let mut eligible = vec![true; self.nodes.len()];
-        let mut edges = vec![vec![]; self.nodes.len()];
+        // Each dynamic name has one virtual dispatch vertex. Sharing it avoids
+        // materializing reference-count × binding-count dependency edges.
+        let count = self.nodes.len();
+        let mut eligible = vec![true; count + self.anchor_tables.len()];
+        let mut edges = vec![vec![]; eligible.len()];
+        for (name, bindings) in self.anchor_tables.iter().enumerate() {
+            edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
+        }
         for (index, ops) in self.nodes.iter().enumerate() {
             for op in ops {
                 match op {
@@ -176,6 +387,9 @@ impl Engine {
                         if let Some(target) = reference.static_target() {
                             incoming[target] += 1;
                             edges[index].push(target);
+                        } else if let Some((name, target)) = reference.dynamic_target() {
+                            incoming[target] += 1;
+                            edges[index].extend([target, count + name]);
                         } else {
                             eligible[index] = false;
                         }
@@ -210,19 +424,21 @@ impl Engine {
                 }
             }
         }
-        // Reject cycles and every node that can reach a context-dependent ref.
+        // Reject cycles through any possible binding, plus recursive refs.
+        // States 2 and 4 distinguish scope-independent and scoped successes.
         // Bound analysis depth just as evaluation is bounded; conservatively
         // leave longer chains uncached rather than risking compilation overflow.
-        fn independent(
+        fn reusable(
             node: usize,
             depth: usize,
             edges: &[Vec<usize>],
             eligible: &[bool],
             states: &mut [u8],
+            count: usize,
         ) -> bool {
             match states[node] {
                 1 | 3 => return false,
-                2 => return true,
+                2 | 4 => return true,
                 _ => {}
             }
             if depth > MAX_EVALUATION_DEPTH || !eligible[node] {
@@ -230,15 +446,27 @@ impl Engine {
                 return false;
             }
             states[node] = 1;
-            let safe = edges[node]
-                .iter()
-                .all(|&child| independent(child, depth + 1, edges, eligible, states));
-            states[node] = if safe { 2 } else { 3 };
+            let mut scoped = node >= count;
+            let safe = edges[node].iter().all(|&child| {
+                let safe = reusable(child, depth + 1, edges, eligible, states, count);
+                scoped |= states[child] == 4;
+                safe
+            });
+            states[node] = if !safe {
+                3
+            } else if scoped {
+                4
+            } else {
+                2
+            };
             safe
         }
-        let mut states = vec![0; self.nodes.len()];
+        let mut states = vec![0; edges.len()];
         self.memoizable = (0..self.nodes.len())
-            .map(|node| incoming[node] > 1 && independent(node, 0, &edges, &eligible, &mut states))
+            .map(|node| {
+                incoming[node] > 1 && reusable(node, 0, &edges, &eligible, &mut states, count)
+            })
             .collect();
+        self.memo_contextual = states[..count].iter().map(|&state| state == 4).collect();
     }
 }

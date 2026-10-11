@@ -153,8 +153,9 @@ The sparse scan takes O(N log N + R) expected work and O(N) temporary native
 storage for N input keys and R required declared properties, excluding child
 evaluation and key-byte processing.
 
-Shared, acyclic static reference targets use invocation-local memoization keyed
-by node, original VALUE and evaluation depth. Tracked validity stores the verdict
+Shared, acyclic reference targets use invocation-local memoization keyed
+by node, original VALUE and evaluation depth. Scope-dependent targets also key
+results by their effective outermost dynamic anchor bindings. Tracked validity stores the verdict
 and exported locations; diagnostics store only complete successful traversals,
 with annotation demand included in the key. Returned coverage is independently
 owned, so merging one branch cannot change another branch's cached annotations.
@@ -175,7 +176,21 @@ fallback target become static native references. The original opcode and
 diagnostic paths remain `$dynamicRef`. This proof takes O(A + E) work and O(K)
 temporary slots for A compiled bindings, E instructions, and K anchor names,
 and lets shared acyclic graphs with invariant dynamic leaves reuse results.
-Cyclic or genuinely scope-dependent reachable subgraphs remain uncached.
+For genuinely scope-dependent references, the compiler includes all possible
+binding targets in its cycle analysis. One virtual dispatch vertex per anchor
+name avoids duplicating every binding edge for every reference; analysis takes
+O(N + E + A + K) work and storage for N nodes, E instruction edges, A bindings
+and K anchor names. Cyclic reachable subgraphs and recursive references remain
+uncached, preserving the active-reference guard's path-dependent behavior.
+Scope-independent nodes skip scope-key construction. A single dynamic name
+uses the existing effective binding in its scope frame in O(1); multiple names
+construct an exact binding vector in O(KS) work for S active scope frames.
+Equivalent vectors share an invocation-local ID. FIFO interning retains at
+most 4,096 signatures and 65,536 binding slots, with shared buffers between the
+lookup table and eviction queue. IDs are never reassigned after eviction,
+including while a child evaluation can still record a parent result. Signatures
+exceeding the slot budget leave scoped results uncached without dropping useful
+stored scopes. This additional storage is bounded separately from annotations.
 These limits bound extra retained memory rather than guaranteeing
 linear evaluation for arbitrary schemas. Failed diagnostics still visit each
 path: if the contract requires 2^D distinct errors, producing them takes at
@@ -185,6 +200,8 @@ least O(2^D) work. See the reproducible workloads in
 budget and confirms direct native coverage after the limits are crossed.
 `benchmark/native_dynamic_memo.rb` exercises the previously exponential
 shared-reference chain ending in an invariant dynamic reference.
+`benchmark/native_contextual_memo.rb` covers changing single and multiple
+bindings, including annotation collection, with exact VM parity.
 
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
 exceptions and exact match counts. `contains` scans also retain complete
