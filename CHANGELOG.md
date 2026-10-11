@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/oakcask/schemurai/compare/v2.2.3...v2.3.0) (2026-10-11)
+
+
+### Features
+
+* add optional Rust native backend and architecture benchmarks ([#159](https://github.com/oakcask/schemurai/issues/159)) ([3076170](https://github.com/oakcask/schemurai/commit/3076170b09a9eefe8c86ded5c1b1a264520fc087))
+
 ## [2.2.3](https://github.com/oakcask/schemurai/compare/v2.2.2...v2.2.3) (2026-10-07)
 
 
