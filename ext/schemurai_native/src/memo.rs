@@ -365,11 +365,13 @@ mod tests {
 impl Engine {
     pub(super) fn compile_memoization(&mut self) {
         let mut incoming = vec![0_usize; self.nodes.len()];
+        let mut repeated_position = vec![false; self.nodes.len()];
         // Each dynamic name has one virtual dispatch vertex. Sharing it avoids
         // materializing reference-count × binding-count dependency edges.
         let count = self.nodes.len();
         let mut eligible = vec![true; count + self.anchor_tables.len()];
         let mut edges = vec![vec![]; eligible.len()];
+        let mut repeated_subtree = vec![false; eligible.len()];
         for (name, bindings) in self.anchor_tables.iter().enumerate() {
             edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
         }
@@ -399,6 +401,22 @@ impl Engine {
                         edges[index].extend(no);
                     }
                     Op::Array(_, rules) => {
+                        // One schema edge can evaluate many instance positions.
+                        // Shared Ruby containers can reach this child repeatedly
+                        // at the same depth even with only one source reference.
+                        if !rules.list {
+                            for &child in &rules.items {
+                                repeated_position[child] = true;
+                                repeated_subtree[index] = true;
+                            }
+                        }
+                        for child in [rules.additional, rules.contains, rules.unevaluated]
+                            .into_iter()
+                            .flatten()
+                        {
+                            repeated_position[child] = true;
+                            repeated_subtree[index] = true;
+                        }
                         edges[index].extend(&rules.prefix);
                         edges[index].extend(&rules.items);
                         edges[index].extend(rules.additional);
@@ -406,6 +424,17 @@ impl Engine {
                         edges[index].extend(rules.unevaluated);
                     }
                     Op::Object(_, rules) => {
+                        for &(_, child) in &rules.patterns {
+                            repeated_position[child] = true;
+                            repeated_subtree[index] = true;
+                        }
+                        for child in [rules.additional, rules.names, rules.unevaluated]
+                            .into_iter()
+                            .flatten()
+                        {
+                            repeated_position[child] = true;
+                            repeated_subtree[index] = true;
+                        }
                         edges[index].extend(rules.properties.iter().map(|&(_, child)| child));
                         edges[index].extend(rules.patterns.iter().map(|(_, child)| *child));
                         edges[index]
@@ -429,6 +458,7 @@ impl Engine {
             eligible: &[bool],
             states: &mut [u8],
             count: usize,
+            repeated_subtree: &mut [bool],
         ) -> bool {
             match states[node] {
                 1 | 3 => return false,
@@ -442,7 +472,16 @@ impl Engine {
             states[node] = 1;
             let mut scoped = node >= count;
             let safe = edges[node].iter().all(|&child| {
-                let safe = reusable(child, depth + 1, edges, eligible, states, count);
+                let safe = reusable(
+                    child,
+                    depth + 1,
+                    edges,
+                    eligible,
+                    states,
+                    count,
+                    repeated_subtree,
+                );
+                repeated_subtree[node] |= repeated_subtree[child];
                 scoped |= states[child] == 4;
                 safe
             });
@@ -458,7 +497,11 @@ impl Engine {
         let mut states = vec![0; edges.len()];
         self.memoizable = (0..self.nodes.len())
             .map(|node| {
-                incoming[node] > 1 && reusable(node, 0, &edges, &eligible, &mut states, count)
+                (incoming[node] > 1 || repeated_position[node])
+                    && reusable(node, 0, &edges, &eligible, &mut states, count, &mut repeated_subtree)
+                    // Position-only candidates need nested iteration to amplify
+                    // sharing. Simple records/scalars keep their cheap scans.
+                    && (incoming[node] > 1 || repeated_subtree[node])
             })
             .collect();
         self.memo_contextual = states[..count].iter().map(|&state| state == 4).collect();

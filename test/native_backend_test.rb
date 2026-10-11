@@ -586,6 +586,40 @@ RSpec.describe "native VALUE execution" do
     expect(status.success?).to be(true), stderr
   end
 
+  it "reuses acyclic children evaluated at repeated instance positions" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rules = [
+      [->(ref) { {"items" => ref} }, ->(v) { [v, v] }],
+      [->(ref) { {"contains" => ref, "minContains" => 2} }, ->(v) { [v, v] }],
+      [->(ref) { {"unevaluatedItems" => ref} }, ->(v) { [v, v] }],
+      [->(ref) { {"additionalProperties" => ref} }, ->(v) { {"x" => v, "y" => v} }],
+      [->(ref) { {"patternProperties" => {"." => ref}} }, ->(v) { {"x" => v, "y" => v} }],
+      [->(ref) { {"unevaluatedProperties" => ref} }, ->(v) { {"x" => v, "y" => v} }]
+    ]
+    rules.each do |rule, shape|
+      [4, 24].each do |depth|
+        definitions = {"n0" => {"type" => "integer"}}
+        value = 0
+        1.upto(depth) do |i|
+          definitions["n#{i}"] = rule.call({"$ref" => "#/$defs/n#{i - 1}"})
+          value = shape.call(value)
+        end
+        schema = dialect.merge("$defs" => definitions, "$ref" => "#/$defs/n#{depth}")
+        native = Schemurai.compile(schema, backend: :native)
+        program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        expect(program.valid?(value)).to be(true)
+        expect(program.diagnostics(value)).to eq([])
+        if depth == 4
+          invalid = "bad"
+          depth.times { invalid = shape.call(invalid) }
+          vm = Schemurai.compile(schema, backend: :vm)
+          expect(native.valid?(invalid)).to eq(vm.valid?(invalid))
+          expect(native.validate(invalid).errors).to eq(vm.validate(invalid).errors)
+        end
+      end
+    end
+  end
+
   it "checks shared container graphs without expanding repeated descendants" do # rubocop:disable RSpec/ExampleLength
     shapes = [->(child) { [child, 1, child] }, ->(child) { {"a" => child, "b" => 1, "c" => child} }]
     native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
