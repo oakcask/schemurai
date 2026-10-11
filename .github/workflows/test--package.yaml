@@ -47,11 +47,13 @@ jobs:
   smoke-test:
     needs: build
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         ruby-version:
           - "3.4"
           - "4.0"
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -72,9 +74,11 @@ jobs:
   without-cargo:
     needs: build
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         ruby-version: ["3.4", "4.0"]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
