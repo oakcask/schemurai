@@ -83,6 +83,8 @@ unsafe extern "C" {
     fn sn_resolve(compiler: Value, program: Value, reference: Value, result: *mut Value) -> i32;
     fn sn_resolution_error(error: Value) -> i32;
     fn sn_resource_program(compiler: Value, resource: Value, result: *mut Value) -> i32;
+    fn sn_anchor_count(resource: Value) -> usize;
+    fn sn_anchor_names(compiler: Value, resource: Value, result: *mut Value) -> i32;
     fn sn_anchor_program(compiler: Value, resource: Value, name: Value, result: *mut Value) -> i32;
     fn sn_hash_each(
         value: Value,
@@ -540,6 +542,7 @@ impl Object {
 #[derive(Default)]
 pub struct Roots {
     values: Vec<Value>,
+    binding_names: Vec<Value>,
 }
 #[derive(Default)]
 pub struct Engine {
@@ -553,6 +556,7 @@ pub struct Engine {
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), usize>,
     anchor_names: Vec<tracking::JsonKey>,
+    anchor_ids: HashMap<tracking::JsonKey, usize, BuildHasherDefault<BucketHasher>>,
     anchor_tables: Vec<Vec<(Value, usize)>>,
     property_ids: HashMap<tracking::JsonKey, usize, BuildHasherDefault<BucketHasher>>,
     indices: HashMap<Value, usize>,
@@ -2684,7 +2688,11 @@ pub unsafe extern "C" fn sn_roots(engine: *const Engine) -> *const Roots {
 /// No mutable root borrow can be live across a Ruby allocation/callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_roots_mark(roots: *const Roots) {
-    for &value in &unsafe { &*roots }.values {
+    for &value in unsafe { &*roots }
+        .values
+        .iter()
+        .chain(&unsafe { &*roots }.binding_names)
+    {
         unsafe { sn_pin(value) };
     }
 }
@@ -2693,7 +2701,8 @@ pub unsafe extern "C" fn sn_roots_mark(roots: *const Roots) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_roots_size(roots: *const Roots) -> usize {
     std::mem::size_of::<Roots>()
-        + unsafe { &*roots }.values.capacity() * std::mem::size_of::<Value>()
+        + (unsafe { &*roots }.values.capacity() + unsafe { &*roots }.binding_names.capacity())
+            * std::mem::size_of::<Value>()
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn sn_engine_header_size() -> usize {

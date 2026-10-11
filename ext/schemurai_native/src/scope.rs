@@ -195,15 +195,14 @@ impl Engine {
                         && unsafe { sn_string_equal(fragment, anchor) } != 0 =>
                 {
                     let name = JsonKey::new(fragment);
-                    let index = self
-                        .anchor_names
-                        .iter()
-                        .position(|&candidate| candidate == name)
-                        .unwrap_or_else(|| {
-                            let index = self.anchor_names.len();
-                            self.anchor_names.push(name);
-                            index
-                        });
+                    let index = if let Some(&index) = self.anchor_ids.get(&name) {
+                        index
+                    } else {
+                        let index = self.anchor_names.len();
+                        self.anchor_names.push(name);
+                        self.anchor_ids.insert(name, index);
+                        index
+                    };
                     ReferenceKind::Dynamic(index)
                 }
                 _ => ReferenceKind::Static,
@@ -221,6 +220,9 @@ impl Engine {
         let mut resolved = HashMap::new();
         loop {
             let names = self.anchor_names.len();
+            if names > 1 {
+                return self.bind_indexed_dynamic_anchors();
+            }
             let pending: Vec<_> = self
                 .resources
                 .keys()
@@ -230,18 +232,7 @@ impl Engine {
                 })
                 .collect();
             if pending.is_empty() {
-                self.anchor_tables = vec![vec![]; names];
-                for (&(resource, name), &target) in &self.dynamic_bindings {
-                    self.anchor_tables[name].push((resource, target));
-                }
-                if names == 1 {
-                    for metadata in &mut self.metadata {
-                        // Use the existing resource/name index instead of an
-                        // O(binding count) scan for every compiled node.
-                        metadata.primary_binding =
-                            self.dynamic_bindings.get(&(metadata.resource, 0)).copied();
-                    }
-                }
+                self.finish_dynamic_bindings();
                 return Ok(());
             }
             for (resource, names) in pending {
@@ -266,6 +257,100 @@ impl Engine {
                     }
                 }
                 resolved.insert(resource, end);
+            }
+        }
+    }
+    fn finish_dynamic_bindings(&mut self) {
+        self.anchor_tables = vec![vec![]; self.anchor_names.len()];
+        for (&(resource, name), &target) in &self.dynamic_bindings {
+            self.anchor_tables[name].push((resource, target));
+        }
+        if self.anchor_names.len() == 1 {
+            for metadata in &mut self.metadata {
+                // Use the existing resource/name index instead of an
+                // O(binding count) scan for every compiled node.
+                metadata.primary_binding =
+                    self.dynamic_bindings.get(&(metadata.resource, 0)).copied();
+            }
+        }
+        // Compiler-only name indexes cannot be reused at runtime. Drop
+        // their allocations and temporary GC roots after the fixed point.
+        drop(std::mem::take(&mut self.anchor_ids));
+        drop(std::mem::take(
+            &mut unsafe { &mut *self.roots }.binding_names,
+        ));
+    }
+
+    fn bind_indexed_dynamic_anchors(&mut self) -> Result<(), Value> {
+        // Join registered names with resources that actually bind them. Resource
+        // tables append names, including when external indexing augments an
+        // existing resource. An indexed prefix admits only newly added names.
+        let mut available: HashMap<JsonKey, Vec<Value>, BuildHasherDefault<BucketHasher>> =
+            HashMap::default();
+        let mut resolved_names = 0;
+        let mut indexed = HashMap::new();
+        loop {
+            let mut pending = vec![];
+            for &resource in self.resources.keys() {
+                let first = indexed.get(&resource).copied().unwrap_or(0);
+                if unsafe { sn_anchor_count(resource) } == first {
+                    continue;
+                }
+                let mut names = 0;
+                if unsafe { sn_anchor_names(self.compiler, resource, &mut names) } != 0 {
+                    return Err(names);
+                }
+                // Copy handles before any Ruby callback. The snapshot Array
+                // is never borrowed across allocation, and temporary roots
+                // pin its names while the reverse index remains live.
+                let count = unsafe { sn_len(names) };
+                for i in first..count {
+                    let name = unsafe { sn_entry(names, i) };
+                    unsafe { &mut *self.roots }.binding_names.push(name);
+                    let name = JsonKey::new(name);
+                    available.entry(name).or_default().push(resource);
+                    if let Some(&id) = self.anchor_ids.get(&name)
+                        && id < resolved_names
+                    {
+                        pending.push((resource, id));
+                    }
+                }
+                indexed.insert(resource, count);
+            }
+            let names = self.anchor_names.len();
+            for id in resolved_names..names {
+                if let Some(resources) = available.get(&self.anchor_names[id]) {
+                    pending.extend(resources.iter().map(|&resource| (resource, id)));
+                }
+            }
+            resolved_names = names;
+            if pending.is_empty() {
+                self.finish_dynamic_bindings();
+                return Ok(());
+            }
+            for (resource, name) in pending {
+                // Switching from single-name discovery can revisit a positive
+                // pair already compiled. It must not invoke compilation twice.
+                if self.dynamic_bindings.contains_key(&(resource, name)) {
+                    continue;
+                }
+                let mut target = 0;
+                if unsafe {
+                    sn_anchor_program(
+                        self.compiler,
+                        resource,
+                        self.anchor_names[name].0,
+                        &mut target,
+                    )
+                } != 0
+                {
+                    return Err(target);
+                }
+                if unsafe { sn_same(target, sn_nil()) } == 0 {
+                    self.retain(target);
+                    let target = self.compile(target)?;
+                    self.dynamic_bindings.insert((resource, name), target);
+                }
             }
         }
     }

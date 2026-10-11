@@ -215,17 +215,30 @@ shared-reference chain ending in an invariant dynamic reference.
 bindings, including annotation collection, with exact VM parity.
 
 Dynamic binding discovery stores only actual `(resource, name) -> target`
-results. A temporary resolved-name prefix per resource records negative
-lookups; pending work snapshots resource rows rather than individual pairs.
-New resources and names introduced while compiling an override are visited in
-later passes. Absent bindings do not append redundant `nil` GC roots. Auxiliary
-binding discovery storage is O(R + K + A) for R resources, K names and A actual
-bindings, instead of retaining O(RK) missing pairs and roots. The existing Ruby
-lookup interface still probes each resource/name pair once, taking O(RK)
-lookup work plus compilation and discovery-pass scans. Single-name scope
-metadata uses the compiled index in O(N) expected work for N nodes, replacing
-an O(NA) scan. See `benchmark/native_scope_compile.rb` for construction timing
-from cached VM programs and sparse binding workloads.
+results; absent bindings do not append redundant `nil` GC roots. A single-name
+query uses the direct resource/name lookup and resolved prefixes, avoiding
+enumeration of unused declarations. Once multiple names appear, a reverse index
+joins registered names with resources actually declaring them. Resource tables
+append names, including late external documents that reuse an existing resource.
+A per-resource declaration count and indexed prefix discover these additions;
+new names and new resources are processed in subsequent passes. This also fixes
+missed overrides when a late document adds an already registered name to an
+already visited resource. Temporary roots pin index names across compilation
+callbacks/GC compaction and are released with the name-ID index at the fixed point.
+Hash lookup registers dynamic name IDs instead of linearly scanning all K names.
+
+For R reached resources, K registered names, B declarations (including unused
+names), A matched bindings and P discovery passes, the indexed join takes
+expected O(RP + B + K + A + T) work, excluding name bytes and child compilation.
+T counts keys copied by Ruby snapshots: a stable resource is copied once, but a
+growing resource can copy older names again even though only its new suffix is
+indexed. Temporary storage is O(R + B + K + A), while retained binding tables
+store O(K + A). Many unused declarations can cost more in the multi-name case;
+the single-name path keeps direct lookups. Single-name scope metadata uses the
+compiled index in O(N) expected work for N nodes, replacing an O(NA) scan.
+See `benchmark/native_scope_compile.rb` for cached-VM constructor timing and
+sparse scaling; the Cartesian O(RK) absent-lookup work is eliminated from the
+multi-name discovery path.
 
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
 exceptions and exact match counts. `contains` scans also retain complete

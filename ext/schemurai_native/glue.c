@@ -8,7 +8,7 @@
 #include "protocol.h"
 
 static ID id_resolve, id_schemurai, id_resolution_error;
-static ID id_root, id_compile, id_graph, id_dynamic_anchor;
+static ID id_root, id_compile, id_graph, id_dynamic_anchor, id_dynamic_anchor_names, id_dynamic_anchor_count;
 
 /* The C layer adapts CRuby APIs to Rust's opaque VALUEs. */
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
@@ -523,6 +523,8 @@ void Init_schemurai_native(void) {
     id_compile = rb_intern_const("compile");
     id_graph = rb_intern_const("@graph");
     id_dynamic_anchor = rb_intern_const("dynamic_anchor");
+    id_dynamic_anchor_names = rb_intern_const("dynamic_anchor_names");
+    id_dynamic_anchor_count = rb_intern_const("@dynamic_anchor_count");
     utf8_index = rb_utf8_encindex();
     ascii_index = rb_usascii_encindex();
     binary_index = rb_ascii8bit_encindex();
@@ -699,6 +701,23 @@ static VALUE anchor_program(VALUE arg) {
     VALUE graph = rb_ivar_get(b->compiler, id_graph);
     VALUE node = rb_funcall(graph, id_dynamic_anchor, 2, b->resource, b->name);
     return NIL_P(node) ? Qnil : rb_funcall(b->compiler, id_compile, 1, node);
+}
+/* Anchor counts fit immediate integers: the table cannot exceed memory.
+ * Reading metadata invokes no Ruby method or allocation. */
+size_t sn_anchor_count(VALUE resource) {
+    return (size_t)FIX2LONG(rb_ivar_get(resource, id_dynamic_anchor_count));
+}
+static VALUE anchor_names(VALUE arg) {
+    struct binding *b = (struct binding *)arg;
+    VALUE graph = rb_ivar_get(b->compiler, id_graph);
+    return rb_funcall(graph, id_dynamic_anchor_names, 1, b->resource);
+}
+int sn_anchor_names(VALUE compiler, VALUE resource, VALUE *result) {
+    struct binding b = {compiler, resource, Qnil};
+    int state = 0;
+    *result = rb_protect(anchor_names, (VALUE)&b, &state);
+    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
+    return state;
 }
 int sn_resource_program(VALUE compiler, VALUE resource, VALUE *result) {
     struct binding b = {compiler, resource, Qnil};

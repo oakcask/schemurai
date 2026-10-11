@@ -53,8 +53,10 @@ module Schemurai
 
       class Resource
         attr_reader :uri, :root
+        attr_accessor :dynamic_anchor_count
 
         def initialize(uri, root)
+          @dynamic_anchor_count = 0
           @uri = uri
           @root = root
           @nodes = nil
@@ -144,6 +146,12 @@ module Schemurai
         @dynamic_anchors.dig(resource, name)
       end
 
+      # Anchor tables grow in insertion order, including late external indexing.
+      # Native compilation uses this snapshot to avoid absent pair lookups.
+      def dynamic_anchor_names(resource)
+        @dynamic_anchors[resource]&.keys || []
+      end
+
       def dynamic_scope?
         @dynamic_scope
       end
@@ -195,7 +203,8 @@ module Schemurai
           end
         end
         changes.dynamic_anchors.each do |resource, anchors|
-          (@dynamic_anchors[resource] ||= {}).update(anchors)
+          merged = (@dynamic_anchors[resource] ||= {}).update(anchors)
+          resource.dynamic_anchor_count = merged.size
         end
         (@custom_dialects ||= {}).update(changes.custom_dialects) unless changes.custom_dialects.empty?
         @dynamic_scope = true if changes.requires_dynamic_scope
