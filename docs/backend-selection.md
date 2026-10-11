@@ -40,7 +40,7 @@ and earlier results. The smallest margin is narrow; results depend on the
 platform and workload.
 
 CI runs native differential tests on `ubuntu-24.04` (x64) and
-`ubuntu-24.04-arm` (arm64), with Ruby 3.4/4.0 and default/portable builds.
+`ubuntu-24.04-arm` (arm64), with Ruby 4.0.0/latest 4.0 and default/portable builds.
 Adding `workflow:enable-benchmark` to a PR starts the
 `benchmark / native backends` workflow, which compares YJIT-enabled VM and native
 on both architectures with Ruby 4.0. Each job publishes per-case timings,
@@ -633,7 +633,7 @@ followed by `make clean` and `make` in the extension directory. The internal
 symbol's ABI is less stable than Ruby's public extension API; CI covers both
 build modes.
 
-On CRuby 3.4 and 4.0, the default build additionally checks the internal storage
+On CRuby 4.0, the default build additionally checks the internal storage
 flag in a fresh embedded interpreter, using ordinary, frozen and identity
 Hashes of sizes zero through eight. Only a successful check enables the
 small-record hint: an AR-table Hash has ordinary key semantics, so Rust can

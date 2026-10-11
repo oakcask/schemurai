@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        ruby-version: ["3.4", "4.0"]
+        ruby-version: ["4.0.0", "4.0"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -55,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
-        ruby-version: ["3.4", "4.0"]
+        ruby-version: ["4.0.0", "4.0"]
         extconf-args: ["", "--enable-portable-hash-walk"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

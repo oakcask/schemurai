@@ -12,7 +12,7 @@ Gem::Specification.new do |spec|
   spec.description = "Validates Ruby values against JSON Schema Draft 7, 2019-09, and 2020-12 schemas."
   spec.homepage = "https://github.com/oakcask/schemurai"
   spec.license = "MIT"
-  spec.required_ruby_version = ">= 3.4"
+  spec.required_ruby_version = ">= 4.0"
 
   spec.metadata = {
     "homepage_uri" => spec.homepage,
