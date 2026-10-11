@@ -214,54 +214,58 @@ impl Engine {
         Ok(Op::Ref(Reference { target, kind }))
     }
     pub(super) fn bind_dynamic_anchors(&mut self) -> Result<(), Value> {
+        // Names append during compilation. A resolved prefix per resource
+        // records negative lookups without retaining their Cartesian product.
+        // Snapshot only pending rows; compiling a binding can add resources
+        // and names, which the next pass must resolve too.
+        let mut resolved = HashMap::new();
         loop {
+            let names = self.anchor_names.len();
             let pending: Vec<_> = self
                 .resources
                 .keys()
-                .flat_map(|&resource| {
-                    (0..self.anchor_names.len()).map(move |name| (resource, name))
+                .filter_map(|&resource| {
+                    let first = resolved.get(&resource).copied().unwrap_or(0);
+                    (first < names).then_some((resource, first..names))
                 })
-                .filter(|key| !self.dynamic_bindings.contains_key(key))
                 .collect();
             if pending.is_empty() {
-                self.anchor_tables = vec![vec![]; self.anchor_names.len()];
+                self.anchor_tables = vec![vec![]; names];
                 for (&(resource, name), &target) in &self.dynamic_bindings {
-                    if let Some(target) = target {
-                        self.anchor_tables[name].push((resource, target));
-                    }
+                    self.anchor_tables[name].push((resource, target));
                 }
-                if self.anchor_tables.len() == 1 {
+                if names == 1 {
                     for metadata in &mut self.metadata {
+                        // Use the existing resource/name index instead of an
+                        // O(binding count) scan for every compiled node.
                         metadata.primary_binding =
-                            self.anchor_tables[0]
-                                .iter()
-                                .find_map(|&(resource, target)| {
-                                    (resource == metadata.resource).then_some(target)
-                                });
+                            self.dynamic_bindings.get(&(metadata.resource, 0)).copied();
                     }
                 }
                 return Ok(());
             }
-            for (resource, name) in pending {
-                let mut target = 0;
-                if unsafe {
-                    sn_anchor_program(
-                        self.compiler,
-                        resource,
-                        self.anchor_names[name].0,
-                        &mut target,
-                    )
-                } != 0
-                {
-                    return Err(target);
+            for (resource, names) in pending {
+                let end = names.end;
+                for name in names {
+                    let mut target = 0;
+                    if unsafe {
+                        sn_anchor_program(
+                            self.compiler,
+                            resource,
+                            self.anchor_names[name].0,
+                            &mut target,
+                        )
+                    } != 0
+                    {
+                        return Err(target);
+                    }
+                    if unsafe { sn_same(target, sn_nil()) } == 0 {
+                        self.retain(target);
+                        let target = self.compile(target)?;
+                        self.dynamic_bindings.insert((resource, name), target);
+                    }
                 }
-                self.retain(target);
-                let target = if unsafe { sn_same(target, sn_nil()) } != 0 {
-                    None
-                } else {
-                    Some(self.compile(target)?)
-                };
-                self.dynamic_bindings.insert((resource, name), target);
+                resolved.insert(resource, end);
             }
         }
     }
@@ -306,8 +310,7 @@ impl Engine {
                     }
                 }
                 ReferenceKind::Dynamic(name) => {
-                    if let Some(Some(binding)) = self.dynamic_bindings.get(&(frame.resource, name))
-                    {
+                    if let Some(binding) = self.dynamic_bindings.get(&(frame.resource, name)) {
                         target = *binding;
                     }
                 }
