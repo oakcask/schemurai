@@ -36,12 +36,45 @@ Local medians on Ruby 4.0.6/YJIT, x86_64-linux, compared with `2439118`:
 | Array / 12 | 389.558 | 2.372 | 1,260.346 | 5.012 |
 | Array / 16 | 6,485.829 | 3.646 | 20,249.494 | 6.859 |
 
-Each memo cache has at most 4,096 results; stored annotation allocations share
-a 65,536-slot budget. Cache saturation keeps the ordinary traversal. Dynamic
+Verdicts retain up to 4,096 results; tracked validity and diagnostic successes
+share up to 8,192 results and a 65,536-slot annotation budget. FIFO admission
+replaces old results when a limit is reached. Dynamic
 or cyclic reachable references remain uncached. Failing diagnostics retain
 distinct schema-path errors and can require exponential output size. These
 measurements establish improvement for the successful static-reference workload,
 not a complexity bound for arbitrary schemas or an all-suite speedup.
+
+### Invocation cache turnover
+
+`native_memo_turnover.rb` uses distinct annotated objects in an array, exceeding
+the invocation entry limit. Before FIFO eviction, saturation stopped all new
+admissions and later objects expanded their shared definition chain to O(2^D)
+work. When the per-object working set fits the cache, replacement keeps this
+workload at O(ND), plus annotation copying, for N objects and depth D.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_memo_turnover.rb
+```
+
+Local single-call observations on Ruby 4.0.6, x86_64-linux, without YJIT,
+compared with `9f69db3`; compilation is excluded:
+
+| Depth / objects | Before validity (ms) | After validity (ms) | Before diagnostics (ms) | After diagnostics (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 8 / 1,024 | 18.131 | 4.058 | 18.663 | 3.420 |
+| 12 / 1,024 | 370.609 | 5.136 | 380.261 | 4.992 |
+| 16 / 1,024 | 6,850.908 | 5.902 | 6,944.446 | 5.823 |
+| 16 / 128 | 0.968 | 1.082 | 0.464 | 0.512 |
+
+FIFO adds a bounded queue with one key per retained result and slot accounting
+per entry. It also adds admission work, visible in the small control above.
+Eviction releases annotation allocations before copying the admitted result;
+oversized single results are skipped. Workloads larger than the cache working
+set can still thrash, so this is not a universal polynomial-time guarantee.
+The runner checks VM parity on a one-object sample and direct native coverage
+for each measured array. Regression tests compare full ordered VM errors after
+turnover, including mutation of the final object. Rust tests check entry and
+slot limits, eviction across coverage policies, and oversized-result rejection.
 
 ## VM evaluation tracking
 

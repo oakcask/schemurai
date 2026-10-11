@@ -7,55 +7,80 @@ type Key = (usize, Value, usize);
 const MAX_ENTRIES: usize = 4096;
 const MAX_ANNOTATION_SLOTS: usize = 65536;
 
+// Evict old results instead of permanently refusing new results once an
+// invocation reaches a limit. FIFO admission keeps later instance locations
+// eligible for reuse, with constant expected work per admission/eviction.
+struct Cache<K, T> {
+    results: HashMap<K, (T, usize)>,
+    order: std::collections::VecDeque<K>,
+    slots: usize,
+}
+impl<K, T> Default for Cache<K, T> {
+    fn default() -> Self {
+        Self {
+            results: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            slots: 0,
+        }
+    }
+}
+impl<K: Copy + Eq + std::hash::Hash, T: Clone> Cache<K, T> {
+    fn get(&self, key: K) -> Option<T> {
+        self.results.get(&key).map(|(result, _)| result.clone())
+    }
+    fn record(&mut self, key: K, result: &T, slots: usize, max_entries: usize) {
+        // A single oversized result must not flush useful small results.
+        if slots > MAX_ANNOTATION_SLOTS || self.results.contains_key(&key) {
+            return;
+        }
+        while self.results.len() >= max_entries || slots > MAX_ANNOTATION_SLOTS - self.slots {
+            let oldest = self.order.pop_front().unwrap();
+            let (_, removed) = self.results.remove(&oldest).unwrap();
+            self.slots -= removed;
+        }
+        self.results.insert(key, (result.clone(), slots));
+        self.order.push_back(key);
+        self.slots += slots;
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Memo {
-    verdicts: RefCell<HashMap<Key, Verdict>>,
-    tracked: RefCell<HashMap<Key, Tracked>>,
-    successes: RefCell<HashMap<(Key, bool), Tracked>>,
-    annotation_slots: RefCell<usize>,
+    verdicts: RefCell<Cache<Key, Verdict>>,
+    // None is tracked validity; Some(bool) is the diagnostic annotation policy.
+    // Coverage results share both admission order and the allocation budget.
+    coverage: RefCell<Cache<(Key, Option<bool>), Tracked>>,
 }
 impl Memo {
     pub(super) fn verdict(&self, key: Key) -> Option<Verdict> {
-        self.verdicts.borrow().get(&key).copied()
+        self.verdicts.borrow().get(key)
     }
     pub(super) fn record_verdict(&self, key: Key, status: Verdict) {
-        let mut results = self.verdicts.borrow_mut();
-        if results.len() < MAX_ENTRIES {
-            results.insert(key, status);
-        }
+        self.verdicts
+            .borrow_mut()
+            .record(key, &status, 0, MAX_ENTRIES);
     }
     pub(super) fn tracked(&self, key: Key) -> Option<Tracked> {
-        self.tracked.borrow().get(&key).cloned()
+        self.coverage.borrow().get((key, None))
     }
     pub(super) fn record_tracked(&self, key: Key, result: &Tracked) {
-        let mut results = self.tracked.borrow_mut();
-        if results.len() < MAX_ENTRIES
-            && !results.contains_key(&key)
-            && self.reserve_annotations(result)
-        {
-            results.insert(key, result.clone());
-        }
+        self.coverage.borrow_mut().record(
+            (key, None),
+            result,
+            result.memo_slots(),
+            MAX_ENTRIES * 2,
+        );
     }
     pub(super) fn diagnostic_success(&self, key: Key, annotations: bool) -> Option<Tracked> {
-        self.successes.borrow().get(&(key, annotations)).cloned()
+        self.coverage.borrow().get((key, Some(annotations)))
     }
     pub(super) fn record_diagnostic_success(&self, key: Key, annotations: bool, result: &Tracked) {
-        let mut results = self.successes.borrow_mut();
-        if results.len() < MAX_ENTRIES
-            && !results.contains_key(&(key, annotations))
-            && self.reserve_annotations(result)
-        {
-            results.insert((key, annotations), result.clone());
-        }
-    }
-    fn reserve_annotations(&self, result: &Tracked) -> bool {
-        let mut slots = self.annotation_slots.borrow_mut();
-        let added = result.memo_slots();
-        if added > MAX_ANNOTATION_SLOTS - *slots {
-            return false;
-        }
-        *slots += added;
-        true
+        self.coverage.borrow_mut().record(
+            (key, Some(annotations)),
+            result,
+            result.memo_slots(),
+            MAX_ENTRIES * 2,
+        );
     }
 }
 
@@ -88,6 +113,39 @@ mod tests {
     }
 
     #[test]
+    fn admits_new_results_after_entry_limits() {
+        let memo = Memo::default();
+        for node in 0..MAX_ENTRIES * 3 {
+            memo.record_verdict((node, 2, 3), Valid);
+            memo.record_tracked((node, 2, 3), &Tracked::new(Valid));
+        }
+        assert!(memo.verdict((0, 2, 3)).is_none());
+        assert_eq!(memo.verdict((MAX_ENTRIES * 3 - 1, 2, 3)), Some(Valid));
+        assert!(memo.tracked((0, 2, 3)).is_none());
+        assert!(memo.tracked((MAX_ENTRIES * 3 - 1, 2, 3)).is_some());
+        assert_eq!(memo.verdicts.borrow().results.len(), MAX_ENTRIES);
+        assert_eq!(memo.coverage.borrow().results.len(), MAX_ENTRIES * 2);
+        assert_eq!(memo.coverage.borrow().order.len(), MAX_ENTRIES * 2);
+    }
+
+    #[test]
+    fn skips_oversized_results_without_evicting_or_charging_duplicates() {
+        let memo = Memo::default();
+        let key = (1, 2, 3);
+        let mut small = Tracked::new(Valid);
+        small.item(0);
+        memo.record_tracked(key, &small);
+        memo.record_tracked(key, &small);
+        let mut huge = Tracked::new(Valid);
+        huge.item(MAX_ANNOTATION_SLOTS * 64);
+        memo.record_diagnostic_success((2, 2, 3), true, &huge);
+        assert!(memo.tracked(key).is_some());
+        assert!(memo.diagnostic_success((2, 2, 3), true).is_none());
+        assert_eq!(memo.coverage.borrow().slots, small.memo_slots());
+        assert_eq!(memo.coverage.borrow().order.len(), 1);
+    }
+
+    #[test]
     fn bounds_retained_annotations_across_both_caches() {
         let memo = Memo::default();
         let mut large = Tracked::new(Valid);
@@ -97,7 +155,9 @@ mod tests {
         let mut small = Tracked::new(Valid);
         small.item(0);
         memo.record_diagnostic_success((2, 2, 3), true, &small);
-        assert!(memo.diagnostic_success((2, 2, 3), true).is_none());
+        assert!(memo.diagnostic_success((2, 2, 3), true).is_some());
+        assert!(memo.tracked((1, 2, 3)).is_none());
+        assert_eq!(memo.coverage.borrow().slots, small.memo_slots());
         memo.record_diagnostic_success((3, 2, 3), false, &Tracked::new(Valid));
         assert!(memo.diagnostic_success((3, 2, 3), false).is_some());
     }

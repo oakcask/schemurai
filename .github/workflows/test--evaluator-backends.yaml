@@ -75,7 +75,9 @@ jobs:
           ruby extconf.rb ${{ matrix.extconf-args }}
           make
       - name: Check Rust code
-        run: cargo clippy --manifest-path ext/schemurai_native/Cargo.toml --locked -- -D warnings
+        run: |
+          cargo test --manifest-path ext/schemurai_native/Cargo.toml --locked
+          cargo clippy --manifest-path ext/schemurai_native/Cargo.toml --locked -- -D warnings
       - name: Compare native evaluator with the Ruby oracle and check GC safety
         run: bundle exec rspec -Ilib -Iext/schemurai_native test/evaluator_backend_test.rb test/native_backend_test.rb
         env:

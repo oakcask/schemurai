@@ -161,14 +161,22 @@ owned, so merging one branch cannot change another branch's cached annotations.
 Two references to every preceding definition previously expanded a depth-D
 definition chain into O(2^D) evaluations, including successful annotated objects
 and arrays. Memoization reduces this equal-depth chain to O(D) evaluations,
-plus coverage copying and merging. Each result cache holds at most 4,096 entries;
-the two coverage caches share a 65,536-slot allocation budget. Cyclic or dynamic
-reachable subgraphs remain uncached, and exceeding a budget retains ordinary
-evaluation. These limits bound extra retained memory rather than guaranteeing
+plus coverage copying and merging. Verdicts retain at most 4,096 entries;
+tracked validity and diagnostic successes share up to 8,192 entries and a
+65,536-slot allocation budget. FIFO eviction releases old results when either
+limit is reached, so later instance locations can still reuse shared targets.
+Previously a full cache refused all subsequent admissions, restoring O(2^D)
+work for later records in a wide array. Admission and eviction take constant
+expected work per result, excluding coverage copying; the eviction queue is
+bounded by the entry limit too. A single result larger than the slot budget is
+left uncached without evicting other results. Cyclic or dynamic reachable
+subgraphs remain uncached. These limits bound extra retained memory rather than guaranteeing
 linear evaluation for arbitrary schemas. Failed diagnostics still visit each
 path: if the contract requires 2^D distinct errors, producing them takes at
 least O(2^D) work. See the reproducible workloads in
 `benchmark/native_algorithms.rb`.
+`benchmark/native_memo_turnover.rb` exercises arrays that exceed the entry
+budget and confirms direct native coverage after the limits are crossed.
 
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
 exceptions and exact match counts. `contains` scans also retain complete
