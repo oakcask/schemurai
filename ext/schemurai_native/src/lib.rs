@@ -10,6 +10,7 @@ mod diagnostics;
 mod enumeration;
 mod evaluation;
 mod format;
+mod instance_graph;
 mod memo;
 mod number;
 mod pattern;
@@ -552,6 +553,11 @@ pub struct Engine {
     tracks: Vec<bool>,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
+    memo_guarded: Vec<bool>,
+    memo_guard_sources: Vec<bool>,
+    memo_guard_same_sources: Vec<bool>,
+    memo_guard_scalar_sources: Vec<bool>,
+    memo_guard_scalar_amplification: Vec<bool>,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), usize>,
@@ -2715,8 +2721,19 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
+    let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
+    let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
+    let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
+    let scalar = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_sources) };
+    let amplification = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_amplification) };
     std::mem::size_of::<Engine>()
-        + contextual.capacity() * std::mem::size_of::<bool>()
+        + (contextual.capacity()
+            + guarded.capacity()
+            + sources.capacity()
+            + same.capacity()
+            + scalar.capacity()
+            + amplification.capacity())
+            * std::mem::size_of::<bool>()
         + nodes.capacity() * std::mem::size_of::<Vec<Op>>()
         + operands.capacity() * std::mem::size_of::<Vec<(i32, Value)>>()
         + operands

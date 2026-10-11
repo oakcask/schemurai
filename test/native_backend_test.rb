@@ -617,6 +617,97 @@ RSpec.describe "native VALUE execution" do
     expect(status.success?).to be(true), stderr
   end
 
+  it "reuses shared inputs through cyclic static dynamic and recursive schemas" do # rubocop:disable RSpec/ExampleLength
+    schemas = [
+      [{"$defs" => {"n" => {"anyOf" => [{"type" => "integer", "minimum" => 3},
+        {"type" => "array", "items" => {"$ref" => "#/$defs/n"}}]}}, "$ref" => "#/$defs/n"}, ->(child) { [child, child] }],
+      [{"$defs" => {"n" => {"anyOf" => [{"type" => "integer", "minimum" => 3},
+        {"type" => "object", "properties" => {"a" => {"$ref" => "#/$defs/n"}, "b" => {"$ref" => "#/$defs/n"}}}]}},
+        "$ref" => "#/$defs/n"}, ->(child) { {"a" => child, "b" => child} }],
+      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "$dynamicAnchor" => "n",
+        "anyOf" => [{"type" => "integer", "minimum" => 3}, {"type" => "array", "items" => {"$dynamicRef" => "#n"}}]},
+        ->(child) { [child, child] }],
+      [{"$schema" => "https://json-schema.org/draft/2019-09/schema", "$recursiveAnchor" => true,
+        "anyOf" => [{"type" => "integer", "minimum" => 3}, {"type" => "array", "items" => {"$recursiveRef" => "#"}}]},
+        ->(child) { [child, child] }]
+    ]
+    schemas.each do |schema, shape|
+      native = Schemurai.compile(schema, backend: :native)
+      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      value = 8
+      32.times { value = shape.call(value) }
+      expect(program.valid?(value)).to be(true)
+      expect(program.diagnostics(value)).to eq([])
+      vm = Schemurai.compile(schema, backend: :vm)
+      [2, 8, "bad"].each do |leaf|
+        shallow = leaf
+        4.times { shallow = shape.call(shallow) }
+        expect(program.valid?(shallow)).to eq(vm.valid?(shallow))
+        expect(program.diagnostics(shallow)).not_to be_nil
+        expect(native.validate(shallow).errors).to eq(vm.validate(shallow).errors)
+      end
+    end
+  end
+
+  it "preserves cyclic instance guard membership and bounded input proofs" do # rubocop:disable RSpec/ExampleLength
+    schema = {"anyOf" => [{"type" => "integer", "minimum" => 3}, {"type" => "array", "items" => {"$ref" => "#"}}]}
+    native = Schemurai.compile(schema, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    vm = Schemurai.compile(schema, backend: :vm)
+    direct = []
+    direct.push(direct, 8)
+    a = []
+    b = [a, 8]
+    a.push(b, b)
+    wide = Array.new(4200) { [8] }
+    values = [direct, a, [[wide, wide], [wide, wide]]]
+    values.each do |value|
+      expect(program.valid?(value)).to eq(vm.valid?(value))
+      expect(program.diagnostics(value)).not_to be_nil
+      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    end
+    direct[1] = 2
+    expect(program.valid?(direct)).to eq(vm.valid?(direct))
+    expect(native.validate(direct).errors).to eq(vm.validate(direct).errors)
+  end
+
+  it "separates cyclic dynamic and recursive overrides at the same shared value" do # rubocop:disable RSpec/ExampleLength
+    [true, false].each do |dynamic|
+      dialect = {"$schema" => dynamic ? "https://json-schema.org/draft/2020-12/schema" : "https://json-schema.org/draft/2019-09/schema"}
+      anchor = dynamic ? {"$dynamicAnchor" => "n"} : {"$recursiveAnchor" => true}
+      ref = dynamic ? {"$dynamicRef" => "#n"} : {"$recursiveRef" => "#"}
+      resources = {
+        "urn:base" => dialect.merge(anchor).merge("$id" => "urn:base",
+          "anyOf" => [{"type" => "integer"}, {"type" => "array", "items" => ref}]),
+        "urn:loose" => dialect.merge(anchor).merge("$id" => "urn:loose", "$ref" => "urn:base", "minimum" => 3),
+        "urn:strict" => dialect.merge(anchor).merge("$id" => "urn:strict", "$ref" => "urn:base", "minimum" => 7)
+      }
+      schema = dialect.merge("allOf" => [{"$ref" => "urn:loose"}, {"$ref" => "urn:strict"}])
+      native = Schemurai.compile(schema, schemas: resources, backend: :native)
+      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      deep = 8
+      24.times { deep = [deep, deep] }
+      expect(program.valid?(deep)).to be(true)
+      expect(program.diagnostics(deep)).to eq([])
+      vm = Schemurai.compile(schema, schemas: resources, backend: :vm)
+      [2, 5, 8, "bad"].each do |leaf|
+        value = leaf
+        4.times { value = [value, value] }
+        expect(program.valid?(value)).to eq(vm.valid?(value))
+        expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+      end
+    end
+  end
+
+  it "memoizes shared schema chains whose leaf has a reference cycle" do # rubocop:disable RSpec/ExampleLength
+    definitions = {"cycle" => {"$ref" => "#/$defs/cycle"}, "n0" => {"$ref" => "#/$defs/cycle"}}
+    1.upto(32) { |i| definitions["n#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/n#{i - 1}"} }} }
+    native = Schemurai.compile({"$defs" => definitions, "$ref" => "#/$defs/n32"}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?(8)).to be(true)
+    expect(program.diagnostics(8)).to eq([])
+  end
+
   it "reuses acyclic children evaluated at repeated instance positions" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     rules = [
