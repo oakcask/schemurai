@@ -96,6 +96,16 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate(value).errors.size).to eq(2)
   end
 
+  it "memoizes invariant dynamic reference graphs without changing source paths or annotations" do # rubocop:disable RSpec/ExampleLength
+    schemas = [{"type" => "integer"}, {"properties" => {"x" => {"type" => "integer"}}}].map do |leaf|
+      definitions = {"target" => leaf.merge("$dynamicAnchor" => "target"), "d0" => {"$dynamicRef" => "#target"}}
+      1.upto(4) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions,
+       "$ref" => "#/$defs/d4", "unevaluatedProperties" => false}
+    end
+    expect_native_policy_results(schemas, [1, "bad", {"x" => 1}, {"x" => "bad"}, {"x" => 1, "extra" => 2}, {}])
+  end
+
   it "keeps shared reference annotations usable after invocation cache turnover" do # rubocop:disable RSpec/ExampleLength
     definitions = {"d0" => {"properties" => {"x" => {"type" => "integer"}}}}
     1.upto(8) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }

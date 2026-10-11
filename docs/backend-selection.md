@@ -169,14 +169,22 @@ Previously a full cache refused all subsequent admissions, restoring O(2^D)
 work for later records in a wide array. Admission and eviction take constant
 expected work per result, excluding coverage copying; the eviction queue is
 bounded by the entry limit too. A single result larger than the slot budget is
-left uncached without evicting other results. Cyclic or dynamic reachable
-subgraphs remain uncached. These limits bound extra retained memory rather than guaranteeing
+left uncached without evicting other results. After compiling all reachable
+anchor bindings, dynamic references whose every possible binding equals their
+fallback target become static native references. The original opcode and
+diagnostic paths remain `$dynamicRef`. This proof takes O(A + E) work and O(K)
+temporary slots for A compiled bindings, E instructions, and K anchor names,
+and lets shared acyclic graphs with invariant dynamic leaves reuse results.
+Cyclic or genuinely scope-dependent reachable subgraphs remain uncached.
+These limits bound extra retained memory rather than guaranteeing
 linear evaluation for arbitrary schemas. Failed diagnostics still visit each
 path: if the contract requires 2^D distinct errors, producing them takes at
 least O(2^D) work. See the reproducible workloads in
 `benchmark/native_algorithms.rb`.
 `benchmark/native_memo_turnover.rb` exercises arrays that exceed the entry
 budget and confirms direct native coverage after the limits are crossed.
+`benchmark/native_dynamic_memo.rb` exercises the previously exponential
+shared-reference chain ending in an invariant dynamic reference.
 
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
 exceptions and exact match counts. `contains` scans also retain complete
