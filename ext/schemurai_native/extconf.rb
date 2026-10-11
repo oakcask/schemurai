@@ -46,53 +46,6 @@ unless enable_config("portable-hash-walk", false)
     C
     $defs << "-DSCHEMURAI_AR_HASH_PROOF" if ar_proof # rubocop:disable Style/GlobalVars -- mkmf build configuration.
   end
-  big_sample_proof = !CROSS_COMPILING && try_run(<<~C)
-    #include "big_sample.h"
-    #if SN_BIG_SAMPLE_LAYOUT_SUPPORTED
-    static int check(VALUE value) {
-        if (!RB_TYPE_P(value, T_BIGNUM)) return 1;
-        uint32_t low;
-        int sign = rb_integer_pack(value, &low, 1, sizeof(low), 0,
-            INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);
-        uint64_t expected = (uint64_t)low | ((uint64_t)(sign < 0) << 32);
-        return sn_checked_big_sample(value) != expected;
-    }
-    int main(int argc, char **argv) {
-        ruby_sysinit(&argc, &argv);
-        RUBY_INIT_STACK;
-        ruby_init();
-        int status = 0, embedded = 0, heap = 0;
-        uint64_t words[513];
-        uint64_t lows[] = {0, 1, UINT32_MAX, UINT64_C(1) << 32, UINT64_MAX};
-        for (int bits = 0; bits <= 32768; bits += bits < 256 ? 1 : 256) {
-            for (int at = 0; at < 5; at++) {
-                for (int negative = 0; negative < 2; negative++) {
-                    memset(words, 0, sizeof(words));
-                    words[bits / 64] = UINT64_C(1) << (bits % 64);
-                    words[0] = lows[at];
-                    int flags = INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER |
-                        INTEGER_PACK_FORCE_BIGNUM | (negative ? INTEGER_PACK_NEGATIVE : 0);
-                    VALUE value = rb_integer_unpack(words, bits / 64 + 1, sizeof(uint64_t), 0, flags);
-                    if (RB_FL_TEST_RAW(value, RUBY_FL_USER2)) embedded = 1;
-                    else heap = 1;
-                    status |= check(value);
-                    rb_obj_freeze(value);
-                    status |= check(value);
-                    if (at == 0 && (bits == 0 || bits == 192 || bits == 32768)) {
-                        rb_gc_start();
-                        status |= check(value);
-                    }
-                    RB_GC_GUARD(value);
-                }
-            }
-        }
-        return ruby_cleanup(status || !embedded || !heap);
-    }
-    #else
-    int main(void) { return 1; }
-    #endif
-  C
-  $defs << "-DSCHEMURAI_BIG_SAMPLE_PROOF" if big_sample_proof # rubocop:disable Style/GlobalVars -- mkmf build configuration.
 end
 $LOCAL_LIBS << " $(srcdir)/target/release/libschemurai_native.a" # rubocop:disable Style/GlobalVars -- mkmf build configuration.
 $LOCAL_LIBS << " -lpthread -ldl -lm" unless /mswin|mingw/ =~ RUBY_PLATFORM # rubocop:disable Style/GlobalVars -- mkmf build configuration.
@@ -102,7 +55,7 @@ File.open("Makefile", "a") do |file|
 
     $(TARGET_SO): $(srcdir)/target/release/libschemurai_native.a
 
-    glue.o: $(srcdir)/big_sample.h $(srcdir)/protocol.h $(srcdir)/protocol.def
+    glue.o: $(srcdir)/protocol.h $(srcdir)/protocol.def
 
     $(srcdir)/target/release/libschemurai_native.a: $(srcdir)/Cargo.toml $(srcdir)/Cargo.lock $(srcdir)/build.rs $(srcdir)/protocol.def $(wildcard $(srcdir)/src/*.rs)
     \tcargo build --manifest-path $(srcdir)/Cargo.toml --release --locked

@@ -106,6 +106,7 @@ enum Verdict {
 }
 use Verdict::*;
 const MAX_EVALUATION_DEPTH: usize = 256;
+const MAX_UNIQUE_INDEX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 enum Op {
     Unsupported,
@@ -2139,7 +2140,9 @@ fn indexed_unique_slots<S: UniqueSlot, const BOUNDED: bool>(
     // retain only a fingerprint and an index into the original Ruby array.
     // Equal fingerprints continue probing after exact inequality; neither
     // table-position collisions nor fingerprint collisions imply duplicates.
-    let mut slots = vec![S::EMPTY; capacity];
+    let Some(mut slots) = allocate_unique_slots::<S>(capacity) else {
+        return Unsupported;
+    };
     let mask = capacity - 1;
     let mut collisions = 0;
     let mut probes = 0;
@@ -2180,6 +2183,16 @@ fn indexed_unique_slots<S: UniqueSlot, const BOUNDED: bool>(
         }
     }
     Valid
+}
+fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
+    let bytes = capacity.checked_mul(std::mem::size_of::<S>())?;
+    if bytes > MAX_UNIQUE_INDEX_BYTES {
+        return None;
+    }
+    let mut slots = Vec::new();
+    slots.try_reserve_exact(capacity).ok()?;
+    slots.resize(capacity, S::EMPTY);
+    Some(slots)
 }
 struct ObjectContext<'a> {
     engine: &'a Engine,
@@ -2344,4 +2357,20 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
                 _ => 0,
             })
             .sum::<usize>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounds_unique_index_allocation() {
+        assert_eq!(
+            allocate_unique_slots::<FullUniqueSlot>(16).unwrap().len(),
+            16
+        );
+        let over_limit = MAX_UNIQUE_INDEX_BYTES / std::mem::size_of::<FullUniqueSlot>() + 1;
+        assert!(allocate_unique_slots::<FullUniqueSlot>(over_limit).is_none());
+        assert!(allocate_unique_slots::<FullUniqueSlot>(usize::MAX).is_none());
+    }
 }

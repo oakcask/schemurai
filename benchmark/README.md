@@ -284,7 +284,7 @@ filtered and complete runs should be reported separately. JSON output records Ru
 both format and content assertions; unsupported encodings still use the VM's
 compatibility behavior.
 
-### Build-checked Bignum sampling
+### Public-API Bignum sampling
 
 The `benchmark / native backends` GitHub Actions workflow runs `native.rb`
 with YJIT on Ubuntu 24.04 x64 and arm64. Workflow Summary contains each
@@ -294,15 +294,13 @@ artifact per runner. Correctness and native-coverage checks fail the job;
 timing differences on hosted runners are informational. The workflow also
 supports manual dispatch.
 
-The default extension can read low-word collision metadata directly on
-64-bit CRuby 3.4/4.0 after checking the private representation against public
-integer packing in a fresh interpreter. Unsupported targets, cross builds,
-failed checks and the portable build retain public packing. Exact comparison
-and wider retries still determine uniqueness; Ruby objects and digit pointers
-are not cached or marshalled. See `docs/backend-selection.md` for the layout
-dependency and probe coverage.
+The extension reads low-word collision metadata through public integer packing.
+Exact comparison and wider retries still determine uniqueness; Ruby objects and
+digit pointers are not cached or marshalled. This avoids depending on CRuby's
+private Bignum layout across patch-level runtime updates.
 
-A sequential comparison against the preceding installed compact-slot build
+A historical sequential comparison of the removed private-layout optimization
+against the preceding installed compact-slot build
 used Ruby 4.0.6/YJIT, Rust 1.99, width 1,000, 31 samples and 100-call batches.
 Native coverage, validity and full-error gates passed. Artifacts are
 `schemurai-big-sample-{before,after}.json`.

@@ -267,8 +267,11 @@ bits and a one-based 16-bit index. Zero marks an empty slot. Larger arrays use
 the full fingerprint and a machine-sized index in sixteen-byte slots. At least
 half the slots remain empty. Collisions advance through consecutive
 slots, wrapping at the capacity boundary. Every fingerprint
-collision is resolved with exact JSON equality;
-small arrays use direct comparisons. Container equality visits nested values
+collision is resolved with exact JSON equality. Small arrays use direct
+comparisons. Native index storage is capped at 64 MiB and uses fallible
+allocation. Larger indexes or allocation failures delegate to the VM instead
+of aborting the process.
+Container equality visits nested values
 even when both operands are the same Ruby object, preserving VM behavior for
 NaN and unsupported nested values. Arrays beginning with a Bignum use a
 guarded ordered scan first: adjacent original integers must be strictly
@@ -280,7 +283,7 @@ by binary search and checks its own duplicates directly. Mixed values or larger
 unordered tails retain the indexed equality path. No input order or type is
 assumed, and the normal depth guard still applies. Unordered Bignum arrays
 first try an index using sign and a low 32-bit magnitude sample. A C guard accepts
-only `T_BIGNUM`. The portable path calls public `rb_integer_pack`; its documented
+only `T_BIGNUM`, then calls public `rb_integer_pack`; its documented
 [overflow behavior](https://docs.ruby-lang.org/capi/en/master/df/d5e/include_2ruby_2internal_2intern_2bignum_8h.html)
 still supplies that low word. This is collision-filter metadata, not a
 conversion of the original integer. Every matching fingerprint requires exact
@@ -298,18 +301,6 @@ bit for other kinds, and always initializes the packed low word before reading
 it. The public API's single 32-bit word path avoids the wider packing loop on
 the locally tested CRuby build. See the
 [CRuby implementation](https://github.com/ruby/ruby/blob/v4.0.6/bignum.c).
-On 64-bit CRuby 3.4/4.0 with 32-bit magnitude digits, a successful build-time
-probe enables a direct read of the same low word and sign. The probe compares
-embedded and heap Bignums, positive and negative values, forced signed zero,
-frozen objects and objects surviving GC against public packing, through
-32,769-bit magnitudes. This uses the private layouts in
-[3.4](https://github.com/ruby/ruby/blob/v3_4_7/internal/bignum.h) and
-[4.0](https://github.com/ruby/ruby/blob/v4.0.6/internal/bignum.h).
-The C helper reads scalar metadata under the GVL without retaining digit
-pointers or copying the instance. Other versions, unsupported sizes, cross
-builds, failed probes and `--enable-portable-hash-walk` use public packing.
-This layout dependency is private ABI; the probe is a compatibility check,
-not a promise that every future patch release retains the representation.
 After sixteen unequal fingerprints or excessive probing in the 64-bit pass,
 the whole array restarts with CRuby's public `rb_hash`, guarded in C
 to accept only `T_BIGNUM`. The retry state lives in a separate non-inlined

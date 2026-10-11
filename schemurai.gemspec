@@ -21,7 +21,7 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true"
   }
   spec.files = Dir["lib/**/*", "sig/**/*", "README.md", "LICENSE"]
-  spec.files += Dir["ext/schemurai_native/{Cargo.toml,Cargo.lock,build.rs,extconf.rb,glue.c,big_sample.h,protocol.h,protocol.def,src/**/*.rs}"]
+  spec.files += Dir["ext/schemurai_native/{Cargo.toml,Cargo.lock,build.rs,extconf.rb,glue.c,protocol.h,protocol.def,src/**/*.rs}"]
   spec.extensions = ["ext/schemurai_native/extconf.rb"]
   spec.extra_rdoc_files = %w[README.md LICENSE]
   spec.rdoc_options = [

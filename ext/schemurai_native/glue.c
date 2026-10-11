@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <math.h>
-#include "big_sample.h"
 #include "protocol.h"
 
 static ID id_resolve, id_schemurai, id_resolution_error;
@@ -285,14 +284,10 @@ int sn_big_hash(VALUE value, uint64_t *hash) {
  * exact original-handle comparisons and wider retries decide uniqueness. */
 uint64_t sn_big_low_word(VALUE value) {
     if (!RB_TYPE_P(value, T_BIGNUM)) return UINT64_C(1) << 33;
-#ifdef SCHEMURAI_BIG_SAMPLE_PROOF
-    return sn_checked_big_sample(value);
-#else
     uint32_t low;
     int sign = rb_integer_pack(value, &low, 1, sizeof(low), 0,
         INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);
     return (uint64_t)low | ((uint64_t)(sign < 0) << 32);
-#endif
 }
 int sn_big_low64_word(VALUE value, uint64_t *word) {
     if (!RB_TYPE_P(value, T_BIGNUM)) return SN_ADAPTER_UNSUPPORTED;
