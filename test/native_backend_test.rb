@@ -96,6 +96,34 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate(value).errors.size).to eq(2)
   end
 
+  it "reuses shared reference annotations without losing coverage or failure paths" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    schemas = [{"properties" => {"x" => {"type" => "integer"}}},
+      {"prefixItems" => [{"type" => "integer"}]}].map do |leaf|
+      definitions = {"d0" => leaf}
+      1.upto(4) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }
+      dialect.merge("$defs" => definitions, "$ref" => "#/$defs/d4",
+        (leaf.key?("properties") ? "unevaluatedProperties" : "unevaluatedItems") => false)
+    end
+    expect_native_policy_results(schemas, [{"x" => 1}, {"x" => "bad"}, {"x" => 1, "extra" => 2},
+      {}, [1], ["bad"], [1, 2], []])
+    native = Schemurai.compile(schemas.first, backend: :native)
+    value = {"x" => 1}
+    expect(native.validate(value).errors).to be_empty
+    value["extra"] = 2
+    expect(native.valid?(value)).to be(false)
+    expect(native.validate(value).errors).not_to be_empty
+  end
+
+  it "keeps shared diagnostic annotation policies separate within one traversal" do # rubocop:disable RSpec/ExampleLength
+    leaf = {"properties" => {"y" => true}}
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"leaf" => leaf},
+              "allOf" => [{"properties" => {"x" => {"$ref" => "#/$defs/leaf"}}},
+                {"properties" => {"x" => {"$ref" => "#/$defs/leaf", "unevaluatedProperties" => false}}}]}
+    expect_native_policy_results([schema], [{"x" => {"y" => 1}}, {"x" => {"extra" => 1}},
+      {"x" => {"y" => 1, "extra" => 2}}, {}])
+  end
+
   it "applies every grouped pattern in schema order including overlapping and empty matches" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     patterns = {"^a" => {"type" => "integer"}, "^a.*$" => {"minimum" => 2}, "^" => {"maximum" => 4},

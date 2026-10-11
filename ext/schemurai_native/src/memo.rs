@@ -1,15 +1,18 @@
 //! Invocation-local results for shared, acyclic, static reference targets.
 use super::*;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use tracking::Tracked;
 
 type Key = (usize, Value, usize);
 const MAX_ENTRIES: usize = 4096;
+const MAX_ANNOTATION_SLOTS: usize = 65536;
 
 #[derive(Default)]
 pub(super) struct Memo {
     verdicts: RefCell<HashMap<Key, Verdict>>,
-    successes: RefCell<HashSet<Key>>,
+    tracked: RefCell<HashMap<Key, Tracked>>,
+    successes: RefCell<HashMap<(Key, bool), Tracked>>,
+    annotation_slots: RefCell<usize>,
 }
 impl Memo {
     pub(super) fn verdict(&self, key: Key) -> Option<Verdict> {
@@ -21,14 +24,82 @@ impl Memo {
             results.insert(key, status);
         }
     }
-    pub(super) fn diagnostic_success(&self, key: Key) -> bool {
-        self.successes.borrow().contains(&key)
+    pub(super) fn tracked(&self, key: Key) -> Option<Tracked> {
+        self.tracked.borrow().get(&key).cloned()
     }
-    pub(super) fn record_diagnostic_success(&self, key: Key) {
-        let mut results = self.successes.borrow_mut();
-        if results.len() < MAX_ENTRIES {
-            results.insert(key);
+    pub(super) fn record_tracked(&self, key: Key, result: &Tracked) {
+        let mut results = self.tracked.borrow_mut();
+        if results.len() < MAX_ENTRIES
+            && !results.contains_key(&key)
+            && self.reserve_annotations(result)
+        {
+            results.insert(key, result.clone());
         }
+    }
+    pub(super) fn diagnostic_success(&self, key: Key, annotations: bool) -> Option<Tracked> {
+        self.successes.borrow().get(&(key, annotations)).cloned()
+    }
+    pub(super) fn record_diagnostic_success(&self, key: Key, annotations: bool, result: &Tracked) {
+        let mut results = self.successes.borrow_mut();
+        if results.len() < MAX_ENTRIES
+            && !results.contains_key(&(key, annotations))
+            && self.reserve_annotations(result)
+        {
+            results.insert((key, annotations), result.clone());
+        }
+    }
+    fn reserve_annotations(&self, result: &Tracked) -> bool {
+        let mut slots = self.annotation_slots.borrow_mut();
+        let added = result.memo_slots();
+        if added > MAX_ANNOTATION_SLOTS - *slots {
+            return false;
+        }
+        *slots += added;
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separates_annotation_policies_and_returns_independent_coverage() {
+        let memo = Memo::default();
+        let key = (1, 2, 3);
+        let mut coverage = Tracked::new(Valid);
+        coverage.item(65);
+        memo.record_diagnostic_success(key, true, &coverage);
+        memo.record_diagnostic_success(key, false, &Tracked::new(Valid));
+        let mut copy = memo.diagnostic_success(key, true).unwrap();
+        copy.item(0);
+        assert!(
+            memo.diagnostic_success(key, true)
+                .unwrap()
+                .contains_item(65)
+        );
+        assert!(!memo.diagnostic_success(key, true).unwrap().contains_item(0));
+        assert!(
+            !memo
+                .diagnostic_success(key, false)
+                .unwrap()
+                .contains_item(65)
+        );
+    }
+
+    #[test]
+    fn bounds_retained_annotations_across_both_caches() {
+        let memo = Memo::default();
+        let mut large = Tracked::new(Valid);
+        large.item(MAX_ANNOTATION_SLOTS * 64 - 1);
+        memo.record_tracked((1, 2, 3), &large);
+        assert!(memo.tracked((1, 2, 3)).is_some());
+        let mut small = Tracked::new(Valid);
+        small.item(0);
+        memo.record_diagnostic_success((2, 2, 3), true, &small);
+        assert!(memo.diagnostic_success((2, 2, 3), true).is_none());
+        memo.record_diagnostic_success((3, 2, 3), false, &Tracked::new(Valid));
+        assert!(memo.diagnostic_success((3, 2, 3), false).is_some());
     }
 }
 

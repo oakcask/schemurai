@@ -123,15 +123,20 @@ impl Execution<'_> {
         kind: i32,
     ) -> Result<Tracked, Verdict> {
         // A diagnostic success is established by complete traversal, never by
-        // a short-circuit validity result. Annotation-producing calls still run.
-        let reusable = self.memoizable[node] && !ANNOTATIONS && !self.tracks[node];
+        // a short-circuit validity result. Keep exported annotations and the
+        // collection policy separate; failures retain their path-specific errors.
+        let reusable = self.memoizable[node];
         let key = (node, value, depth);
-        if reusable && self.memo.diagnostic_success(key) {
-            return Ok(Tracked::new(Valid));
+        if reusable && let Some(result) = self.memo.diagnostic_success(key, ANNOTATIONS) {
+            return Ok(result);
         }
         let result = self.collect_uncached::<ANNOTATIONS>(report, node, value, depth, active, kind);
-        if reusable && matches!(&result, Ok(coverage) if coverage.status == Valid) {
-            self.memo.record_diagnostic_success(key);
+        if reusable
+            && let Ok(coverage) = &result
+            && coverage.status == Valid
+        {
+            self.memo
+                .record_diagnostic_success(key, ANNOTATIONS, coverage);
         }
         result
     }

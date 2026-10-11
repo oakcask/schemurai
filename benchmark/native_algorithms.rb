@@ -5,6 +5,8 @@ require_relative "../lib/schemurai"
 require "json"
 
 def measure(label, schema, value, calls: 50)
+  return if ENV["FILTER"] && !Regexp.new(ENV.fetch("FILTER")).match?(label)
+
   schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema)
   validator = Schemurai.compile(schema, backend: :native)
   runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
@@ -45,6 +47,17 @@ end
     definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }}
   end
   measure("shared-reference depth=#{depth}", {"$defs" => definitions, "$ref" => "#/$defs/d#{depth}"}, 1, calls: 5)
+  [{"properties" => {"x" => {"type" => "integer"}}}, {"prefixItems" => [{"type" => "integer"}]}].each do |leaf|
+    object = leaf.key?("properties")
+    definitions = {"d0" => leaf}
+    1.upto(depth) do |i|
+      definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }}
+    end
+    schema = {"$defs" => definitions, "$ref" => "#/$defs/d#{depth}",
+              (object ? "unevaluatedProperties" : "unevaluatedItems") => false}
+    measure("shared-reference annotations=#{object ? "object" : "array"} depth=#{depth}",
+      schema, object ? {"x" => 1} : [1], calls: 5)
+  end
 end
 [1, 8, 32, 64].each do |patterns|
   schema = {"patternProperties" => Array.new(patterns) { |i| ["^f#{i}_", {"type" => "integer"}] }.to_h}
