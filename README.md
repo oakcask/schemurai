@@ -5,12 +5,17 @@
 [![lint / rubocop](https://github.com/oakcask/schemurai/actions/workflows/lint--rubocop.yaml/badge.svg)](https://github.com/oakcask/schemurai/actions/workflows/lint--rubocop.yaml)
 [![lint / rbs](https://github.com/oakcask/schemurai/actions/workflows/lint--rbs.yaml/badge.svg)](https://github.com/oakcask/schemurai/actions/workflows/lint--rbs.yaml)
 
-A small, light-weight-dependency JSON Schema validator for Ruby supporting Draft 7,
-Draft 2019-09, and Draft 2020-12. It covers the required cases in the official
-JSON-Schema-Test-Suite, as well as the applicable optional tests for numeric
+A JSON Schema validator for Ruby with reusable compiled schemas and detailed
+validation errors. It supports Draft 7, Draft 2019-09, and Draft 2020-12 and
+covers the required cases in the official JSON-Schema-Test-Suite, as well as
+the applicable optional tests for numeric
 precision, ECMA-262 regular expressions, content validation, anchors, and dynamic
 references. The dialect is selected from the schema's `$schema` URI; schemas that
 omit `$schema` use Draft 7 for compatibility.
+
+Choose the default Ruby evaluator, the Ruby VM backend, or the optional
+experimental Rust native backend. See [backend selection](#backend-selection)
+for setup and requirements.
 
 Schemurai ships RBS declarations for its public API in `sig/schemurai.rbs`.
 
