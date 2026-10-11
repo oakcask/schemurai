@@ -38,7 +38,7 @@ Local medians on Ruby 4.0.6/YJIT, x86_64-linux, compared with `2439118`:
 
 Verdicts retain up to 4,096 results; tracked validity and diagnostic successes
 share up to 8,192 results and a 65,536-slot annotation budget. FIFO admission
-replaces old results when a limit is reached. Dynamic
+replaces old results when a limit is reached. Scope-dependent
 or cyclic reachable references remain uncached. Failing diagnostics retain
 distinct schema-path errors and can require exponential output size. These
 measurements establish improvement for the successful static-reference workload,
@@ -75,6 +75,30 @@ The runner checks VM parity on a one-object sample and direct native coverage
 for each measured array. Regression tests compare full ordered VM errors after
 turnover, including mutation of the final object. Rust tests check entry and
 slot limits, eviction across coverage policies, and oversized-result rejection.
+
+### Invariant dynamic references
+
+A dynamic reference can have only one possible target in the compiled engine.
+Previously its presence disabled memoization for the entire reachable shared
+subgraph, making the two-reference definition chain exponential even without
+any scope-dependent behavior. After anchor binding reaches its fixed point,
+the compiler proves that every binding equals the fallback target and uses
+static resolution internally. Diagnostic paths keep `$dynamicRef`. Binding
+overrides, fallback mismatches and recursive references keep their scope rules.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_dynamic_memo.rb
+```
+
+For the scalar-leaf depth-16 workload, local single-call observations on Ruby
+4.0.6/x86_64-linux without YJIT dropped from about 4,060 µs to 32 µs for
+validity and 14,161 µs to 32 µs for diagnostics. These are indicative samples;
+the structural change reduces this equal-depth successful chain from O(2^D)
+to O(D) evaluation work, within the invocation cache limits. Compilation adds
+O(A + E) work and O(K) temporary slots for compiled anchor bindings A,
+instructions E and anchor names K. The benchmark checks direct native coverage
+and VM parity outside timing. Regressions include annotation propagation,
+invalid source paths, GC compaction, and existing dynamic override cases.
 
 ## Wide integer fingerprints
 

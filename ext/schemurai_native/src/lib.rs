@@ -2549,6 +2549,7 @@ pub unsafe extern "C" fn sn_compile(
             e.root = e.compile(program)?;
         }
         e.bind_dynamic_anchors()?;
+        e.simplify_dynamic_references();
         e.compile_memoization();
         Ok::<_, Value>(())
     })) {

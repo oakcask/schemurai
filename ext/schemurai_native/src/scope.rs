@@ -10,6 +10,56 @@ pub(super) struct Metadata {
     pub dynamic_anchor: Option<Value>,
     pub primary_binding: Option<usize>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proves_only_invariant_dynamic_targets_and_enables_shared_graph_memoization() {
+        let reference = |target, kind| Op::Ref(Reference { target, kind });
+        let mut engine = Engine {
+            nodes: vec![
+                vec![Op::Boolean(true)],
+                vec![reference(0, ReferenceKind::Dynamic(0))],
+                vec![reference(0, ReferenceKind::Dynamic(0))],
+                vec![Op::All(vec![1, 2])],
+                vec![reference(3, ReferenceKind::Static)],
+                vec![reference(3, ReferenceKind::Static)],
+                vec![reference(0, ReferenceKind::Dynamic(1))],
+                vec![reference(0, ReferenceKind::Dynamic(2))],
+                vec![reference(0, ReferenceKind::Dynamic(3))],
+                vec![reference(0, ReferenceKind::Recursive)],
+            ],
+            anchor_tables: vec![
+                vec![(100, 0), (101, 0)],
+                vec![(100, 0), (101, 3)],
+                vec![(100, 3)],
+                vec![],
+            ],
+            ..Engine::default()
+        };
+        engine.compile_memoization();
+        assert!(!engine.memoizable[3]);
+        engine.simplify_dynamic_references();
+        engine.compile_memoization();
+        assert!(engine.memoizable[3]);
+        for node in [1, 2] {
+            let Op::Ref(reference) = engine.nodes[node][0] else {
+                panic!()
+            };
+            assert_eq!(reference.static_target(), Some(0));
+        }
+        // Changing bindings, fallback mismatches, absent bindings and
+        // recursive references retain context-sensitive resolution.
+        for node in [6, 7, 8, 9] {
+            let Op::Ref(reference) = engine.nodes[node][0] else {
+                panic!()
+            };
+            assert_eq!(reference.static_target(), None);
+        }
+    }
+}
 #[derive(Clone, Copy, Debug)]
 enum ReferenceKind {
     Static,
@@ -37,6 +87,35 @@ impl Reference {
     }
 }
 impl Engine {
+    pub(super) fn simplify_dynamic_references(&mut self) {
+        // Anchor binding has reached its fixed point, including resources
+        // compiled while discovering overrides. A name whose every binding
+        // equals the fallback target cannot change under any native scope.
+        // Preserve the source opcode for diagnostic paths, while allowing
+        // ordinary acyclic static-target memoization for the shared graph.
+        let invariant: Vec<_> = self
+            .anchor_tables
+            .iter()
+            .map(|bindings| {
+                let &(_, target) = bindings.first()?;
+                bindings
+                    .iter()
+                    .all(|&(_, candidate)| candidate == target)
+                    .then_some(target)
+            })
+            .collect();
+        for ops in &mut self.nodes {
+            for op in ops {
+                if let Op::Ref(reference) = op
+                    && let ReferenceKind::Dynamic(name) = reference.kind
+                    && invariant[name] == Some(reference.target)
+                {
+                    reference.kind = ReferenceKind::Static;
+                }
+            }
+        }
+    }
+
     pub(super) fn compile_scope(
         &mut self,
         program: Value,
