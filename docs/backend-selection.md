@@ -446,9 +446,11 @@ diagnostic prechecks and compiled record fields use the same guarded decoder.
 Other Integer buckets fold every sampled scalar word in two independent
 multiplication lanes and mix their combined result once. This shortens the
 dependency chain without dropping words or changing exact collision checks.
-Integers beyond
-the finite Float range use bounded low-word fingerprints plus magnitude size;
-unsampled high-digit collisions still compare the entire original integers.
+Integers beyond the 1,024-bit finite Float range use CRuby's full native digit
+hash, with no Ruby method dispatch or allocation. Their fingerprints need no
+Float normalization because no finite Float can equal them. This avoids
+systematic high-digit collisions in mixed and nested `uniqueItems` values and
+compiled enum indexes. Exact comparisons still decide every hash collision.
 Instance trees are never rebuilt in Rust containers. Structural fingerprints
 combine ordinary-kind checks and borrowed storage metadata in one C call.
 Strings provide their original byte pointer and length, arrays their original

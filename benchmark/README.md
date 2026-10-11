@@ -76,6 +76,40 @@ for each measured array. Regression tests compare full ordered VM errors after
 turnover, including mutation of the final object. Rust tests check entry and
 slot limits, eviction across coverage policies, and oversized-result rejection.
 
+## Wide integer fingerprints
+
+`native_wide_fingerprints.rb` exercises 4,097-bit integers whose low 1,024 bits
+and magnitude sizes are identical. Mixed arrays and nested containers use the
+canonical structural fingerprint path, bypassing the Bignum-only adaptive
+index. Low-word sampling put every such integer into one bucket, causing
+O(N²) equality checks in `uniqueItems`; it also collapsed compiled enum
+candidate indexes. The canonical oversized-integer path now uses CRuby's full
+digit hash without Ruby dispatch or allocation. No finite Float can equal
+these magnitudes, so this preserves Integer/Float fingerprint compatibility.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_wide_fingerprints.rb
+```
+
+Local single-call observations on Ruby 4.0.6, x86_64-linux, without YJIT,
+compared with `3e2da08`; compilation is excluded:
+
+| Shape / integers | Before validity (ms) | After validity (ms) | Before diagnostics (ms) | After diagnostics (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed / 1,024 | 8.290 | 0.814 | 8.235 | 0.293 |
+| Mixed / 4,096 | 136.823 | 1.707 | 136.287 | 1.234 |
+| Nested / 1,024 | 31.895 | 0.161 | 31.876 | 0.148 |
+| Nested / 4,096 | 518.120 | 0.650 | 528.672 | 0.629 |
+
+Hashing now reads all Bignum digits, taking O(B) work for B digit bytes instead
+of a bounded sample. Expected uniqueness work is O(NB), excluding other
+container bytes and exact collision comparisons, with the existing O(N)
+index storage. Arbitrary full hash collisions can still require quadratic
+comparisons. The homogeneous Bignum path retains its bounded sampling and
+adaptive retry behavior. Regression cases cover mixed values, nested arrays
+and objects, separately allocated equal integers, enum hits and misses,
+negative integers, and Integer/Float equality at the 1,024-bit boundary.
+
 ## VM evaluation tracking
 
 `vm_evaluation.rb` measures `valid?` and detailed `validate` on large objects

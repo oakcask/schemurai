@@ -148,6 +148,19 @@ RSpec.describe "native VALUE execution" do
       {"x" => {"y" => 1, "extra" => 2}}, {}])
   end
 
+  it "compares full wide integer fingerprints in mixed arrays, nested values and enums" do # rubocop:disable RSpec/ExampleLength
+    numbers = Array.new(40) { |i| 2**4096 + (i << 1100) + 1 }
+    duplicate = 2**4096 + (20 << 1100) + 1
+    values = [numbers + ["other"], ["other"] + numbers, numbers + [duplicate, "other"],
+      numbers.map { |n| {"n" => n} }, numbers.map { |n| [n, -n] },
+      numbers.map { |n| {"n" => n} } + [{"n" => duplicate}],
+      [2**1023, (2**1023).to_f] + numbers, [-2**1023, (-2**1023).to_f] + numbers]
+    choices = numbers + numbers.map { |n| {"n" => -n} }
+    values += [numbers.last, duplicate, {"n" => -duplicate},
+      numbers.last + (1 << 1500), {"n" => -(numbers.last + (1 << 1500))}, Float::INFINITY]
+    expect_native_policy_results([{"uniqueItems" => true}, {"enum" => choices}], values)
+  end
+
   it "applies every grouped pattern in schema order including overlapping and empty matches" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     patterns = {"^a" => {"type" => "integer"}, "^a.*$" => {"minimum" => 2}, "^" => {"maximum" => 4},
