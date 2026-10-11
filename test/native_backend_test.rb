@@ -125,6 +125,14 @@ RSpec.describe "native VALUE execution" do
     expect_native_policy_results(schemas, [[], [0], [1], [1, 0, 2], [1, 1, 1, 1], [1, 1.0], [1, 2**200]])
   end
 
+  it "indexes required/property joins by name while retaining duplicates and ordered missing errors" do # rubocop:disable RSpec/ExampleLength
+    properties = 128.times.to_h { |i| ["p#{i}", {"type" => "integer"}] }
+    required = properties.keys.reverse.map(&:dup) + ["extra", "extra"]
+    schema = {"properties" => properties, "required" => required}
+    all = 128.times.to_h { |i| ["p#{i}", i] }.merge("extra" => 1)
+    expect_native_policy_results([schema], [all, all.except("p0", "p127", "extra"), {}, all.merge("p64" => "bad")])
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}
