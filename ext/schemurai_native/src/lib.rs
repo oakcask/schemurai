@@ -192,7 +192,7 @@ impl StringRules {
     fn eval_length_guarded(&self, required: i32, value: Value) -> Verdict {
         length_guarded(value, required, self.min, self.max)
     }
-    fn eval_guarded(&self, required: i32, value: Value) -> Verdict {
+    fn eval_guarded(&self, caches: &pattern::Caches, required: i32, value: Value) -> Verdict {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
@@ -202,14 +202,15 @@ impl StringRules {
             verdict(required == 0)
         } else {
             let bytes = unsafe { byte_view(data, len) };
-            self.eval_with_view::<true>(value, Some((bytes, encoding)))
+            self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
         }
     }
-    fn eval(&self, value: Value) -> Verdict {
-        self.eval_with_view::<false>(value, None)
+    fn eval(&self, caches: &pattern::Caches, value: Value) -> Verdict {
+        self.eval_with_view::<false>(caches, value, None)
     }
     fn eval_with_view<const BORROWED: bool>(
         &self,
+        caches: &pattern::Caches,
         value: Value,
         view: Option<(&[u8], i32)>,
     ) -> Verdict {
@@ -223,8 +224,8 @@ impl StringRules {
         }
         if let Some(pattern) = &self.pattern {
             let result = match view {
-                Some((bytes, encoding)) => pattern.eval_bytes(bytes, encoding),
-                None => pattern.eval(value),
+                Some((bytes, encoding)) => pattern.eval_bytes(caches, bytes, encoding),
+                None => pattern.eval(caches, value),
             };
             if result != Valid {
                 return result;
@@ -418,6 +419,7 @@ impl Object {
     // input-order diagnostic scans visit them here as well.
     fn visit_value_rules<const PROPERTIES: bool>(
         &self,
+        caches: &pattern::Caches,
         key: Value,
         location: Option<tracking::JsonKey>,
         mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
@@ -441,7 +443,7 @@ impl Object {
                 .contains(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
         };
         for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
-            match pattern.eval(key) {
+            match pattern.eval(caches, key) {
                 Unsupported => return Err(Unsupported),
                 Invalid => {}
                 Valid => {
@@ -523,6 +525,7 @@ pub struct Roots {
 #[derive(Default)]
 pub struct Engine {
     nodes: Vec<Vec<Op>>,
+    pattern_cache_count: usize,
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
     metadata: Vec<scope::Metadata>,
@@ -780,7 +783,10 @@ impl Engine {
                                 pattern: if unsafe { sn_same(pattern, sn_nil()) } != 0 {
                                     None
                                 } else {
-                                    Some(pattern::Pattern::compile(pattern))
+                                    Some(pattern::Pattern::compile(
+                                        pattern,
+                                        &mut self.pattern_cache_count,
+                                    ))
                                 },
                             }),
                         )
@@ -829,7 +835,12 @@ impl Engine {
                         let pattern_names = patterns.iter().map(|&(key, _)| key).collect();
                         let patterns = patterns
                             .into_iter()
-                            .map(|(key, child)| (pattern::Pattern::compile(key), child))
+                            .map(|(key, child)| {
+                                (
+                                    pattern::Pattern::compile(key, &mut self.pattern_cache_count),
+                                    child,
+                                )
+                            })
                             .collect();
                         let required = self.field(operand, b"required\0")?;
                         let required = self.values(required);
@@ -1034,6 +1045,20 @@ impl Engine {
         self.error_operands[index] = error_operands;
         Ok(index)
     }
+}
+
+// A view of immutable compiled data and validator-owned regex search caches.
+struct Execution<'a> {
+    engine: &'a Engine,
+    caches: &'a pattern::Caches,
+}
+impl std::ops::Deref for Execution<'_> {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        self.engine
+    }
+}
+impl Execution<'_> {
     fn eval(&self, node: usize, value: Value, depth: usize, active: scope::Context<'_>) -> Verdict {
         let frame = scope::ScopeFrame {
             resource: self.metadata[node].resource,
@@ -1053,7 +1078,7 @@ impl Engine {
         if let [Op::String(required, rules)] = self.nodes[node].as_slice()
             && rules.pattern.is_some()
         {
-            return rules.eval_guarded(*required, value);
+            return rules.eval_guarded(self.caches, *required, value);
         }
         let kind = if value & self.fixnum_flag != 0 {
             TYPE_INTEGRAL_NUMBER
@@ -1170,7 +1195,7 @@ impl Engine {
                 } else if kind != TYPE_STRING {
                     Valid
                 } else {
-                    rules.eval(value)
+                    rules.eval(self.caches, value)
                 }
             }
             _ => unreachable!("applicators must be evaluated with their context"),
@@ -1267,8 +1292,11 @@ impl Engine {
                 rules.content_only().map(|content| (required, content))
             });
             if let Some((required, pattern)) = pattern {
-                let result =
-                    pattern.eval_items(required, values.get(r.prefix.len()..).unwrap_or(&[]));
+                let result = pattern.eval_items(
+                    self.caches,
+                    required,
+                    values.get(r.prefix.len()..).unwrap_or(&[]),
+                );
                 if result != Valid {
                     return result;
                 }
@@ -1312,7 +1340,7 @@ impl Engine {
                         rules.eval_guarded(required, item)
                     } else if let Some((required, rules)) = string {
                         if rules.pattern.is_some() {
-                            rules.eval_guarded(required, item)
+                            rules.eval_guarded(self.caches, required, item)
                         } else if rules.length_only() {
                             rules.eval_length_guarded(required, item)
                         } else {
@@ -1322,7 +1350,7 @@ impl Engine {
                             } else if kind != TYPE_STRING {
                                 verdict(required == 0)
                             } else {
-                                rules.eval(item)
+                                rules.eval(self.caches, item)
                             }
                         }
                     } else {
@@ -1573,7 +1601,7 @@ impl Engine {
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.pattern.is_some() =>
             {
-                rules.eval_guarded(*required, value)
+                rules.eval_guarded(self.caches, *required, value)
             }
             [
                 op @ (Op::Type(_)
@@ -1599,7 +1627,7 @@ impl Engine {
     }
 }
 struct RecordContext<'a, 'b> {
-    engine: &'a Engine,
+    engine: &'a Execution<'a>,
     rules: &'a Object,
     record: &'a RecordObject,
     indexed: bool,
@@ -2321,7 +2349,7 @@ unsafe extern "C" fn property_candidate(context: *mut c_void, key: Value, _: Val
 }
 
 struct ObjectContext<'a> {
-    engine: &'a Engine,
+    engine: &'a Execution<'a>,
     rules: &'a Object,
     depth: usize,
     active: scope::Context<'a>,
@@ -2344,7 +2372,7 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
         }
         match c
             .rules
-            .visit_value_rules::<false>(key, None, |_, _, child| {
+            .visit_value_rules::<false>(c.engine.caches, key, None, |_, _, child| {
                 match c.engine.eval(child, value, c.depth, c.active) {
                     Valid => Ok(()),
                     status => Err(status),
@@ -2366,7 +2394,8 @@ pub extern "C" fn sn_new() -> *mut Engine {
     }))
 }
 /// # Safety
-/// Engine and error must be valid writable pointers; program must be a live VM Program under the GVL.
+/// Engine/error must be writable. Program must be a live VM Program (or Array
+/// of Programs when multiple is set), and compiler must be live under the GVL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_compile(
     engine: *mut Engine,
@@ -2374,6 +2403,7 @@ pub unsafe extern "C" fn sn_compile(
     compiler: Value,
     format: i32,
     content: i32,
+    multiple: i32,
     error: *mut Value,
 ) -> i32 {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -2381,7 +2411,13 @@ pub unsafe extern "C" fn sn_compile(
         e.validate_format = format != 0;
         e.validate_content = content != 0;
         e.compiler = e.retain(compiler);
-        e.root = e.compile(program)?;
+        if multiple != 0 {
+            for program in e.values(program) {
+                e.compile(program)?;
+            }
+        } else {
+            e.root = e.compile(program)?;
+        }
         e.bind_dynamic_anchors()?;
         Ok::<_, Value>(())
     })) {
@@ -2394,12 +2430,48 @@ pub unsafe extern "C" fn sn_compile(
     }
 }
 /// # Safety
-/// Engine must be initialized and value must be a live Ruby VALUE under the GVL.
+/// Engine must be fully initialized and program must be live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_valid(engine: *const Engine, value: Value) -> i32 {
+pub unsafe extern "C" fn sn_node_index(engine: *const Engine, program: Value) -> usize {
+    unsafe { &*engine }
+        .indices
+        .get(&program)
+        .copied()
+        .unwrap_or(usize::MAX)
+}
+/// # Safety
+/// Engine must be initialized.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_root_index(engine: *const Engine) -> usize {
+    unsafe { &*engine }.root
+}
+/// # Safety
+/// Roots must be live and compilation must have finished.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_root_count(roots: *const Roots) -> usize {
+    unsafe { &*roots }.values.len()
+}
+/// # Safety
+/// Roots must be live and index in bounds, outside compilation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_root_at(roots: *const Roots, index: usize) -> Value {
+    unsafe { &*roots }.values[index]
+}
+/// # Safety
+/// Engine must be initialized, root in bounds and value live under the GVL.
+/// Caches must be null or live, owned by this validator and not in use.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_valid(
+    engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
+    value: Value,
+) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &*engine };
-        e.eval(e.root, value, 0, scope::Context::default()) as i32
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        Execution { engine: e, caches }.eval(root, value, 0, scope::Context::default()) as i32
     }))
     .unwrap_or(STATUS_PANIC)
 }

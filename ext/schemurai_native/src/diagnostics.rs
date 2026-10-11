@@ -95,7 +95,7 @@ fn pointer_name(value: Value) -> Result<String, Verdict> {
     Ok(name.replace('~', "~0").replace('/', "~1"))
 }
 
-impl Engine {
+impl Execution<'_> {
     fn collect<const ANNOTATIONS: bool>(
         &self,
         report: &mut Report,
@@ -186,7 +186,7 @@ impl Engine {
                             report.add("minLength", source, value, len);
                         }
                         if let Some(pattern) = &rules.pattern {
-                            match pattern.eval(value) {
+                            match pattern.eval(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => report.add("pattern", source, value, 0),
                                 Valid => {}
@@ -331,6 +331,7 @@ impl Engine {
                                 }
                             }
                             let status = pattern.visit_invalid_items(
+                                self.caches,
                                 required,
                                 &values[start..],
                                 |index, item| match report.scoped(
@@ -786,7 +787,7 @@ impl Engine {
 }
 
 struct ObjectDiagnostics<'a, 'b, 'c> {
-    engine: &'a Engine,
+    engine: &'a Execution<'a>,
     report: &'b mut Report,
     rules: &'a Object,
     depth: usize,
@@ -831,11 +832,12 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
                 c.coverage.property(c.engine, key);
                 return Ok(());
             }
-            let evaluated =
-                c.rules
-                    .visit_value_rules::<true>(key, None, |segment, name, child| {
-                        visit(c.report, child, value, segment, name)
-                    })?;
+            let evaluated = c.rules.visit_value_rules::<true>(
+                c.engine.caches,
+                key,
+                None,
+                |segment, name, child| visit(c.report, child, value, segment, name),
+            )?;
             if c.tracked && evaluated {
                 c.coverage.property(c.engine, key);
             }
@@ -863,23 +865,23 @@ pub struct Record {
     detail: usize,
 }
 /// # Safety
-/// Engine and status must be live under the GVL; instance must be a Ruby VALUE.
+/// Engine/status must be live under the GVL; root must be in bounds and
+/// instance live. Caches must be null or live, validator-owned and not in use.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_diagnose(
     engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
     instance: Value,
     status: *mut i32,
 ) -> *mut Report {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let engine = unsafe { &*engine };
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let execution = Execution { engine, caches };
         let mut report = Report::default();
-        engine.collect::<false>(
-            &mut report,
-            engine.root,
-            instance,
-            0,
-            scope::Context::default(),
-        )?;
+        execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())?;
         Ok::<_, Verdict>(Box::into_raw(Box::new(report)))
     }));
     match result {

@@ -1,5 +1,6 @@
 #include <ruby.h>
 #include <ruby/encoding.h>
+#include <ruby/ractor.h>
 #include <ruby/st.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -17,8 +18,15 @@ extern int rb_hash_stlike_foreach(VALUE, st_foreach_callback_func *, st_data_t);
 #endif
 typedef struct { void *engine; const void *roots; VALUE program; int compiling; } holder;
 extern void *sn_new(void);
-extern int sn_compile(void *, VALUE, VALUE, int, int, VALUE *);
-extern int sn_valid(const void *, VALUE);
+extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
+extern int sn_valid(const void *, const void *, size_t, VALUE);
+extern size_t sn_node_index(const void *, VALUE);
+extern size_t sn_root_index(const void *);
+extern size_t sn_root_count(const void *);
+extern VALUE sn_root_at(const void *, size_t);
+extern void *sn_caches_new(void);
+extern void sn_caches_free(void *);
+extern size_t sn_caches_size(const void *);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -43,7 +51,7 @@ static size_t size(const void *ptr) {
 }
 static const rb_data_type_t engine_type = {
     "Schemurai::Native::Program", {mark, release, size, NULL, {NULL}},
-    NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
+    NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_FROZEN_SHAREABLE
 };
 static VALUE allocate(VALUE klass) {
     holder *h;
@@ -55,6 +63,7 @@ static VALUE allocate(VALUE klass) {
     return obj;
 }
 static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format, VALUE content) {
+    rb_check_frozen(self);
     holder *h;
     TypedData_Get_Struct(self, holder, &engine_type, h);
     if (h->engine) rb_raise(rb_eRuntimeError, "native program is already initialized");
@@ -63,7 +72,8 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
     h->roots = sn_roots(h->engine);
     h->compiling = 1;
     VALUE error = Qnil;
-    int status = sn_compile(h->engine, program, compiler, RTEST(format), RTEST(content), &error);
+    int status = sn_compile(h->engine, program, compiler, RTEST(format), RTEST(content),
+        RB_TYPE_P(program, T_ARRAY), &error);
     h->compiling = 0;
     if (status < 0) {
         sn_free(h->engine);
@@ -79,8 +89,64 @@ static VALUE valid(VALUE self, VALUE instance) {
     TypedData_Get_Struct(self, holder, &engine_type, h);
     if (!h->engine) rb_raise(rb_eRuntimeError, "uninitialized native program");
     if (h->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
-    int status = sn_valid(h->engine, instance);
+    int status = sn_valid(h->engine, NULL, sn_root_index(h->engine), instance);
     RB_GC_GUARD(instance);
+    if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
+    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
+}
+/* Search caches and root selection belong to the owning validator. The Ruby
+ * owner keeps the shared engine and all its GC roots alive. */
+typedef struct { VALUE owner; void *caches; size_t root; } runner_holder;
+static void runner_mark(void *ptr) { rb_gc_mark(((runner_holder *)ptr)->owner); }
+static void runner_release(void *ptr) {
+    runner_holder *h = ptr;
+    if (h->caches) sn_caches_free(h->caches);
+    xfree(h);
+}
+static size_t runner_size(const void *ptr) {
+    const runner_holder *h = ptr;
+    return sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
+}
+static const rb_data_type_t runner_type = {
+    "Schemurai::Native::Runner", {runner_mark, runner_release, runner_size, NULL, {NULL}},
+    NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
+};
+static holder *ready_program(VALUE self) {
+    holder *h;
+    TypedData_Get_Struct(self, holder, &engine_type, h);
+    if (!h->engine) rb_raise(rb_eRuntimeError, "uninitialized native program");
+    if (h->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
+    return h;
+}
+static VALUE make_shareable(VALUE self) {
+    holder *h = ready_program(self);
+    /* TypedData's hidden references must be shareable too. Freeze temporary
+     * compilation arrays as well as the VM programs/graph they retain. */
+    size_t count = sn_root_count(h->roots);
+    for (size_t i = 0; i < count; i++) rb_ractor_make_shareable(sn_root_at(h->roots, i));
+    rb_ractor_make_shareable(h->program);
+    return rb_ractor_make_shareable(self);
+}
+static VALUE runner(VALUE self, VALUE root) {
+    holder *h = ready_program(self);
+    size_t index = sn_node_index(h->engine, root);
+    if (index == SIZE_MAX) rb_raise(rb_eArgError, "root was not compiled in this native program");
+    VALUE klass = rb_const_get(rb_obj_class(self), rb_intern_const("Runner"));
+    runner_holder *r;
+    VALUE object = TypedData_Make_Struct(klass, runner_holder, &runner_type, r);
+    r->owner = self;
+    r->root = index;
+    r->caches = sn_caches_new();
+    RB_GC_GUARD(self);
+    return object;
+}
+static VALUE runner_valid(VALUE self, VALUE instance) {
+    runner_holder *r;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
+    holder *h = ready_program(r->owner);
+    int status = sn_valid(h->engine, r->caches, r->root, instance);
+    RB_GC_GUARD(instance);
+    RB_GC_GUARD(self);
     if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
     return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
 }
@@ -388,7 +454,7 @@ typedef struct {
     size_t detail;
 } diagnostic_record;
 typedef struct { void *report; } report_holder;
-extern void *sn_diagnose(const void *, VALUE, int *);
+extern void *sn_diagnose(const void *, const void *, size_t, VALUE, int *);
 extern size_t sn_report_len(const void *);
 extern size_t sn_report_size(const void *);
 extern void sn_report_record(const void *, size_t, diagnostic_record *);
@@ -411,16 +477,12 @@ static const rb_data_type_t report_type = {
     "Schemurai::Native::Diagnostics", {report_mark, report_release, report_size, NULL, {NULL}},
     NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
 };
-static VALUE diagnostics(VALUE self, VALUE instance) {
-    holder *engine;
-    TypedData_Get_Struct(self, holder, &engine_type, engine);
-    if (!engine->engine) rb_raise(rb_eRuntimeError, "uninitialized native program");
-    if (engine->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
+static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, const void *caches, size_t root) {
     report_holder *h;
     VALUE owner = TypedData_Make_Struct(rb_cObject, report_holder, &report_type, h);
     h->report = NULL;
     int status = 0;
-    h->report = sn_diagnose(engine->engine, instance, &status);
+    h->report = sn_diagnose(engine->engine, caches, root, instance, &status);
     if (status < 0) rb_raise(rb_eRuntimeError, "native diagnostics panicked");
     if (status == SN_VERDICT_UNSUPPORTED) return Qnil;
     size_t count = sn_report_len(h->report);
@@ -442,6 +504,16 @@ static VALUE diagnostics(VALUE self, VALUE instance) {
     RB_GC_GUARD(instance);
     RB_GC_GUARD(self);
     return output;
+}
+static VALUE diagnostics(VALUE self, VALUE instance) {
+    holder *h = ready_program(self);
+    return collect_diagnostics(self, instance, h, NULL, sn_root_index(h->engine));
+}
+static VALUE runner_diagnostics(VALUE self, VALUE instance) {
+    runner_holder *r;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
+    holder *h = ready_program(r->owner);
+    return collect_diagnostics(self, instance, h, r->caches, r->root);
 }
 void Init_schemurai_native(void) {
     /* Cache fixed IDs explicitly, independent of compiler-specific macros. */
@@ -471,6 +543,12 @@ void Init_schemurai_native(void) {
     rb_define_method(klass, "initialize", initialize, 4);
     rb_define_method(klass, "valid?", valid, 1);
     rb_define_method(klass, "diagnostics", diagnostics, 1);
+    rb_define_method(klass, "make_shareable", make_shareable, 0);
+    rb_define_method(klass, "runner", runner, 1);
+    VALUE runner_class = rb_define_class_under(klass, "Runner", rb_cObject);
+    rb_undef_alloc_func(runner_class);
+    rb_define_method(runner_class, "valid?", runner_valid, 1);
+    rb_define_method(runner_class, "diagnostics", runner_diagnostics, 1);
 }
 
 extern int sn_object_entry(const void *, VALUE, VALUE);

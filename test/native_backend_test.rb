@@ -2298,7 +2298,7 @@ RSpec.describe "native VALUE execution" do
     [->(pattern) { {"pattern" => pattern} }, ->(pattern) { {"patternProperties" => {pattern => true}} }].each do |schema|
       sizes = ["^a$", "^a{1024}$"].map do |pattern|
         native = Schemurai.compile(schema.call(pattern), backend: :native)
-        program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        program = native.instance_variable_get(:@evaluator).instance_variable_get(:@compiled)
         ObjectSpace.memsize_of(program)
       end
       expect(sizes.last).to be > sizes.first + 4096
@@ -2507,7 +2507,84 @@ RSpec.describe "native VALUE execution" do
     expect { vm.valid?(invalid) }.to raise_error(ArgumentError)
   end
 
-  it "owns compiled patterns independently in Ractors using a shared registry" do # rubocop:disable RSpec/ExampleLength
+  it "shares native instruction tables while Ractors own their search caches" do # rubocop:disable RSpec/ExampleLength
+    schemas = {
+      "urn:patterns" => {"patternProperties" => {"record" => {"type" => "string", "pattern" => "value[0-9]+"}}},
+      "urn:other" => {
+        "$schema" => "https://json-schema.org/draft/2020-12/schema",
+        "$defs" => {"positive" => {"$id" => "urn:positive", "type" => "integer", "minimum" => 1}}
+      }
+    }
+    registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
+    native = Schemurai.const_get(:Native)
+    compiled = registry.validator_for("urn:patterns").instance_variable_get(:@evaluator).instance_variable_get(:@compiled)
+    expect(Ractor.shareable?(compiled)).to be(true)
+    # Any native recompile in a worker would invoke this stub and fail.
+    allow(native::Program).to receive(:new).and_raise("native recompilation")
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:patterns")
+        evaluator = validator.instance_variable_get(:@evaluator)
+        runner = evaluator.instance_variable_get(:@program)
+        results = Array.new(10) do
+          [validator.valid?({"record1" => "value1"}), validator.valid?({"record2" => "bad"}),
+            validator.validate({"record3" => "bad"}).errors.map(&:keyword)]
+        end
+        positive = shared.validator_for("urn:positive")
+        [evaluator.instance_variable_get(:@compiled), Ractor.shareable?(runner), results,
+          positive.valid?(1), positive.valid?(0)]
+      end
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    workers.each do |worker|
+      result = worker.respond_to?(:value) ? worker.value : worker.take
+      expect(result).to eq([compiled, false, Array.new(10) { [true, false, ["pattern"]] }, true, false])
+    end
+  end
+
+  it "keeps shared native roots alive after their registry is collected" do # rubocop:disable RSpec/ExampleLength
+    schema = {"patternProperties" => {"record" => {"pattern" => "value[0-9]+"}}, "required" => ["record1"]}
+    validator = Schemurai::SchemaRegistry.new(schemas: {"urn:patterns" => schema}, backend: :native)
+      .make_shareable.validator_for("urn:patterns")
+    validator.instance_variable_get(:@evaluator).remove_instance_variable(:@compiled)
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(validator.valid?({"record1" => "value1"})).to be(true)
+    expect(validator.validate({"record1" => "bad"}).errors.map(&:keyword)).to eq(["pattern"])
+  end
+
+  it "prepares all native content and format variants before sharing" do # rubocop:disable RSpec/ExampleLength
+    schema = {"type" => "string", "format" => "ipv4", "contentEncoding" => "base64", "contentMediaType" => "application/json"}
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:options" => schema}, backend: :native).make_shareable
+    compiled = [false, true].product([false, true]).map do |format, content|
+      validator = registry.validator_for("urn:options", format: format, content: content)
+      expect(validator.valid?("not an email or base64!")).to eq(!format && !content)
+      validator.instance_variable_get(:@evaluator).instance_variable_get(:@compiled)
+    end
+    expect(compiled.uniq.length).to eq(4)
+    expect(compiled.all? { |program| Ractor.shareable?(program) }).to be(true)
+  end
+
+  it "makes native tables shareable under GC stress and keeps runners private" do # rubocop:disable RSpec/ExampleLength
+    previous = GC.stress
+    GC.stress = true
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:gc" => {"properties" => {"id" => {"const" => {"value" => 1}}}}}, backend: :native)
+      .make_shareable
+    validator = registry.validator_for("urn:gc")
+    GC.stress = previous
+    evaluator = validator.instance_variable_get(:@evaluator)
+    compiled = evaluator.instance_variable_get(:@compiled)
+    runner = evaluator.instance_variable_get(:@program)
+    expect { Ractor.make_shareable(runner) }.to raise_error(Ractor::Error)
+    expect { compiled.send(:initialize, nil, nil, false, false) }.to raise_error(FrozenError)
+    expect(validator.valid?({"id" => {"value" => 1}})).to be(true)
+    expect(validator.valid?({"id" => {"value" => 2}})).to be(false)
+  ensure
+    GC.stress = previous
+  end
+
+  it "uses shared compiled patterns in Ractors with independent search caches" do # rubocop:disable RSpec/ExampleLength
     schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "patternProperties" => {
       "^record[0-9]+$" => {"type" => "string", "pattern" => "^value[0-9]+$"}
     }, "unevaluatedProperties" => false}

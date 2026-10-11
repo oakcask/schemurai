@@ -127,6 +127,13 @@ module Schemurai
 
       @graph.make_shareable
       @compiler&.compile_all
+      if @backend == :native
+        programs = @graph.nodes.map { |node| @compiler.compile(node) }
+        # Build every option variant before the registry becomes immutable.
+        @native_programs = [false, true].product([false, true]).to_h do |format, content|
+          [[format, content], Native::Program.new(programs, @compiler, format, content).make_shareable]
+        end
+      end
       Ractor.make_shareable(self)
     end
 
@@ -151,7 +158,12 @@ module Schemurai
       evaluator = if @compiler
         program = @compiler.compile(root)
         evaluator_class = (@backend == :native) ? Native::Evaluator : VM::Evaluator
-        evaluator_class.new(@graph, @compiler, program, content: content, format: format)
+        if @native_programs
+          compiled = @native_programs.fetch([!!format, !!content])
+          Native::Evaluator.new(@graph, @compiler, program, content: content, format: format, compiled: compiled)
+        else
+          evaluator_class.new(@graph, @compiler, program, content: content, format: format)
+        end
       else
         Internal::Evaluator.new(@graph, root, content: content, format: format)
       end
