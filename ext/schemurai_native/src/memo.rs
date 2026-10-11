@@ -1,4 +1,4 @@
-//! Invocation-local results for shared acyclic reference targets and scopes.
+//! Invocation-local results for shared reference targets and guard/scope contexts.
 use super::*;
 use std::cell::RefCell;
 use tracking::Tracked;
@@ -78,10 +78,44 @@ impl Scopes {
     }
 }
 
+// Approximate repeat detection only decides whether to attempt caching.
+// False positives are safe: verdict/annotation keys remain fully exact.
+// Reset epochs bound density and keep later locations eligible for admission.
+#[derive(Default)]
+struct Admission {
+    bits: Vec<u64>,
+    admissions: usize,
+}
+impl Admission {
+    fn admit(&mut self, (node, value, depth): Key) -> bool {
+        if self.bits.is_empty() {
+            self.bits.resize(1024, 0);
+        }
+        if self.admissions == MAX_ENTRIES {
+            self.bits.fill(0);
+            self.admissions = 0;
+        }
+        let hash =
+            mix(node as u64 ^ (value as u64).rotate_left(21) ^ (depth as u64).rotate_left(42));
+        let a = hash as usize & 65535;
+        let b = (hash >> 32) as usize & 65535;
+        let seen =
+            self.bits[a / 64] & (1 << (a % 64)) != 0 && self.bits[b / 64] & (1 << (b % 64)) != 0;
+        if !seen {
+            self.bits[a / 64] |= 1 << (a % 64);
+            self.bits[b / 64] |= 1 << (b % 64);
+            self.admissions += 1;
+        }
+        seen
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Memo {
     verdicts: RefCell<Cache<Key, Verdict>>,
     scopes: RefCell<Scopes>,
+    instances: RefCell<instance_graph::Graph>,
+    guard_admission: RefCell<Admission>,
     // None is tracked validity; Some(bool) is the diagnostic annotation policy.
     // Coverage results share both admission order and the allocation budget.
     coverage: RefCell<Cache<(Key, Option<bool>), Tracked>>,
@@ -97,6 +131,111 @@ impl Memo {
     ) -> Option<Key> {
         if !engine.memoizable[node] {
             return None;
+        }
+        let mut object = false;
+        if engine.memo_guarded.get(node).copied().unwrap_or(false) {
+            let kind = unsafe { sn_shallow_kind(value) };
+            object = kind == TYPE_OBJECT;
+            if kind != TYPE_ARRAY && !object && !engine.memo_guard_scalar_amplification[node] {
+                return None;
+            }
+            if !self.admit_guard_key((node, value, depth)) {
+                return None;
+            }
+        }
+        self.key_with_instance_proof(
+            engine,
+            node,
+            value,
+            depth,
+            context,
+            (object, |value| self.instances.borrow_mut().acyclic(value)),
+        )
+    }
+    fn admit_guard_key(&self, key: Key) -> bool {
+        self.guard_admission.borrow_mut().admit(key)
+    }
+    // Pure Rust key tests do not link CRuby. They exercise the conservative
+    // path; Ruby integration tests exercise the actual bounded instance proof.
+    #[cfg(test)]
+    fn key_without_instance_proof(
+        &self,
+        engine: &Engine,
+        node: usize,
+        value: Value,
+        depth: usize,
+        context: scope::Context<'_>,
+    ) -> Option<Key> {
+        self.key_with_instance_proof(engine, node, value, depth, context, (false, |_| false))
+    }
+    fn key_with_instance_proof(
+        &self,
+        engine: &Engine,
+        node: usize,
+        value: Value,
+        depth: usize,
+        context: scope::Context<'_>,
+        analysis: (bool, impl FnOnce(Value) -> bool),
+    ) -> Option<Key> {
+        if !engine.memoizable[node] {
+            return None;
+        }
+        if engine.memo_guarded.get(node).copied().unwrap_or(false) {
+            let names = engine.anchor_tables.len();
+            if names > MAX_SCOPE_SLOTS - 2 {
+                return None;
+            }
+            let mut pairs = vec![];
+            let mut current = context.active;
+            while let Some(frame) = current {
+                // A source outside every schema cycle cannot be revisited from
+                // its own descendant evaluation, even under dynamic dispatch.
+                if engine.memo_guard_sources[frame.source] {
+                    if pairs.len() == (MAX_SCOPE_SLOTS - names - 2) / 2 {
+                        return None;
+                    }
+                    pairs.push((frame.source, frame.value));
+                }
+                current = frame.parent;
+            }
+            let (object, prove_acyclic) = analysis;
+            if !pairs.is_empty() && prove_acyclic(value) {
+                // An acyclic input cannot revisit ancestors through position
+                // changes. Only same-instance schema cycles retain guards.
+                let same = if object {
+                    &engine.memo_guard_same_sources
+                } else {
+                    &engine.memo_guard_scalar_sources
+                };
+                pairs.retain(|&(source, ancestor)| ancestor == value && same[source]);
+            }
+            // RefFrame::contains tests membership, independently of order.
+            pairs.sort_unstable();
+            pairs.dedup();
+            let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names + 1);
+            signature.push(Some(pairs.len()));
+            for (source, value) in pairs {
+                signature.extend([Some(source), Some(value)]);
+            }
+            let first_binding = signature.len();
+            signature.resize(first_binding + names + 1, None);
+            let mut current = context.scope;
+            while let Some(frame) = current {
+                for name in 0..names {
+                    if let Some(&target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
+                        signature[first_binding + name] = Some(target);
+                    }
+                }
+                if let Some(&root) = engine.resources.get(&frame.resource)
+                    && engine.metadata[root].recursive_anchor
+                {
+                    signature[first_binding + names] = Some(root);
+                }
+                current = frame.parent;
+            }
+            let id = self.scopes.borrow_mut().intern(signature)?;
+            let node = id.checked_mul(engine.nodes.len())?.checked_add(node)?;
+            return Some((node, value, depth));
         }
         if !engine.memo_contextual[node] {
             return Some((node, value, depth));
@@ -168,6 +307,174 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approximate_admission_bounds_density_and_resets_for_later_positions() {
+        let mut admission = Admission::default();
+        assert!(admission.bits.is_empty());
+        assert!(!admission.admit((1, 2, 3)));
+        assert!(admission.admit((1, 2, 3)));
+        for value in 0..MAX_ENTRIES * 3 {
+            admission.admit((4, value, 5));
+            assert!(admission.admissions <= MAX_ENTRIES);
+            assert!(
+                admission
+                    .bits
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>()
+                    <= MAX_ENTRIES * 2
+            );
+        }
+        assert_eq!(admission.bits.len(), 1024);
+        admission.admissions = MAX_ENTRIES;
+        assert!(!admission.admit((1, 2, 3)));
+        assert!(admission.admit((1, 2, 3)));
+        assert_eq!(admission.admissions, 1);
+    }
+
+    #[test]
+    fn guarded_keys_distinguish_active_sources_values_scope_order_and_depth() {
+        let memo = Memo::default();
+        let engine = Engine {
+            nodes: (0..3).map(|_| vec![Op::Boolean(true)]).collect(),
+            memoizable: vec![true; 3],
+            memo_contextual: vec![false; 3],
+            memo_guarded: vec![true; 3],
+            memo_guard_sources: vec![true; 3],
+            memo_guard_same_sources: vec![true; 3],
+            memo_guard_scalar_sources: vec![true; 3],
+            memo_guard_scalar_amplification: vec![true; 3],
+            metadata: vec![
+                scope::Metadata {
+                    recursive_anchor: true,
+                    ..scope::Metadata::default()
+                };
+                3
+            ],
+            resources: HashMap::from([(1, 0), (2, 1), (42, 2)]),
+            ..Engine::default()
+        };
+        let frame = |source, value| RefFrame {
+            source,
+            value,
+            parent: None,
+        };
+        let active = frame(1, 42);
+        let equivalent = frame(1, 42);
+        let other_source = frame(2, 42);
+        let other_value = frame(1, 43);
+        let context = |active| scope::Context {
+            active: Some(active),
+            scope: None,
+        };
+        let key = memo
+            .key_without_instance_proof(&engine, 0, 42, 8, context(&active))
+            .unwrap();
+        assert_eq!(
+            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&equivalent)),
+            Some(key)
+        );
+        assert_ne!(
+            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&other_source)),
+            Some(key)
+        );
+        assert_ne!(
+            memo.key_without_instance_proof(&engine, 0, 43, 8, context(&other_value)),
+            Some(key)
+        );
+        assert_ne!(
+            memo.key_without_instance_proof(&engine, 0, 42, 9, context(&active)),
+            Some(key)
+        );
+        let outer = scope::ScopeFrame {
+            resource: 1,
+            parent: None,
+            primary_binding: None,
+        };
+        let inner = scope::ScopeFrame {
+            resource: 2,
+            parent: Some(&outer),
+            primary_binding: None,
+        };
+        let swapped_outer = scope::ScopeFrame {
+            resource: 2,
+            parent: None,
+            primary_binding: None,
+        };
+        let swapped_inner = scope::ScopeFrame {
+            resource: 1,
+            parent: Some(&swapped_outer),
+            primary_binding: None,
+        };
+        assert_ne!(
+            memo.key_without_instance_proof(
+                &engine,
+                0,
+                7,
+                8,
+                scope::Context {
+                    scope: Some(&inner),
+                    ..context(&active)
+                }
+            ),
+            memo.key_without_instance_proof(
+                &engine,
+                0,
+                7,
+                8,
+                scope::Context {
+                    scope: Some(&swapped_inner),
+                    ..context(&active)
+                }
+            ),
+        );
+        // The pair count separates guard membership from effective scope
+        // bindings even when their numeric handles coincide.
+        let a = scope::ScopeFrame {
+            resource: 42,
+            parent: Some(&outer),
+            primary_binding: None,
+        };
+        assert_ne!(
+            Some(key),
+            memo.key_without_instance_proof(
+                &engine,
+                0,
+                7,
+                8,
+                scope::Context {
+                    active: None,
+                    scope: Some(&a)
+                }
+            )
+        );
+
+        let empty = scope::Context::default();
+        let other = context(&other_value);
+        assert_eq!(
+            memo.key_with_instance_proof(&engine, 0, 42, 8, other, (false, |_| true)),
+            memo.key_with_instance_proof(&engine, 0, 42, 8, empty, (false, |_| true)),
+        );
+        assert_ne!(
+            memo.key_with_instance_proof(&engine, 0, 42, 8, other, (false, |_| false)),
+            memo.key_with_instance_proof(&engine, 0, 42, 8, empty, (false, |_| false)),
+        );
+        let a = RefFrame {
+            source: 1,
+            value: 42,
+            parent: Some(&other_source),
+        };
+        let b = RefFrame {
+            source: 2,
+            value: 42,
+            parent: Some(&active),
+        };
+        assert_eq!(
+            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&a)),
+            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&b)),
+        );
+    }
+
+    #[test]
     fn keys_exact_outermost_bindings_and_reuses_equivalent_scopes() {
         let memo = Memo::default();
         let engine = Engine {
@@ -189,7 +496,7 @@ mod tests {
         let equivalent_inner = frame(2, Some(&equivalent_outer));
         let different = frame(2, None);
         let key = |frame| {
-            memo.key(
+            memo.key_without_instance_proof(
                 &engine,
                 0,
                 10,
@@ -235,22 +542,30 @@ mod tests {
             ..scope::Context::default()
         };
         let memo = Memo::default();
-        let a = memo.key(&engine, 1, 10, 2, context(&first)).unwrap();
-        let b = memo.key(&engine, 0, 10, 2, context(&second)).unwrap();
+        let a = memo
+            .key_without_instance_proof(&engine, 1, 10, 2, context(&first))
+            .unwrap();
+        let b = memo
+            .key_without_instance_proof(&engine, 0, 10, 2, context(&second))
+            .unwrap();
         assert_ne!(a, b);
         assert_eq!(
-            memo.key(&engine, 2, 10, 2, context(&first)),
+            memo.key_without_instance_proof(&engine, 2, 10, 2, context(&first)),
             Some((2, 10, 2))
         );
         assert_eq!(
-            memo.key(&engine, 2, 10, 2, context(&second)),
+            memo.key_without_instance_proof(&engine, 2, 10, 2, context(&second)),
             Some((2, 10, 2))
         );
         let exhausted = Memo::default();
         exhausted.scopes.borrow_mut().next_id = usize::MAX / 2;
-        assert!(exhausted.key(&engine, 0, 10, 2, context(&first)).is_none());
+        assert!(
+            exhausted
+                .key_without_instance_proof(&engine, 0, 10, 2, context(&first))
+                .is_none()
+        );
         assert_eq!(
-            exhausted.key(&engine, 2, 10, 2, context(&first)),
+            exhausted.key_without_instance_proof(&engine, 2, 10, 2, context(&first)),
             Some((2, 10, 2))
         );
     }
@@ -369,16 +684,27 @@ impl Engine {
         // Each dynamic name has one virtual dispatch vertex. Sharing it avoids
         // materializing reference-count × binding-count dependency edges.
         let count = self.nodes.len();
-        let mut eligible = vec![true; count + self.anchor_tables.len()];
+        let recursive_dispatch = count + self.anchor_tables.len();
+        let mut eligible = vec![true; recursive_dispatch + 1];
+        let mut unsupported = vec![false; eligible.len()];
         let mut edges = vec![vec![]; eligible.len()];
         let mut repeated_subtree = vec![false; eligible.len()];
         for (name, bindings) in self.anchor_tables.iter().enumerate() {
             edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
         }
+        edges[recursive_dispatch].extend(
+            self.resources
+                .values()
+                .copied()
+                .filter(|&root| self.metadata[root].recursive_anchor),
+        );
         for (index, ops) in self.nodes.iter().enumerate() {
             for op in ops {
                 match op {
-                    Op::Unsupported => eligible[index] = false,
+                    Op::Unsupported => {
+                        eligible[index] = false;
+                        unsupported[index] = true;
+                    }
                     Op::Ref(reference) => {
                         if let Some(target) = reference.static_target() {
                             incoming[target] += 1;
@@ -386,7 +712,11 @@ impl Engine {
                         } else if let Some((name, target)) = reference.dynamic_target() {
                             incoming[target] += 1;
                             edges[index].extend([target, count + name]);
-                        } else {
+                        } else if let Some(target) = reference.recursive_target() {
+                            incoming[target] += 1;
+                            edges[index].extend([target, recursive_dispatch]);
+                            // Compact scope-only keys do not encode recursive
+                            // dispatch or active guards. Use exact guard contexts.
                             eligible[index] = false;
                         }
                     }
@@ -505,5 +835,177 @@ impl Engine {
             })
             .collect();
         self.memo_contextual = states[..count].iter().map(|&state| state == 4).collect();
+        // Cyclic candidates can reuse results only under an exact guard/scope
+        // context. Propagate unsupported instructions and nested iteration
+        // through reverse edges without a per-candidate graph walk.
+        let mut parents = vec![vec![]; edges.len()];
+        for (parent, children) in edges.iter().enumerate() {
+            for &child in children {
+                parents[child].push(parent);
+            }
+        }
+        fn propagate(flags: &mut [bool], parents: &[Vec<usize>]) {
+            let mut queue: std::collections::VecDeque<_> = flags
+                .iter()
+                .enumerate()
+                .filter_map(|(node, &set)| set.then_some(node))
+                .collect();
+            while let Some(node) = queue.pop_front() {
+                for &parent in &parents[node] {
+                    if !flags[parent] {
+                        flags[parent] = true;
+                        queue.push_back(parent);
+                    }
+                }
+            }
+        }
+        propagate(&mut unsupported, &parents);
+        propagate(&mut repeated_subtree, &parents);
+        // Iterative Kosaraju analysis identifies the only active sources
+        // whose guards can affect descendants: sources lying on a schema cycle.
+        fn cycle_nodes(edges: &[Vec<usize>], parents: &[Vec<usize>]) -> Vec<bool> {
+            let mut seen = vec![false; edges.len()];
+            let mut order = vec![];
+            for root in 0..edges.len() {
+                if seen[root] {
+                    continue;
+                }
+                seen[root] = true;
+                let mut stack = vec![(root, 0)];
+                while let Some((node, next)) = stack.last_mut() {
+                    if let Some(&child) = edges[*node].get(*next) {
+                        *next += 1;
+                        if !seen[child] {
+                            seen[child] = true;
+                            stack.push((child, 0));
+                        }
+                    } else {
+                        order.push(*node);
+                        stack.pop();
+                    }
+                }
+            }
+            seen.fill(false);
+            let mut cyclic = vec![false; edges.len()];
+            for root in order.into_iter().rev() {
+                if seen[root] {
+                    continue;
+                }
+                let mut component = vec![];
+                let mut stack = vec![root];
+                seen[root] = true;
+                while let Some(node) = stack.pop() {
+                    component.push(node);
+                    for &parent in &parents[node] {
+                        if !seen[parent] {
+                            seen[parent] = true;
+                            stack.push(parent);
+                        }
+                    }
+                }
+                if component.len() > 1 || edges[root].contains(&root) {
+                    for node in component {
+                        cyclic[node] = true;
+                    }
+                }
+            }
+            cyclic
+        }
+        let cyclic = cycle_nodes(&edges, &parents);
+        let mut same_edges = vec![vec![]; edges.len()];
+        same_edges[count..].clone_from_slice(&edges[count..]);
+        let mut scalar_refs = vec![false; edges.len()];
+        for (node, ops) in self.nodes.iter().enumerate() {
+            for op in ops {
+                match op {
+                    Op::Ref(reference) => {
+                        scalar_refs[node] = true;
+                        if let Some(target) = reference.static_target() {
+                            same_edges[node].push(target);
+                        } else if let Some((name, target)) = reference.dynamic_target() {
+                            same_edges[node].extend([target, count + name]);
+                        } else if let Some(target) = reference.recursive_target() {
+                            same_edges[node].extend([target, recursive_dispatch]);
+                        }
+                    }
+                    Op::All(children) => same_edges[node].extend(children),
+                    Op::Any(children) | Op::One(children) => {
+                        same_edges[node].extend(children.iter().map(|&(child, _)| child))
+                    }
+                    Op::Not(child) => same_edges[node].push(*child),
+                    Op::Conditional(condition, yes, no) => {
+                        same_edges[node].push(*condition);
+                        same_edges[node].extend(yes);
+                        same_edges[node].extend(no);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn reverse(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+            let mut parents = vec![vec![]; edges.len()];
+            for (parent, children) in edges.iter().enumerate() {
+                for &child in children {
+                    parents[child].push(parent);
+                }
+            }
+            parents
+        }
+        let scalar_parents = reverse(&same_edges);
+        self.memo_guard_scalar_sources =
+            cycle_nodes(&same_edges, &scalar_parents)[..count].to_vec();
+        propagate(&mut scalar_refs, &scalar_parents);
+        let mut scalar_amplification = vec![false; edges.len()];
+        for (node, ops) in self.nodes.iter().enumerate() {
+            for op in ops {
+                let references = match op {
+                    Op::All(children) => {
+                        children.iter().filter(|&&child| scalar_refs[child]).count()
+                    }
+                    Op::Any(children) | Op::One(children) => children
+                        .iter()
+                        .filter(|&&(child, _)| scalar_refs[child])
+                        .count(),
+                    Op::Conditional(condition, yes, no) => std::iter::once(*condition)
+                        .chain(*yes)
+                        .chain(*no)
+                        .filter(|&child| scalar_refs[child])
+                        .count(),
+                    _ => 0,
+                };
+                scalar_amplification[node] |= references > 1;
+            }
+        }
+        propagate(&mut scalar_amplification, &scalar_parents);
+        self.memo_guard_scalar_amplification = scalar_amplification[..count].to_vec();
+        // Object dependencies keep the same value; all other container child
+        // edges change positions. Scalar/array inputs cannot take dependencies.
+        for (node, ops) in self.nodes.iter().enumerate() {
+            for op in ops {
+                if let Op::Object(_, rules) = op {
+                    same_edges[node]
+                        .extend(rules.dependent_schemas.iter().map(|&(_, child)| child));
+                }
+            }
+        }
+        self.memo_guard_same_sources =
+            cycle_nodes(&same_edges, &reverse(&same_edges))[..count].to_vec();
+        self.memo_guard_sources = cyclic[..count].to_vec();
+        self.memo_guarded = vec![false; count];
+        for node in 0..count {
+            if !self.memoizable[node] && !unsupported[node]
+                && (incoming[node] > 1 || repeated_position[node] && repeated_subtree[node])
+                // A linear recursive property chain has no amplification.
+                // Avoid signatures unless a cycle has repeated input positions
+                // or more than one recursive edge in addition to its entry.
+                && (!cyclic[node] || repeated_subtree[node] || incoming[node] > 2)
+                // Position loops already admit their child instruction. Do not
+                // duplicate caching at its singly referenced recursive target.
+                && (!cyclic[node] || repeated_position[node] || incoming[node] > 2 || scalar_amplification[node])
+            {
+                self.memoizable[node] = true;
+                self.memo_guarded[node] = true;
+            }
+        }
     }
 }

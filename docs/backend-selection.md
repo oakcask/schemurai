@@ -191,8 +191,9 @@ For genuinely scope-dependent references, the compiler includes all possible
 binding targets in its cycle analysis. One virtual dispatch vertex per anchor
 name avoids duplicating every binding edge for every reference; analysis takes
 O(N + E + A + K) work and storage for N nodes, E instruction edges, A bindings
-and K anchor names. Cyclic reachable subgraphs and recursive references remain
-uncached, preserving the active-reference guard's path-dependent behavior.
+and K anchor names. Recursive dispatch adds one shared vertex and edges to
+recursive resource roots. Cyclic and recursive candidates use the guard-context
+keys described below, preserving the active-reference guard's behavior.
 Scope-independent nodes skip scope-key construction. A single dynamic name
 uses the existing effective binding in its scope frame in O(1); multiple names
 construct an exact binding vector in O(KS) work for S active scope frames.
@@ -202,6 +203,29 @@ lookup table and eviction queue. IDs are never reassigned after eviction,
 including while a child evaluation can still record a parent result. Signatures
 exceeding the slot budget leave scoped results uncached without dropping useful
 stored scopes. This additional storage is bounded separately from annotations.
+Cyclic reference graphs previously disabled reuse, so shared input containers
+could expand O(D) stored nodes into O(2^D) evaluations. Selected cyclic and
+recursive candidates now include the exact active `(source, VALUE)` membership
+set, effective dynamic bindings and effective recursive root in their keys.
+Membership is sorted and deduplicated because guard order does not affect
+reference short-circuiting. Iterative strongly connected component analysis
+excludes sources outside schema cycles. A bounded, invocation-local input
+acyclicity proof removes distinct ancestor instances and schema cycles that
+require changing input position; object dependencies retain same-instance edges.
+The proof visits at most 4,096 new containers with the evaluation depth limit,
+retains at most 4,096 positive results, and keeps full guards when inconclusive.
+A lazily allocated 8 KiB repeat detector avoids constructing heavy keys on most
+first visits. Approximate admission can only add cache attempts: stored verdicts
+and annotations still use exact keys. The detector resets after 4,096 admissions.
+Guard signatures share the existing 4,096-entry / 65,536-slot scope budget.
+Construction costs O(G log G + KS + S) for G relevant active guards, K dynamic
+names and S scope frames, plus bounded input analysis. Compilation uses a
+constant number of O(N + E + A + K + R) graph analyses, including R recursive
+resources, and retains five additional node bit vectors. Linear recursion
+without repeated positions or branching keeps direct evaluation. These choices
+reduce shared recursive workloads substantially but add some overhead to
+ordinary recursive trees; `benchmark/native_cyclic_memo.rb` measures both.
+
 These limits bound extra retained memory rather than guaranteeing
 linear evaluation for arbitrary schemas. Failed diagnostics still visit each
 path: if the contract requires 2^D distinct errors, producing them takes at

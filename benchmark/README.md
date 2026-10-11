@@ -39,11 +39,48 @@ Local medians on Ruby 4.0.6/YJIT, x86_64-linux, compared with `2439118`:
 Verdicts retain up to 4,096 results; tracked validity and diagnostic successes
 share up to 8,192 results and a 65,536-slot annotation budget. FIFO admission
 replaces old results when a limit is reached. Scope-dependent results additionally
-key their effective dynamic bindings; cyclic graphs and recursive references
-remain uncached. Failing diagnostics retain
+key their effective dynamic bindings; selected cyclic and recursive candidates
+include exact guard contexts as described below. Failing diagnostics retain
 distinct schema-path errors and can require exponential output size. These
 measurements establish improvement for the successful static-reference workload,
 not a complexity bound for arbitrary schemas or an all-suite speedup.
+
+### Shared cyclic and recursive references
+
+`native_cyclic_memo.rb` constructs O(D) shared array/object containers under
+cyclic static, dynamic and recursive schemas, plus a doubled definition chain
+ending in a self-reference. Cycles previously excluded every reachable target
+from memoization, producing O(2^D) successful evaluation work. Exact guard
+membership and effective bindings now permit reuse. A bounded proof of input
+acyclicity removes irrelevant ancestor guards; inconclusive proofs preserve the
+full guard context. Tests compare shallow failures and cyclic Ruby containers
+with the VM, and check deep successful evaluations through the raw native API.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_cyclic_memo.rb
+```
+
+Local medians on Ruby 4.0.6 without YJIT, x86_64-linux, compared with `c1c9fe2`
+(the affected paths were unchanged through `bc7407e`), excluding compilation:
+
+| Workload / size | Before validity (µs) | After validity (µs) | Before diagnostics (µs) | After diagnostics (µs) |
+| --- | ---: | ---: | ---: | ---: |
+| Shared array / 8 | 21.634 | 4.430 | 22.463 | 4.893 |
+| Shared array / 12 | 397.423 | 7.662 | 390.458 | 8.321 |
+| Shared array / 16 | 6,632.687 | 11.213 | 6,732.360 | 12.524 |
+| Shared array / 20 | 112,919.428 | 15.359 | 112,085.795 | 16.483 |
+| Shared object / 20 | 209,187.498 | 19.370 | 209,740.377 | 19.361 |
+| Dynamic array / 20 | 110,802.723 | 16.750 | 108,920.193 | 17.583 |
+| Recursive array / 20 | 131,607.929 | 16.553 | 132,096.786 | 17.636 |
+| Definition chain / 20 | 104,435.704 | 8.671 | 290,733.770 | 17.497 |
+| Distinct recursive trees / 1,000 | 164.877 | 177.863 | 163.124 | 178.904 |
+| Linear recursive object / 32 | 2.859 | 2.574 | 3.205 | 2.828 |
+
+The distinct-tree control incurs approximately 8–10% overhead. A repeat detector
+limits heavy context construction to revisited positions, with safe false
+positives. Cache and proof budgets bound retained memory; eviction, genuinely
+different guard contexts and failed diagnostic output still prevent a universal
+polynomial-time guarantee.
 
 ### Invocation cache turnover
 

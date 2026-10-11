@@ -16,7 +16,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn excludes_cycles_reached_only_through_dynamic_overrides() {
+    fn requires_guard_histories_for_cycles_reached_through_dynamic_overrides() {
         let reference = |target, kind| Op::Ref(Reference { target, kind });
         let mut engine = Engine {
             nodes: vec![
@@ -24,10 +24,20 @@ mod tests {
                 vec![reference(0, ReferenceKind::Dynamic(0))],
                 vec![reference(1, ReferenceKind::Static)],
                 vec![reference(1, ReferenceKind::Static)],
+                vec![reference(1, ReferenceKind::Static)],
             ],
             anchor_tables: vec![vec![(100, 0), (101, 1)]],
             ..Engine::default()
         };
+        engine.compile_memoization();
+        assert!(engine.memoizable[1]);
+        assert!(engine.memo_guarded[1]);
+        engine.nodes.pop();
+        engine.compile_memoization();
+        assert!(!engine.memoizable[1]);
+        assert!(engine.memo_guard_sources[1]);
+        engine.nodes.push(vec![reference(1, ReferenceKind::Static)]);
+        engine.nodes[0] = vec![Op::Unsupported];
         engine.compile_memoization();
         assert!(!engine.memoizable[1]);
     }
@@ -106,6 +116,9 @@ impl Reference {
             ReferenceKind::Dynamic(name) => Some((name, self.target)),
             _ => None,
         }
+    }
+    pub(super) fn recursive_target(self) -> Option<usize> {
+        matches!(self.kind, ReferenceKind::Recursive).then_some(self.target)
     }
     pub(super) fn static_target(self) -> Option<usize> {
         matches!(self.kind, ReferenceKind::Static).then_some(self.target)
