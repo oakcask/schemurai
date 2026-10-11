@@ -877,16 +877,17 @@ impl Engine {
                             ops.push(Op::Unsupported);
                             continue;
                         }
-                        let property_targets = properties
-                            .iter()
-                            .enumerate()
-                            .map(|(index, &(name, child))| {
-                                (
-                                    tracking::JsonKey::new(name),
-                                    PropertyTarget { name, child, index },
-                                )
-                            })
-                            .collect();
+                        let property_targets: HashMap<_, _, BuildHasherDefault<BucketHasher>> =
+                            properties
+                                .iter()
+                                .enumerate()
+                                .map(|(index, &(name, child))| {
+                                    (
+                                        tracking::JsonKey::new(name),
+                                        PropertyTarget { name, child, index },
+                                    )
+                                })
+                                .collect();
                         let property_locations: Vec<_> = properties
                             .iter()
                             .map(|&(key, _)| tracking::JsonKey::new(key))
@@ -899,12 +900,26 @@ impl Engine {
                                 *self.property_ids.entry(key).or_insert(next)
                             })
                             .collect();
-                        let required_properties: Vec<bool> = properties
+                        // Keep tiny schemas allocation-cheap; larger joins use
+                        // content-keyed sets and the already compiled property index.
+                        let indexed_required = properties.len().saturating_mul(required.len()) > 64;
+                        let required_keys: Option<tracking::KeySet> = indexed_required.then(|| {
+                            required
+                                .iter()
+                                .map(|&name| tracking::JsonKey::new(name))
+                                .collect()
+                        });
+                        let required_properties: Vec<bool> = property_locations
                             .iter()
-                            .map(|&(key, _)| {
-                                required
-                                    .iter()
-                                    .any(|&name| unsafe { sn_string_equal(key, name) } != 0)
+                            .map(|key| {
+                                required_keys.as_ref().map_or_else(
+                                    || {
+                                        required.iter().any(
+                                            |&name| unsafe { sn_string_equal(key.0, name) } != 0,
+                                        )
+                                    },
+                                    |names| names.contains(key),
+                                )
                             })
                             .collect();
                         let required_property_indices = required_properties
@@ -915,9 +930,13 @@ impl Engine {
                         let required = required
                             .into_iter()
                             .filter(|&name| {
-                                !properties
-                                    .iter()
-                                    .any(|&(key, _)| unsafe { sn_string_equal(key, name) } != 0)
+                                if indexed_required {
+                                    !property_targets.contains_key(&tracking::JsonKey::new(name))
+                                } else {
+                                    !properties
+                                        .iter()
+                                        .any(|&(key, _)| unsafe { sn_string_equal(key, name) } != 0)
+                                }
                             })
                             .collect();
                         let dependent = self.field(operand, b"dependent_required\0")?;
