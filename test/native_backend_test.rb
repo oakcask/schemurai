@@ -149,6 +149,32 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "discovers new anchor names and resources while compiling dynamic overrides" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    resources = {
+      "urn:body" => dialect.merge("$id" => "urn:body", "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "integer"}}, "$dynamicRef" => "#x"),
+      "urn:late" => dialect.merge("$id" => "urn:late", "$defs" => {"y" => {"$dynamicAnchor" => "y", "type" => "integer", "minimum" => 3}})
+    }
+    targets = {"x" => {"$dynamicAnchor" => "x", "$dynamicRef" => "urn:late#y"}}
+    cases = [targets, targets.merge("y" => {"$dynamicAnchor" => "y", "type" => "integer", "minimum" => 5})].map do |definitions|
+      schema = dialect.merge("$id" => "urn:outer", "$defs" => definitions, "$ref" => "urn:body")
+      vm = Schemurai.compile(schema, schemas: resources, backend: :vm)
+      [Schemurai.compile(schema, schemas: resources, backend: :native),
+        [2, 4, 5, "bad"].map { |value| [value, vm.valid?(value), vm.validate(value).errors] }]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, values|
+      runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      values.each do |value, valid, errors|
+        expect(runner.valid?(value)).to eq(valid)
+        expect(runner.diagnostics(value)).not_to be_nil
+        expect(native.validate(value).errors).to eq(errors)
+      end
+    end
+  end
+
   it "keeps shared reference annotations usable after invocation cache turnover" do # rubocop:disable RSpec/ExampleLength
     definitions = {"d0" => {"properties" => {"x" => {"type" => "integer"}}}}
     1.upto(8) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }

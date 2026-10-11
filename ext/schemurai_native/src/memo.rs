@@ -117,8 +117,7 @@ impl Memo {
             let mut current = context.scope;
             while let Some(frame) = current {
                 for (name, binding) in bindings.iter_mut().enumerate() {
-                    if let Some(Some(target)) = engine.dynamic_bindings.get(&(frame.resource, name))
-                    {
+                    if let Some(target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
                         *binding = Some(*target);
                     }
                 }
@@ -176,12 +175,7 @@ mod tests {
             memoizable: vec![true],
             memo_contextual: vec![true],
             anchor_tables: vec![vec![], vec![]],
-            dynamic_bindings: HashMap::from([
-                ((1, 0), Some(7)),
-                ((2, 0), Some(8)),
-                ((2, 1), Some(9)),
-                ((3, 0), Some(7)),
-            ]),
+            dynamic_bindings: HashMap::from([((1, 0), 7), ((2, 0), 8), ((2, 1), 9), ((3, 0), 7)]),
             ..Engine::default()
         };
         let frame = |resource, parent| scope::ScopeFrame {
@@ -223,7 +217,7 @@ mod tests {
             memoizable: vec![true; 3],
             memo_contextual: vec![true, true, false],
             anchor_tables: vec![vec![], vec![]],
-            dynamic_bindings: HashMap::from([((1, 0), Some(0)), ((2, 0), Some(1))]),
+            dynamic_bindings: HashMap::from([((1, 0), 0), ((2, 0), 1)]),
             ..Engine::default()
         };
         let first = scope::ScopeFrame {

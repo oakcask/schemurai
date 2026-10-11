@@ -550,7 +550,7 @@ pub struct Engine {
     memo_contextual: Vec<bool>,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
-    dynamic_bindings: HashMap<(Value, usize), Option<usize>>,
+    dynamic_bindings: HashMap<(Value, usize), usize>,
     anchor_names: Vec<tracking::JsonKey>,
     anchor_tables: Vec<Vec<(Value, usize)>>,
     property_ids: HashMap<tracking::JsonKey, usize, BuildHasherDefault<BucketHasher>>,

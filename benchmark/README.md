@@ -149,6 +149,48 @@ ordered failure paths and GC compaction without VM fallback. Rust tests check
 outermost-binding equivalence, interner entry/slot turnover and ID uniqueness,
 oversized-signature rejection, and cycles introduced only by override targets.
 
+### Dynamic binding compilation
+
+`native_scope_compile.rb` times native construction from cached VM programs.
+The single-name case varies resources sharing a dynamic body; the sparse case
+gives each resource one distinct anchor name. Both verify direct native coverage
+and exact ordered VM failures. GC runs before each of seven construction
+samples, outside timing. Local medians on Ruby 4.0.6/x86_64-linux without YJIT,
+compared with `c1c9fe2`:
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_scope_compile.rb
+MODE=sparse WIDTH=512 ruby -Ilib -Iext/schemurai_native benchmark/native_scope_compile.rb
+```
+
+| Mode / resources | Before construction (ms) | After construction (ms) | Before reported program bytes | After reported program bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Single / 128 | 0.445 | 0.501 | 177,707 | 177,707 |
+| Single / 2,048 | 12.144 | 10.354 | 2,825,387 | 2,825,387 |
+| Single / 8,192 | 90.115 | 51.092 | 11,297,963 | 11,297,963 |
+| Sparse / 32 | 0.320 | 0.272 | 61,257 | 44,873 |
+| Sparse / 128 | 3.391 | 2.258 | 373,865 | 177,257 |
+| Sparse / 512 | 73.179 | 30.759 | 4,638,953 | 706,793 |
+
+Single-name metadata previously scanned the complete binding table for every
+compiled node, taking O(NA) work for N nodes and A bindings. It now uses the
+existing index in O(N) expected work. A resolved-name prefix per resource replaces
+the Cartesian pending-pair buffer and absent-binding map entries. Only positive
+bindings and their programs are stored; missing lookups no longer append `nil`
+GC roots. Binding-related discovery storage is O(R + K + A) for R resources,
+K names and A actual bindings, instead of O(RK) negative entries and roots.
+The Ruby lookup interface still probes all resource/name pairs, so lookup work
+remains O(RK), plus compilation and scans for later discovery passes.
+
+The prefix map adds O(R) temporary counters, which can add cost to small
+single-name cases, as the 128-resource control shows. Reported bytes come from
+approximate `ObjectSpace.memsize_of` and omit some native index buffers. Separate
+`MODE=sparse WIDTH=512` runs measured process peak RSS of 131,156 KiB before and
+27,016 KiB after with `/usr/bin/time -f %M`; these include Ruby, schema/VM data,
+retained programs and constructor scratch, rather than isolating native buffers.
+Regression coverage includes new names and resources discovered while compiling
+overrides, missing-binding fallback, ordered diagnostics and GC compaction.
+
 ## Wide integer fingerprints
 
 `native_wide_fingerprints.rb` exercises 4,097-bit integers whose low 1,024 bits

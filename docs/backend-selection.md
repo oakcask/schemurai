@@ -203,6 +203,19 @@ shared-reference chain ending in an invariant dynamic reference.
 `benchmark/native_contextual_memo.rb` covers changing single and multiple
 bindings, including annotation collection, with exact VM parity.
 
+Dynamic binding discovery stores only actual `(resource, name) -> target`
+results. A temporary resolved-name prefix per resource records negative
+lookups; pending work snapshots resource rows rather than individual pairs.
+New resources and names introduced while compiling an override are visited in
+later passes. Absent bindings do not append redundant `nil` GC roots. Auxiliary
+binding discovery storage is O(R + K + A) for R resources, K names and A actual
+bindings, instead of retaining O(RK) missing pairs and roots. The existing Ruby
+lookup interface still probes each resource/name pair once, taking O(RK)
+lookup work plus compilation and discovery-pass scans. Single-name scope
+metadata uses the compiled index in O(N) expected work for N nodes, replacing
+an O(NA) scan. See `benchmark/native_scope_compile.rb` for construction timing
+from cached VM programs and sparse binding workloads.
+
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
 exceptions and exact match counts. `contains` scans also retain complete
 counting and unsupported-value detection. Shared scans make these termination
