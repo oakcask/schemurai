@@ -191,6 +191,45 @@ retained programs and constructor scratch, rather than isolating native buffers.
 Regression coverage includes new names and resources discovered while compiling
 overrides, missing-binding fallback, ordered diagnostics and GC compaction.
 
+### Indexed dynamic binding discovery
+
+The earlier sparse-storage change still performed O(RK) resource/name queries.
+Multi-name discovery now snapshots actual declaration names and maintains a
+reverse index from names to reached resources. New registered names join that
+index; newly added declarations join already registered names. Counts/prefixes
+also cover external documents adding anchors to an existing resource. The
+single-name path keeps direct queries to avoid enumerating unused declarations.
+Dynamic name registration uses an exact hash index instead of O(K) scans.
+
+The same cached-VM constructor protocol now includes 1,024 and 2,048 sparse
+resources. Release builds, Ruby 4.0.6, Rust 1.99.0, seven samples, YJIT disabled:
+
+| Sparse resources/names | Before indexed discovery (ms) | After (ms) |
+| --- | ---: | ---: |
+| 512 | 44.691 | 1.976 |
+| 1,024 | 174.284 | 4.269 |
+| 2,048 | 664.779 | 9.444 |
+
+Expected join work is O(RP + B + K + A + T), excluding name bytes and child
+compilation: P passes scan R reached resource counts, B actual declarations are
+indexed once, K names join A bindings, and T counts names copied into Ruby
+snapshot arrays. Stable tables are copied once; repeated growth can recopy older
+keys. Temporary storage is O(R + B + K + A), including unused declarations B.
+Name handles have temporary GC roots across allocating compilation callbacks.
+These roots and the compiler-only name-ID table are released at the fixed point;
+runtime binding tables remain O(K + A). Multi-name resources with many unused
+anchors can pay more enumeration work. This is a sparse join improvement, not a
+claim that complete compilation is universally linear.
+
+Single-name controls retained direct queries: 8,192 resources measured 48.696 ms
+in the after run (previous sparse-storage measurement 51.092 ms). Approximate
+reported program sizes stayed close, with additional struct headers; temporary
+index allocations are absent from the completed program. Regressions force GC
+compaction in compiler callbacks and check late new resources/names and late
+anchors appended to existing resources, including an already registered name.
+The old implementation missed the latter override and omitted its `minimum`
+error; validity and full ordered errors now match the resolved VM graph.
+
 ## Repeated instance positions
 
 `native_repeated_positions.rb` has one `$ref` inside each `items` or

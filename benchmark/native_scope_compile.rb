@@ -9,7 +9,7 @@ Schemurai.compile(true, backend: :native)
 program_class = Schemurai.const_get(:Native)::Program
 $stdout.sync = true
 puts RUBY_DESCRIPTION
-{"single" => [128, 512, 2048, 8192], "sparse" => [32, 128, 512]}.each do |mode, widths|
+{"single" => [128, 512, 2048, 8192], "sparse" => [32, 128, 512, 1024, 2048]}.each do |mode, widths|
   next if ENV["MODE"] && ENV.fetch("MODE") != mode
 
   widths.each do |width|

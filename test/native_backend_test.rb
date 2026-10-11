@@ -149,6 +149,37 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "indexes new names appended to an existing resource during binding callbacks" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    resources = {
+      "urn:body" => dialect.merge("$id" => "urn:body", "$defs" => {
+        "x" => {"$dynamicAnchor" => "x", "type" => "integer"}, "z" => {"$dynamicAnchor" => "z", "type" => "integer"}
+      }, "allOf" => [{"$dynamicRef" => "#z"}, {"$dynamicRef" => "#x"}]),
+      "urn:fallback" => dialect.merge("$id" => "urn:fallback", "$defs" => {"y" => {"$dynamicAnchor" => "y", "minimum" => 1}}),
+      "urn:late" => dialect.merge("$id" => "urn:outer", "$defs" => {
+        "y" => {"$dynamicAnchor" => "y", "minimum" => 5}, "z" => {"$dynamicAnchor" => "z", "minimum" => 7}
+      })
+    }
+    schema = dialect.merge("$id" => "urn:outer", "$defs" => {
+      "x" => {"$dynamicAnchor" => "x", "allOf" => [{"$ref" => "urn:late"}, {"$dynamicRef" => "urn:fallback#y"}]}
+    }, "$ref" => "urn:body")
+    vm = Schemurai.compile(schema, schemas: resources, backend: :vm)
+    expect(vm.valid?(8)).to be(true) # Resolve late resources before comparing stable graph behavior.
+    expected = [0, 4, 5, 8, "bad"].map { |value| [value, vm.valid?(value), vm.validate(value).errors] }
+    compiler_class = Schemurai.const_get(:VM)::Compiler
+    allow_any_instance_of(compiler_class).to receive(:compile).and_wrap_original do |original, *args| # rubocop:disable RSpec/AnyInstance
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      original.call(*args)
+    end
+    native = Schemurai.compile(schema, schemas: resources, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expected.each do |value, valid, errors|
+      expect(program.valid?(value)).to eq(valid)
+      expect(program.diagnostics(value)).not_to be_nil
+      expect(native.validate(value).errors).to eq(errors)
+    end
+  end
+
   it "discovers new anchor names and resources while compiling dynamic overrides" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     resources = {
