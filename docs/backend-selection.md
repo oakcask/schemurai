@@ -162,7 +162,18 @@ owned, so merging one branch cannot change another branch's cached annotations.
 Two references to every preceding definition previously expanded a depth-D
 definition chain into O(2^D) evaluations, including successful annotated objects
 and arrays. Memoization reduces this equal-depth chain to O(D) evaluations,
-plus coverage copying and merging. Verdicts retain at most 4,096 entries;
+plus coverage copying and merging. Repeated array/object position scans also
+admit acyclic children whose reachable graph contains another position scan,
+even when a schema has only one reference to that child. This covers shared
+input graphs reached by `items`, `additionalItems`, `contains`, unevaluated
+items/properties, pattern/additional properties and property names. Position-only
+candidates without nested iteration keep their direct scans, avoiding cache
+admissions for ordinary scalar/record arrays. The existing cycle, unsupported
+and dynamic-binding checks still apply. Two temporary bit vectors track loop
+roots and reachable iteration during the same O(N + E + A + K) graph analysis.
+`benchmark/native_repeated_positions.rb` measures single-reference chains over
+shared input containers and distinct record controls.
+Verdicts retain at most 4,096 entries;
 tracked validity and diagnostic successes share up to 8,192 entries and a
 65,536-slot allocation budget. FIFO eviction releases old results when either
 limit is reached, so later instance locations can still reuse shared targets.

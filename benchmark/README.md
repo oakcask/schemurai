@@ -191,6 +191,42 @@ retained programs and constructor scratch, rather than isolating native buffers.
 Regression coverage includes new names and resources discovered while compiling
 overrides, missing-binding fallback, ordered diagnostics and GC compaction.
 
+## Repeated instance positions
+
+`native_repeated_positions.rb` has one `$ref` inside each `items` or
+`additionalProperties` rule. Its depth-D schema and shared Ruby instance each
+have O(D) nodes, but evaluation previously took O(2^D) work: memo eligibility
+counted schema reference edges and missed repeated calls from one position loop.
+It now admits acyclic loop children whose reachable graph contains another
+position loop. The existing scope-aware keys, cycle exclusions, success-only
+diagnostic results and FIFO entry/annotation budgets apply unchanged. Graph
+analysis adds two temporary bit vectors and propagates iteration reachability
+in the existing DFS, retaining O(N + E + A + K) analysis work/storage.
+Position-only scalar/simple-record children skip caching so ordinary arrays
+avoid extra admissions. Candidates with nested loops but distinct instance
+values can still pay lookup, admission and annotation-copy work without reuse.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_repeated_positions.rb
+```
+
+Release build, Ruby 4.0.6, Rust 1.99.0, YJIT disabled. Seven batches of five
+native calls per case, compilation excluded, median microseconds:
+
+| Input | Before validity | After validity | Before diagnostics | After diagnostics |
+| --- | ---: | ---: | ---: | ---: |
+| Shared array depth 20 | 73,264.546 | 3.016 | 73,143.010 | 3.228 |
+| Shared object depth 20 | 91,735.036 | 3.749 | 91,394.098 | 4.036 |
+| 1,000 distinct records | 17.100 | 16.475 | 27.222 | 26.252 |
+| 1,000 distinct records, tracked | 26.937 | 26.600 | 27.951 | 27.646 |
+
+The binary chain's working set fits the caches, giving O(D) traversal, plus
+annotation copying when needed. Cache bounds do not guarantee polynomial work
+for every input graph. Failing diagnostics retain each required instance/schema
+path and can require exponential output. Regression coverage exercises depth-24
+shared arrays/objects through items, contains, unevaluated items/properties and
+pattern/additional properties, plus full shallow failing VM error parity.
+
 ## Shared container equality and fingerprints
 
 `native_shared_containers.rb` keeps shared Ruby input graphs intact and reuses a
