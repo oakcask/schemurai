@@ -185,9 +185,12 @@ validator = registry.validator_for("https://example.test/value")
 `ResolutionError` if a reference cannot be resolved. After it returns,
 `validator_for` is read-only and may be called concurrently, while `compile` is
 no longer available. A `Validator` contains per-validation mutable state and
-must not be shared between threads or Ractors. With the VM backend, the registry
-compiles and shares its bytecode before this transition, so those validators do
-not compile separate instruction streams in each Ractor.
+must not be shared between threads or Ractors. With the VM and native backends,
+the registry compiles and shares its bytecode before this transition. The native
+backend also prepares shared native instruction tables for all four combinations
+of `content` and `format`; `validator_for` does not recompile them in each Ractor.
+Native regex search caches and VM fallback evaluation state belong to each
+validator. Preparing these tables adds time and memory to `make_shareable`.
 
 ### Meta-schema validation
 

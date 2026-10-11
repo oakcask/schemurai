@@ -9,8 +9,9 @@ module Schemurai
     class Evaluator
       def backend = :native
 
-      def initialize(graph, compiler, root, content: false, format: false)
-        @program = Program.new(root, compiler, format, content)
+      def initialize(graph, compiler, root, content: false, format: false, compiled: nil)
+        @compiled = compiled || Program.new(root, compiler, format, content)
+        @program = @compiled.runner(root)
         @vm = VM::Evaluator.new(graph, compiler, root, content: content, format: format)
       end
 

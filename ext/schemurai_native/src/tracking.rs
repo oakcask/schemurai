@@ -132,7 +132,7 @@ fn merge_bits(target: &mut Vec<u64>, source: Vec<u64>) {
         }
     }
 }
-impl Engine {
+impl Execution<'_> {
     pub(super) fn eval_tracked(
         &self,
         node: usize,
@@ -448,7 +448,7 @@ impl Engine {
     }
 }
 struct TrackingContext<'a> {
-    engine: &'a Engine,
+    engine: &'a Execution<'a>,
     rules: &'a Object,
     depth: usize,
     active: scope::Context<'a>,
@@ -478,21 +478,22 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
                     return result as i32;
                 }
             }
-            let result =
-                c.rules
-                    .visit_value_rules::<false>(key, Some(key_location), |_, _, child| {
-                        match c.engine.eval(child, value, c.depth, c.active) {
-                            Valid => {
-                                if let Some(index) = known {
-                                    c.evaluation.known_property(index);
-                                } else {
-                                    c.evaluation.properties.insert(key_location);
-                                }
-                                Ok(())
-                            }
-                            status => Err(status),
+            let result = c.rules.visit_value_rules::<false>(
+                c.engine.caches,
+                key,
+                Some(key_location),
+                |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
+                    Valid => {
+                        if let Some(index) = known {
+                            c.evaluation.known_property(index);
+                        } else {
+                            c.evaluation.properties.insert(key_location);
                         }
-                    });
+                        Ok(())
+                    }
+                    status => Err(status),
+                },
+            );
             return match result {
                 Ok(_) => Valid as i32,
                 Err(status) => status as i32,
