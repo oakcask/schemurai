@@ -1431,6 +1431,9 @@ impl Execution<'_> {
             }
         }
         if let Some(child) = r.contains {
+            if let Some(status) = self.fixnum_contains(r, child, value, len, depth) {
+                return status;
+            }
             let matches = match evaluation::scan_contains(
                 len,
                 |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
@@ -1444,6 +1447,47 @@ impl Execution<'_> {
             }
         }
         Valid
+    }
+    fn fixnum_contains(
+        &self,
+        rules: &Array,
+        child: usize,
+        value: Value,
+        len: usize,
+        depth: usize,
+    ) -> Option<Verdict> {
+        if depth > MAX_EVALUATION_DEPTH || self.tracks[child] {
+            return None;
+        }
+        let [op] = self.nodes[child].as_slice() else {
+            return None;
+        };
+        let total = match op {
+            Op::Type(_) | Op::Boolean(_) => true,
+            Op::Const(expected) => expected & self.fixnum_flag != 0,
+            Op::Number(_, rules) => rules.fast_limits.is_some(),
+            _ => false,
+        };
+        if !total {
+            return None;
+        }
+        let values = if len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
+        };
+        // Preserve later Unsupported/fallback results: no predicate work may
+        // be skipped until all values are proven to be supported Fixnums.
+        // This guard stays linear, but is far cheaper than full node evaluation.
+        if !values.iter().all(|&item| item & self.fixnum_flag != 0) {
+            return None;
+        }
+        Some(evaluation::contains_validity(
+            len,
+            rules.min_contains,
+            rules.max_contains,
+            |index| self.leaf(op, TYPE_INTEGRAL_NUMBER, values[index], depth) == Valid,
+        ))
     }
     #[inline(never)]
     fn integer_items(

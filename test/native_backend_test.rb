@@ -108,6 +108,23 @@ RSpec.describe "native VALUE execution" do
         {"p63" => 63}, {"p63" => 62}, {"extra" => 1}])
   end
 
+  it "terminates supported contains validity while preserving counts, annotations and later fallback" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    predicates = [true, false, {"const" => 1}, {"type" => "integer"}, {"minimum" => 1, "maximum" => 2}]
+    schemas = predicates.flat_map do |predicate|
+      [{"contains" => predicate}, {"contains" => predicate, "minContains" => 0},
+        {"contains" => predicate, "minContains" => 2, "maxContains" => 3},
+        {"contains" => predicate, "minContains" => 0, "maxContains" => 0},
+        {"contains" => predicate, "minContains" => 2, "maxContains" => 1},
+        {"contains" => predicate, "unevaluatedItems" => false}].map { |schema| dialect.merge(schema) }
+    end
+    native = Schemurai.compile(dialect.merge("contains" => {"const" => 1}), backend: :native)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(runner.valid?([1, Object.new])).to be_nil
+    expect(runner.diagnostics([1, Object.new])).to be_nil
+    expect_native_policy_results(schemas, [[], [0], [1], [1, 0, 2], [1, 1, 1, 1], [1, 1.0], [1, 2**200]])
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}

@@ -50,3 +50,6 @@ end
   schema = {"patternProperties" => Array.new(patterns) { |i| ["^f#{i}_", {"type" => "integer"}] }.to_h}
   measure("patterns=#{patterns} width=1024", schema, Array.new(1024) { |i| ["f0_#{i}", i] }.to_h, calls: 10)
 end
+[1024, 8192, 65536].each do |width|
+  measure("contains first-match width=#{width}", {"contains" => {"const" => 1}}, [1] + Array.new(width - 1, 0), calls: 10)
+end
