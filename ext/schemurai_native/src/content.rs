@@ -217,7 +217,14 @@ impl Input for &[u8] {
     fn string_run(&mut self, at: usize) -> usize {
         let mut consumed = 0;
         let remaining = &self[at..];
-        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        #[cfg(any(
+            all(target_arch = "x86_64", target_feature = "sse2"),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little"
+            )
+        ))]
         if remaining.len() >= 24 {
             // Most object keys end within the first word. Preserve that
             // inexpensive path before preparing the vector scanner.
@@ -226,6 +233,35 @@ impl Input for &[u8] {
                 return special.trailing_zeros() as usize / 8;
             }
             consumed = 8;
+            #[cfg(all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_endian = "little"
+            ))]
+            for bytes in remaining[consumed..].as_chunks::<16>().0 {
+                use core::arch::aarch64::{
+                    vceqq_u8, vcltq_u8, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8,
+                    vreinterpret_u64_u8, vreinterpretq_u16_u8, vshrn_n_u16,
+                };
+                // NEON is enabled for this target. Each unaligned load stays
+                // within a complete chunk. Comparisons produce 0xff per special
+                // byte; narrowing packs each pair into two four-bit flags.
+                // Little-endian lane order puts the first byte in the low bits.
+                let special = unsafe {
+                    let word = vld1q_u8(bytes.as_ptr());
+                    let control = vcltq_u8(word, vdupq_n_u8(32));
+                    let quote = vceqq_u8(word, vdupq_n_u8(b'"'));
+                    let escape = vceqq_u8(word, vdupq_n_u8(b'\\'));
+                    let flags = vorrq_u8(control, vorrq_u8(quote, escape));
+                    let packed = vshrn_n_u16::<4>(vreinterpretq_u16_u8(flags));
+                    vget_lane_u64::<0>(vreinterpret_u64_u8(packed))
+                };
+                if special != 0 {
+                    return consumed + special.trailing_zeros() as usize / 4;
+                }
+                consumed += 16;
+            }
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             if remaining.len() >= 40 && std::is_x86_feature_detected!("avx2") {
                 // Runtime detection includes OS support for the vector state.
                 let (length, stopped) = unsafe { string_run_avx2(&remaining[8..]) };
@@ -234,6 +270,7 @@ impl Input for &[u8] {
                     return consumed;
                 }
             }
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
             for bytes in remaining[consumed..].as_chunks::<16>().0 {
                 use core::arch::x86_64::{
                     _mm_and_si128, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8,

@@ -900,7 +900,7 @@ RSpec.describe "native VALUE execution" do
 
   it "stops content string runs at every byte value and group alignment" do # rubocop:disable RSpec/ExampleLength
     json = ('"' + "x" * 1024 + '"').b
-    values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 96, 97, 98,
+    values = [*(1..40), 63, 64, 65, 96, 97, 98,
       127, 128, 129, 383, 384, 385, 767, 768, 769, 1023, 1024].flat_map do |at|
       256.times.map do |byte|
         value = json.dup

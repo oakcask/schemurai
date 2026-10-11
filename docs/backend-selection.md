@@ -221,6 +221,8 @@ its frame is kept out of the shorter-content paths. Scratch size is bounded
 independently of input size. String scanning checks the first
 eight bytes for short keys, then uses thirty-two-byte groups on x86_64 CPUs
 with AVX2 detected at runtime, or sixteen-byte groups when SSE2 is enabled.
+Little-endian ARM64 targets with NEON enabled use sixteen-byte groups, packing
+the comparison lanes into four-bit flags to locate the first special byte.
 Other targets and tails retain the portable eight-byte and
 scalar scans. Quotes, escapes and bytes below 0x20 terminate the ordinary run,
 including at refill boundaries; vector loads only read complete input chunks.
