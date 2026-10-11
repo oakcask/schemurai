@@ -9,10 +9,15 @@ on:
       - .ruby-version
       - Gemfile
       - Gemfile.lock
+      - rust-toolchain.toml
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
+      - test/native_backend_test.rb
       - oracle/**/*
       - test/evaluator_backend_test.rb
+      - spec/backend_regressions_spec.rb
+      - spec/support/backend_regressions.rb
   pull_request:
     paths: *backend_paths
 
@@ -44,3 +49,34 @@ jobs:
         run: bundle exec rspec -Ilib test/evaluator_backend_test.rb
         env:
           SCHEMURAI_DIFFERENTIAL_BACKEND: vm
+
+  native-differential:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        ruby-version: ["3.4", "4.0"]
+        extconf-args: ["", "--enable-portable-hash-walk"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+      - uses: ruby/setup-ruby@e81a8fa391b11a595c1b7ed84177cc0fe02faf83 # v1.328.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Build Rust extension
+        working-directory: ext/schemurai_native
+        run: |
+          ruby extconf.rb ${{ matrix.extconf-args }}
+          make
+      - name: Check Rust code
+        run: cargo clippy --manifest-path ext/schemurai_native/Cargo.toml --locked -- -D warnings
+      - name: Compare native evaluator with the Ruby oracle and check GC safety
+        run: bundle exec rspec -Ilib -Iext/schemurai_native test/evaluator_backend_test.rb test/native_backend_test.rb
+        env:
+          SCHEMURAI_DIFFERENTIAL_BACKEND: native

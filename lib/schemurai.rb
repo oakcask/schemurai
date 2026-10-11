@@ -72,19 +72,19 @@ module Schemurai
   # Register every external schema with +schemas:+ before compiling. A registry
   # can be made shareable once registration and compilation are complete.
   class SchemaRegistry
-    # The selected backend, either +:ruby+ or +:vm+.
+    # The selected backend, +:ruby+, +:vm+, or +:native+.
     attr_reader :backend
 
     # Creates a registry.
     #
     # +schemas+ maps absolute URI strings to JSON-shaped Ruby schemas. Pass
     # +validate_schema: true+ to validate every registered and compiled schema
-    # against its meta-schema. +backend+ accepts +:ruby+, +:vm+, or +:default+.
+    # against its meta-schema. +backend+ accepts +:ruby+, +:vm+, +:native+, or +:default+.
     def initialize(schemas: {}, validate_schema: false, backend: Backend.requested)
       @backend = Backend.resolve(backend)
       @validate_schema = validate_schema
       @graph = Internal::SchemaGraph.new(schemas: schemas)
-      @compiler = VM::Compiler.new(@graph) if @backend == :vm
+      @compiler = VM::Compiler.new(@graph) if %i[vm native].include?(@backend)
       schemas.each_value { |schema| validate_schema!(schema) } if validate_schema?
     end
 
@@ -150,7 +150,8 @@ module Schemurai
     private def build_validator(root, content:, format:)
       evaluator = if @compiler
         program = @compiler.compile(root)
-        VM::Evaluator.new(@graph, @compiler, program, content: content, format: format)
+        evaluator_class = (@backend == :native) ? Native::Evaluator : VM::Evaluator
+        evaluator_class.new(@graph, @compiler, program, content: content, format: format)
       else
         Internal::Evaluator.new(@graph, root, content: content, format: format)
       end
@@ -177,7 +178,7 @@ module Schemurai
       @evaluator = evaluator
     end
 
-    # The backend reported by the evaluator, either +:ruby+ or +:vm+.
+    # The backend reported by the evaluator, +:ruby+, +:vm+, or +:native+.
     def backend
       @evaluator.backend
     end
@@ -193,7 +194,7 @@ module Schemurai
     end
   end
 
-  # Returns the backend selected by SCHEMURAI_BACKEND, either +:ruby+ or +:vm+.
+  # Returns the backend selected by SCHEMURAI_BACKEND, +:ruby+, +:vm+, or +:native+.
   module_function def backend
     Backend.resolve
   end
@@ -202,7 +203,7 @@ module Schemurai
   #
   # +schemas+ maps external URI strings to schemas. +base_uri+ supplies the
   # schema's base URI. Optional content and format assertions are disabled by
-  # default. +backend+ accepts +:ruby+, +:vm+, or +:default+.
+  # default. +backend+ accepts +:ruby+, +:vm+, +:native+, or +:default+.
   module_function def compile(schema, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested)
     SchemaRegistry.new(schemas: schemas, validate_schema: validate_schema, backend: backend).compile(
       schema,

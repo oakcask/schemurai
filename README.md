@@ -5,12 +5,17 @@
 [![lint / rubocop](https://github.com/oakcask/schemurai/actions/workflows/lint--rubocop.yaml/badge.svg)](https://github.com/oakcask/schemurai/actions/workflows/lint--rubocop.yaml)
 [![lint / rbs](https://github.com/oakcask/schemurai/actions/workflows/lint--rbs.yaml/badge.svg)](https://github.com/oakcask/schemurai/actions/workflows/lint--rbs.yaml)
 
-A small, light-weight-dependency JSON Schema validator for Ruby supporting Draft 7,
-Draft 2019-09, and Draft 2020-12. It covers the required cases in the official
-JSON-Schema-Test-Suite, as well as the applicable optional tests for numeric
+A JSON Schema validator for Ruby with reusable compiled schemas and detailed
+validation errors. It supports Draft 7, Draft 2019-09, and Draft 2020-12 and
+covers the required cases in the official JSON-Schema-Test-Suite, as well as
+the applicable optional tests for numeric
 precision, ECMA-262 regular expressions, content validation, anchors, and dynamic
 references. The dialect is selected from the schema's `$schema` URI; schemas that
 omit `$schema` use Draft 7 for compatibility.
+
+Choose the default Ruby evaluator, the Ruby VM backend, or the optional
+experimental Rust native backend. See [backend selection](#backend-selection)
+for setup and requirements.
 
 Schemurai ships RBS declarations for its public API in `sig/schemurai.rbs`.
 
@@ -218,6 +223,12 @@ validator is retained.
 `Schemurai.backend`, `SchemaRegistry#backend`, and `Validator#backend` expose
 the actual backend. Pass `backend: :ruby` to force the Ruby oracle or
 `backend: :vm` to ahead-of-time compile schemas for the validator virtual machine.
+Pass `backend: :native` to use the experimental Rust VM extension. Building the
+native extension requires a C toolchain, Ruby development headers, and Rust
+1.93 or newer. If cargo is absent, gem installation skips the optional native
+extension and Ruby/VM remain available; explicitly selecting `:native` then
+raises `LoadError`. Native execution borrows Ruby values directly; its current coverage and
+remaining VM delegation are documented below.
 Schema graph construction remains shared Ruby infrastructure. Environment-based selection
 is documented in [`docs/backend-selection.md`](docs/backend-selection.md).
 

@@ -1,0 +1,19 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rbconfig"
+require "tmpdir"
+
+# Exercise the real RubyGems installer with a PATH containing build tools but
+# no cargo. Keep the parent process and later CI steps' PATH unchanged.
+Dir.mktmpdir("schemurai-no-cargo") do |directory|
+  %w[make rm mkdir sh].each do |name|
+    source = ENV.fetch("PATH").split(File::PATH_SEPARATOR)
+      .map { |entry| File.join(entry, name) }.find { |entry| File.file?(entry) && File.executable?(entry) }
+    abort "missing build tool #{name}" unless source
+    FileUtils.ln_s(source, File.join(directory, name))
+  end
+  FileUtils.ln_s(RbConfig.ruby, File.join(directory, "ruby"))
+  gem_command = File.join(RbConfig::CONFIG.fetch("bindir"), "gem")
+  system({"PATH" => directory}, RbConfig.ruby, gem_command, "install", "--local", ARGV.fetch(0), "--no-document", *ARGV.drop(1), exception: true)
+end

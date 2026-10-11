@@ -9,18 +9,22 @@ on:
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
       - sig/**/*
       - README.md
       - test/package_smoke_test.rb
+      - script/install-without-cargo
   pull_request:
     paths:
       - .github/workflows/test--package.yaml
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
+      - ext/**/*
       - sig/**/*
       - README.md
       - test/package_smoke_test.rb
+      - script/install-without-cargo
 
 permissions:
   contents: read
@@ -43,11 +47,13 @@ jobs:
   smoke-test:
     needs: build
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
         ruby-version:
           - "3.4"
           - "4.0"
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -64,3 +70,32 @@ jobs:
         run: gem install --local schemurai.gem --no-document
       - name: Run package smoke test
         run: ruby test/package_smoke_test.rb
+
+  without-cargo:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        ruby-version: ["3.4", "4.0"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: |
+            test/package_smoke_test.rb
+            script/install-without-cargo
+          sparse-checkout-cone-mode: false
+      - uses: ruby/setup-ruby@e81a8fa391b11a595c1b7ed84177cc0fe02faf83 # v1.328.0
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: schemurai-package
+      - name: Install gem without cargo on PATH
+        run: ruby script/install-without-cargo schemurai.gem
+      - name: Check Ruby and VM without the native extension
+        run: ruby test/package_smoke_test.rb
+        env:
+          SCHEMURAI_EXPECT_NO_NATIVE: "1"

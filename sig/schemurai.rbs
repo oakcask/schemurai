@@ -9,7 +9,7 @@ module Schemurai
   type schemas = Hash[String, schema]
 
   # A resolved evaluator backend.
-  type backend = :ruby | :vm
+  type backend = :ruby | :vm | :native
 
   # A backend accepted when configuring a validator.
   type backend_selection = backend | :default

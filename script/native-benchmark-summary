@@ -1,0 +1,33 @@
+# frozen_string_literal: true
+
+require "json"
+
+path = ARGV.fetch(0)
+lines = ["## VM vs native (YJIT)", ""]
+if File.file?(path)
+  report = JSON.parse(File.read(path))
+  escape = ->(text) { text.to_s.gsub(/[|`\r\n]/, " ") }
+  results = report.fetch("results")
+  speedups = results.values.map { |row| row.fetch("seconds").fetch("vm") / row.fetch("seconds").fetch("native") }.sort
+  lines << "Ruby: #{escape.call(report.fetch("ruby"))}"
+  lines << ""
+  lines << "Width: #{report.fetch("width")}; samples: #{report.fetch("iterations")}; batch: #{report.fetch("batch")}."
+  lines << "Compilation excluded; validity, native coverage and complete errors checked against VM."
+  lines << ""
+  lines << "#{speedups.count { |value| value >= 10 }}/#{speedups.length} cases ≥10×; minimum #{format("%.2f", speedups.first)}×; median #{format("%.2f", speedups[speedups.length / 2])}×."
+  lines << "Runner timing is informational; the 10× target is not a CI failure threshold."
+  lines << ""
+  lines << "| Case | VM (µs) | Native (µs) | VM / native | Native Ruby allocations/call |"
+  lines << "| --- | ---: | ---: | ---: | ---: |"
+  results.each do |name, row|
+    vm = row.fetch("seconds").fetch("vm")
+    native = row.fetch("seconds").fetch("native")
+    allocation = row.fetch("allocations").fetch("native")
+    lines << "| #{escape.call(name)} | #{format("%.2f", vm * 1e6)} | #{format("%.2f", native * 1e6)} | #{format("%.2f", vm / native)}× | #{format("%.2f", allocation)} |"
+  end
+else
+  lines << "No benchmark report was produced. See the failed build or benchmark step for details."
+end
+summary = lines.join("\n") + "\n"
+puts summary
+File.open(ENV.fetch("GITHUB_STEP_SUMMARY"), "a") { |file| file.write(summary) } if ENV.key?("GITHUB_STEP_SUMMARY")

@@ -34,7 +34,7 @@ RSpec.describe "backend selection" do
   end
 
   it "rejects removed and unknown backends", :aggregate_failures do
-    %i[bytecode native unknown].each do |backend|
+    %i[bytecode unknown].each do |backend|
       expect { Schemurai.compile(true, backend: backend) }
         .to raise_error(Schemurai::Error, /unknown Schemurai backend/)
     end
