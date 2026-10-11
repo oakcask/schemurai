@@ -307,6 +307,60 @@ by about 3–4% in this comparison; nested validity remained within about 4%.
 These local results do not establish a speedup for every input. The artifacts
 are `schemurai-policies-before.json` and `schemurai-policies-after.json`.
 
+## Native enum lookup
+
+`native_enum.rb` measures arrays whose items use a number, string or nested-object
+enum. It includes first-candidate matches, last-candidate matches and misses,
+through both `valid?` and detailed `validate`. Compilation is excluded. Before
+measurement, the runner checks native coverage and exact validity/error parity
+with the VM, then alternates backend order and reports batched-call medians.
+Ruby allocations are measured separately after warmup; they do not describe
+native index storage.
+
+```sh
+BENCHMARK_JSON=enum-results.json bundle exec ruby --yjit \
+  -Iext/schemurai_native benchmark/native_enum.rb
+```
+
+`BENCHMARK_SIZE` controls enum candidates (default 1024), `BENCHMARK_WIDTH`
+controls array elements (256), `BENCHMARK_ITERATIONS` controls samples (11)
+and `BENCHMARK_BATCH` controls calls per sample (10). Run sizes 16, 17 and 64
+to check the linear/indexed boundary. Compare builds using the same script and
+settings with the appropriate extension directory on the Ruby load path.
+
+Compared with `15d2858`, on Ruby 4.0.6 with YJIT, x86_64 Linux, 1024 candidates,
+256 elements, 11 samples and batches of five:
+
+| Native last-candidate workload | Before (µs) | After (µs) | Speedup |
+| --- | ---: | ---: | ---: |
+| Numbers / `valid?` | 3216.526 | 11.011 | 292.11x |
+| Strings / `valid?` | 3599.939 | 15.784 | 228.07x |
+| Nested objects / `valid?` | 14008.137 | 64.050 | 218.71x |
+| Numbers / `validate` | 3176.900 | 10.907 | 291.28x |
+| Strings / `validate` | 3636.570 | 15.711 | 231.46x |
+| Nested objects / `validate` | 14267.697 | 63.859 | 223.42x |
+
+First-candidate speed ratios ranged from 0.94x to 1.03x in the same run.
+At size 16, non-first cases remained within about 5%; at size 17 they improved
+by 1.61–6.48x, and at size 64 by 3.41–22.95x (seven samples, batches of five).
+All native validity cases allocated zero Ruby objects; successful diagnostics
+allocated three. The artifacts are `schemurai-enum-before.json` and
+`schemurai-enum-after.json`, with size-suffixed artifacts for the smaller runs.
+These are local measurements, not portable speed guarantees.
+
+Enums with more than 16 candidates compile canonical fingerprints into a
+sorted flat index. Lookup fingerprints the input once and uses binary search
+to select candidates, then retains full JSON equality and original candidate
+order within each collision group. The first candidate is compared directly,
+and disjoint root types avoid input fingerprinting. Index storage is linear
+(16 bytes per candidate on 64-bit platforms), capped at 64 MiB per enum;
+sorting takes O(E log E) work in addition to schema fingerprinting. Lookup takes
+O(log E) index work plus input fingerprinting and exact collision comparisons.
+Heavy fingerprint collisions can still require a full candidate scan.
+Small enums, unavailable schema/input fingerprints and unavailable index
+storage keep linear comparisons, preserving depth and unsupported-value
+fallback. Native memory reporting includes enum values and index buffers.
+
 ## Rust native backend versus YJIT
 
 Build the extension as described in `docs/backend-selection.md`, then run:
