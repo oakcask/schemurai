@@ -24,10 +24,120 @@ impl Hash for JsonKey {
 }
 pub(super) type KeySet = HashSet<JsonKey, BuildHasherDefault<BucketHasher>>;
 
+// Store only nonempty words. The common single-word case needs no allocation,
+// even when its property IDs are near the end of a large compiled engine.
+#[derive(Default)]
+enum PropertyWords {
+    #[default]
+    Empty,
+    Single(usize, u64),
+    Dense(usize, Vec<u64>),
+    Many(HashMap<usize, u64>),
+}
+#[derive(Default)]
+struct PropertyBits {
+    words: PropertyWords,
+    count: usize,
+}
+impl PropertyBits {
+    fn word(&self, index: usize) -> u64 {
+        match &self.words {
+            PropertyWords::Empty => 0,
+            PropertyWords::Single(at, bits) => {
+                if *at == index {
+                    *bits
+                } else {
+                    0
+                }
+            }
+            PropertyWords::Dense(first, words) => index
+                .checked_sub(*first)
+                .and_then(|offset| words.get(offset))
+                .copied()
+                .unwrap_or(0),
+            PropertyWords::Many(words) => words.get(&index).copied().unwrap_or(0),
+        }
+    }
+    fn insert_word(&mut self, index: usize, bits: u64) {
+        let previous = self.word(index);
+        self.count += (bits & !previous).count_ones() as usize;
+        match &mut self.words {
+            PropertyWords::Empty => self.words = PropertyWords::Single(index, bits),
+            PropertyWords::Single(at, existing) if *at == index => *existing |= bits,
+            PropertyWords::Single(at, existing) if at.abs_diff(index) < 128 => {
+                let first = (*at).min(index);
+                let mut words = vec![0; at.abs_diff(index) + 1];
+                words[*at - first] = *existing;
+                words[index - first] = bits;
+                self.words = PropertyWords::Dense(first, words);
+            }
+            PropertyWords::Single(at, existing) => {
+                self.words = PropertyWords::Many(HashMap::from([(*at, *existing), (index, bits)]));
+            }
+            PropertyWords::Dense(first, words)
+                if index >= *first && index - *first < words.len() =>
+            {
+                words[index - *first] |= bits;
+            }
+            PropertyWords::Dense(first, words)
+                if index.max(*first + words.len() - 1) - index.min(*first) < 128 =>
+            {
+                if index < *first {
+                    let offset = *first - index;
+                    words.splice(0..0, std::iter::repeat_n(0, offset));
+                    *first = index;
+                } else {
+                    words.resize(index - *first + 1, 0);
+                }
+                words[index - *first] |= bits;
+            }
+            PropertyWords::Dense(first, words) => {
+                let mut sparse: HashMap<_, _> = words
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &word)| word != 0)
+                    .map(|(offset, &word)| (*first + offset, word))
+                    .collect();
+                sparse.insert(index, bits);
+                self.words = PropertyWords::Many(sparse);
+            }
+            PropertyWords::Many(words) => *words.entry(index).or_default() |= bits,
+        }
+    }
+    fn insert(&mut self, index: usize) {
+        self.insert_word(index / 64, 1_u64 << (index % 64));
+    }
+    fn contains(&self, index: usize) -> bool {
+        self.word(index / 64) & (1_u64 << (index % 64)) != 0
+    }
+    fn merge(&mut self, other: Self) {
+        if matches!(self.words, PropertyWords::Empty) {
+            *self = other;
+            return;
+        }
+        match other.words {
+            PropertyWords::Empty => {}
+            PropertyWords::Single(index, bits) => self.insert_word(index, bits),
+            PropertyWords::Dense(first, words) => {
+                for (offset, bits) in words.into_iter().enumerate() {
+                    if bits != 0 {
+                        self.insert_word(first + offset, bits);
+                    }
+                }
+            }
+            PropertyWords::Many(words) => {
+                for (index, bits) in words {
+                    self.insert_word(index, bits);
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct Tracked {
     pub status: Verdict,
     properties: KeySet,
-    known_properties: Vec<u64>,
+    known_properties: PropertyBits,
     items: Vec<u64>,
 }
 impl Tracked {
@@ -35,7 +145,7 @@ impl Tracked {
         Self {
             status,
             properties: KeySet::default(),
-            known_properties: vec![],
+            known_properties: PropertyBits::default(),
             items: vec![],
         }
     }
@@ -52,24 +162,13 @@ impl Tracked {
             .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
     }
     fn known_property(&mut self, index: usize) {
-        let word = index / 64;
-        if self.known_properties.len() <= word {
-            self.known_properties.resize(word + 1, 0);
-        }
-        self.known_properties[word] |= 1_u64 << (index % 64);
+        self.known_properties.insert(index);
     }
     fn contains_known_property(&self, index: usize) -> bool {
-        self.known_properties
-            .get(index / 64)
-            .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
+        self.known_properties.contains(index)
     }
     pub(super) fn property_count(&self) -> usize {
-        self.properties.len()
-            + self
-                .known_properties
-                .iter()
-                .map(|word| word.count_ones() as usize)
-                .sum::<usize>()
+        self.properties.len() + self.known_properties.count
     }
     pub(super) fn item_count(&self) -> usize {
         self.items
@@ -86,7 +185,7 @@ impl Tracked {
         } else {
             self.properties.extend(other.properties);
         }
-        merge_bits(&mut self.known_properties, other.known_properties);
+        self.known_properties.merge(other.known_properties);
         merge_bits(&mut self.items, other.items);
         Valid
     }
