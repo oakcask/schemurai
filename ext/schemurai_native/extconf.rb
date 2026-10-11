@@ -21,7 +21,7 @@ unless enable_config("portable-hash-walk", false)
           RUBY_INIT_STACK;
           ruby_init();
           int status = 0;
-          ID identity = rb_intern("compare_by_identity");
+          ID identity = rb_intern_const("compare_by_identity");
           for (int n = 0; n <= 8; n++) {
               VALUE h = rb_hash_new();
               VALUE id = rb_funcall(rb_hash_new(), identity, 0);

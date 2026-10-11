@@ -7,6 +7,9 @@
 #include "big_sample.h"
 #include "protocol.h"
 
+static ID id_resolve, id_schemurai, id_resolution_error;
+static ID id_root, id_compile, id_graph, id_dynamic_anchor;
+
 /* The C layer adapts CRuby APIs to Rust's opaque VALUEs. */
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
 /* Exported internal API; extconf checks the symbol and provides a public-API
@@ -329,8 +332,9 @@ int sn_string_equal(VALUE a, VALUE b) { return rb_str_cmp(a, b) == 0; }
 struct access { VALUE object; const char *name; };
 static VALUE get_field(VALUE arg) {
     struct access *a = (struct access *)arg;
-    return rb_funcall(a->object, rb_intern(a->name), 0);
+    return rb_funcall(a->object, rb_intern_const(a->name), 0);
 }
+/* Rust supplies a fixed, NUL-terminated field name from a static byte string. */
 int sn_field(VALUE object, const char *name, VALUE *value) {
     struct access a = {object, name};
     int state = 0;
@@ -445,11 +449,19 @@ static VALUE diagnostics(VALUE self, VALUE instance) {
     return output;
 }
 void Init_schemurai_native(void) {
+    /* Cache fixed IDs explicitly, independent of compiler-specific macros. */
+    id_resolve = rb_intern_const("resolve");
+    id_schemurai = rb_intern_const("Schemurai");
+    id_resolution_error = rb_intern_const("ResolutionError");
+    id_root = rb_intern_const("root");
+    id_compile = rb_intern_const("compile");
+    id_graph = rb_intern_const("@graph");
+    id_dynamic_anchor = rb_intern_const("dynamic_anchor");
     utf8_index = rb_utf8_encindex();
     ascii_index = rb_usascii_encindex();
     binary_index = rb_ascii8bit_encindex();
     for (size_t i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); i++)
-        opcodes[i].id = rb_intern(opcodes[i].symbol);
+        opcodes[i].id = rb_intern_const(opcodes[i].symbol);
     rb_ext_ractor_safe(true);
     VALUE schemurai = rb_define_module("Schemurai");
     VALUE native = rb_define_module_under(schemurai, "Native");
@@ -485,7 +497,7 @@ int sn_object_each(VALUE value, void *context) {
 struct resolution { VALUE compiler, program, reference; };
 static VALUE resolve_reference(VALUE arg) {
     struct resolution *r = (struct resolution *)arg;
-    return rb_funcall(r->compiler, rb_intern("resolve"), 2, r->program, r->reference);
+    return rb_funcall(r->compiler, id_resolve, 2, r->program, r->reference);
 }
 int sn_resolve(VALUE compiler, VALUE program, VALUE reference, VALUE *result) {
     struct resolution r = {compiler, program, reference};
@@ -495,8 +507,8 @@ int sn_resolve(VALUE compiler, VALUE program, VALUE reference, VALUE *result) {
     return state;
 }
 int sn_resolution_error(VALUE error) {
-    VALUE schemurai = rb_const_get(rb_cObject, rb_intern("Schemurai"));
-    VALUE klass = rb_const_get(schemurai, rb_intern("ResolutionError"));
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE klass = rb_const_get(schemurai, id_resolution_error);
     return rb_obj_is_kind_of(error, klass);
 }
 
@@ -607,14 +619,14 @@ int sn_json_item_view(VALUE value, const unsigned char **data, size_t *length) {
 struct binding { VALUE compiler, resource, name; };
 static VALUE resource_program(VALUE arg) {
     struct binding *b = (struct binding *)arg;
-    VALUE node = rb_funcall(b->resource, rb_intern("root"), 0);
-    return rb_funcall(b->compiler, rb_intern("compile"), 1, node);
+    VALUE node = rb_funcall(b->resource, id_root, 0);
+    return rb_funcall(b->compiler, id_compile, 1, node);
 }
 static VALUE anchor_program(VALUE arg) {
     struct binding *b = (struct binding *)arg;
-    VALUE graph = rb_ivar_get(b->compiler, rb_intern("@graph"));
-    VALUE node = rb_funcall(graph, rb_intern("dynamic_anchor"), 2, b->resource, b->name);
-    return NIL_P(node) ? Qnil : rb_funcall(b->compiler, rb_intern("compile"), 1, node);
+    VALUE graph = rb_ivar_get(b->compiler, id_graph);
+    VALUE node = rb_funcall(graph, id_dynamic_anchor, 2, b->resource, b->name);
+    return NIL_P(node) ? Qnil : rb_funcall(b->compiler, id_compile, 1, node);
 }
 int sn_resource_program(VALUE compiler, VALUE resource, VALUE *result) {
     struct binding b = {compiler, resource, Qnil};
