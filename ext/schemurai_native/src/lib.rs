@@ -547,6 +547,7 @@ pub struct Engine {
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
     memoizable: Vec<bool>,
+    memo_contextual: Vec<bool>,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), Option<usize>>,
@@ -1114,10 +1115,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         known_kind: Option<i32>,
     ) -> Verdict {
-        if !self.memoizable[node] {
+        let Some(key) = self.memo.key(self, node, value, depth, active) else {
             return self.eval_uncached(node, value, depth, active, known_kind);
-        }
-        let key = (node, value, depth);
+        };
         if let Some(status) = self.memo.verdict(key) {
             return status;
         }
@@ -2652,7 +2652,9 @@ pub extern "C" fn sn_engine_header_size() -> usize {
 pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
+    let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
     std::mem::size_of::<Engine>()
+        + contextual.capacity() * std::mem::size_of::<bool>()
         + nodes.capacity() * std::mem::size_of::<Vec<Op>>()
         + operands.capacity() * std::mem::size_of::<Vec<(i32, Value)>>()
         + operands

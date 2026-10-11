@@ -16,7 +16,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proves_only_invariant_dynamic_targets_and_enables_shared_graph_memoization() {
+    fn excludes_cycles_reached_only_through_dynamic_overrides() {
+        let reference = |target, kind| Op::Ref(Reference { target, kind });
+        let mut engine = Engine {
+            nodes: vec![
+                vec![Op::Boolean(true)],
+                vec![reference(0, ReferenceKind::Dynamic(0))],
+                vec![reference(1, ReferenceKind::Static)],
+                vec![reference(1, ReferenceKind::Static)],
+            ],
+            anchor_tables: vec![vec![(100, 0), (101, 1)]],
+            ..Engine::default()
+        };
+        engine.compile_memoization();
+        assert!(!engine.memoizable[1]);
+    }
+
+    #[test]
+    fn removes_scope_keys_only_for_proven_invariant_dynamic_targets() {
         let reference = |target, kind| Op::Ref(Reference { target, kind });
         let mut engine = Engine {
             nodes: vec![
@@ -40,10 +57,12 @@ mod tests {
             ..Engine::default()
         };
         engine.compile_memoization();
-        assert!(!engine.memoizable[3]);
+        assert!(engine.memoizable[3]);
+        assert!(engine.memo_contextual[3]);
         engine.simplify_dynamic_references();
         engine.compile_memoization();
         assert!(engine.memoizable[3]);
+        assert!(!engine.memo_contextual[3]);
         for node in [1, 2] {
             let Op::Ref(reference) = engine.nodes[node][0] else {
                 panic!()
@@ -82,6 +101,12 @@ pub(super) struct ScopeFrame<'a> {
     pub primary_binding: Option<usize>,
 }
 impl Reference {
+    pub(super) fn dynamic_target(self) -> Option<(usize, usize)> {
+        match self.kind {
+            ReferenceKind::Dynamic(name) => Some((name, self.target)),
+            _ => None,
+        }
+    }
     pub(super) fn static_target(self) -> Option<usize> {
         matches!(self.kind, ReferenceKind::Static).then_some(self.target)
     }

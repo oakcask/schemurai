@@ -38,8 +38,9 @@ Local medians on Ruby 4.0.6/YJIT, x86_64-linux, compared with `2439118`:
 
 Verdicts retain up to 4,096 results; tracked validity and diagnostic successes
 share up to 8,192 results and a 65,536-slot annotation budget. FIFO admission
-replaces old results when a limit is reached. Scope-dependent
-or cyclic reachable references remain uncached. Failing diagnostics retain
+replaces old results when a limit is reached. Scope-dependent results additionally
+key their effective dynamic bindings; cyclic graphs and recursive references
+remain uncached. Failing diagnostics retain
 distinct schema-path errors and can require exponential output size. These
 measurements establish improvement for the successful static-reference workload,
 not a complexity bound for arbitrary schemas or an all-suite speedup.
@@ -99,6 +100,54 @@ O(A + E) work and O(K) temporary slots for compiled anchor bindings A,
 instructions E and anchor names K. The benchmark checks direct native coverage
 and VM parity outside timing. Regressions include annotation propagation,
 invalid source paths, GC compaction, and existing dynamic override cases.
+
+### Scope-dependent dynamic references
+
+`native_contextual_memo.rb` evaluates a shared definition chain twice under
+different outer resources. It exercises one and two dynamic names, both scalar
+leaves and object leaves exporting annotations. Compile and VM parity checks
+are outside timing, and every measured call checks direct native coverage.
+Results are medians of seven native calls on Ruby 4.0.6/x86_64-linux without
+YJIT, compared with `7307b40`:
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_contextual_memo.rb
+```
+
+| Shape / names / depth | Before validity (µs) | After validity (µs) | Before diagnostics (µs) | After diagnostics (µs) |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar / 1 / 12 | 605.254 | 4.624 | 2,143.336 | 11.707 |
+| Scalar / 1 / 16 | 10,864.251 | 6.722 | 37,280.972 | 14.604 |
+| Scalar / 2 / 12 | 1,340.445 | 10.888 | 3,500.203 | 18.933 |
+| Scalar / 2 / 16 | 23,066.467 | 15.227 | 59,947.403 | 24.760 |
+| Object / 2 / 12 | 2,298.173 | 14.484 | 5,734.457 | 23.557 |
+| Object / 2 / 16 | 38,259.172 | 19.303 | 93,983.905 | 31.202 |
+
+The previous O(2^D) successful chain becomes O(D) node evaluation work per
+effective scope, plus annotation copying and O(KS) key construction for K
+dynamic names and S scope frames. Single-name keys use the existing effective
+binding without allocation or scope traversal. Scope-independent nodes keep
+their scope-independent reuse and original three-word cache keys. The static
+scalar depth-16 control in `native_algorithms.rb` measured 2.458 → 2.700 µs for
+validity and 6.591 → 6.928 µs for diagnostics, indicating a small additional
+eligibility-check cost in these local samples. This does not guarantee linear work when scope
+counts, annotations or schema working sets grow beyond the cache budgets.
+
+Cycle analysis includes every possible binding through one shared dispatch
+vertex per anchor name, taking O(N + E + A + K) work/storage instead of
+materializing reference-count × binding-count edges. The engine retains one
+extra boolean per node indicating scope dependence. Scope IDs map into disjoint blocks of native node IDs with checked arithmetic,
+retaining the existing three-word cache keys. For multiple names, exact signatures are
+interned with FIFO limits of 4,096 entries and 65,536 binding slots (up to
+1 MiB of binding payload on 64-bit builds), plus bounded table/queue metadata.
+The table and queue share each signature buffer. Monotonic IDs prevent old
+evaluation results from aliasing newly admitted scopes after eviction.
+
+Native regressions check changing bindings at the same instance and depth,
+including both dynamic names, complete branch counts, exported annotations,
+ordered failure paths and GC compaction without VM fallback. Rust tests check
+outermost-binding equivalence, interner entry/slot turnover and ID uniqueness,
+oversized-signature rejection, and cycles introduced only by override targets.
 
 ## Wide integer fingerprints
 

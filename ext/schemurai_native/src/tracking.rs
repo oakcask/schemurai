@@ -271,10 +271,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Tracked {
-        if !self.memoizable[node] {
+        let Some(key) = self.memo.key(self, node, value, depth, active) else {
             return self.eval_tracked_uncached(node, value, depth, active, kind);
-        }
-        let key = (node, value, depth);
+        };
         if let Some(result) = self.memo.tracked(key) {
             return result;
         }
