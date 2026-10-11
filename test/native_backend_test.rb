@@ -96,6 +96,30 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate(value).errors.size).to eq(2)
   end
 
+  it "keeps shared reference annotations usable after invocation cache turnover" do # rubocop:disable RSpec/ExampleLength
+    definitions = {"d0" => {"properties" => {"x" => {"type" => "integer"}}}}
+    1.upto(8) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions,
+              "items" => {"$ref" => "#/$defs/d8", "unevaluatedProperties" => false}}
+    value = Array.new(1200) { |i| {"x" => i} }
+    vm = Schemurai.compile(schema, backend: :vm)
+    native = Schemurai.compile(schema, backend: :native)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    expect(runner.valid?(value)).to eq(vm.valid?(value))
+    expect(runner.diagnostics(value)).to eq([])
+    expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    value.last["extra"] = 1
+    expect(runner.valid?(value)).to be(false)
+    expect(runner.diagnostics(value)).not_to be_nil
+    expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    value.last.delete("extra")
+    value.last["x"] = "bad"
+    expect(runner.valid?(value)).to be(false)
+    expect(runner.diagnostics(value)).not_to be_nil
+    expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+  end
+
   it "reuses shared reference annotations without losing coverage or failure paths" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     schemas = [{"properties" => {"x" => {"type" => "integer"}}},
