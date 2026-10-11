@@ -116,9 +116,68 @@ pub(super) fn scan_contains(
     Ok(matches)
 }
 
+// Use only after proving every remaining predicate evaluation is supported.
+// Annotation and diagnostic policies continue using the complete scan above.
+pub(super) fn contains_validity(
+    len: usize,
+    min: usize,
+    max: Option<usize>,
+    mut evaluate: impl FnMut(usize) -> bool,
+) -> Verdict {
+    if len < min || max.is_some_and(|max| max < min) {
+        return Invalid;
+    }
+    // Infinity and any bound at least as large as the array cannot constrain
+    // its match count. The VM represents an absent maxContains as +Infinity.
+    let max = max.filter(|&max| max < len);
+    if min == 0 && max.is_none() {
+        return Valid;
+    }
+    let mut matches = 0;
+    for index in 0..len {
+        matches += usize::from(evaluate(index));
+        if max.is_some_and(|max| matches > max) {
+            return Invalid;
+        }
+        if max.is_none() && matches >= min {
+            return Valid;
+        }
+        if matches + (len - index - 1) < min {
+            return Invalid;
+        }
+    }
+    bounds(matches, Some(min), max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contains_termination_matches_complete_counts() {
+        for len in 0..8 {
+            for mask in 0..(1 << len) {
+                let count = (mask as u32).count_ones() as usize;
+                for min in 0..9 {
+                    for max in [None, Some(0), Some(1), Some(4), Some(8)] {
+                        assert_eq!(
+                            contains_validity(len, min, max, |i| mask & (1 << i) != 0),
+                            bounds(count, Some(min), max)
+                        );
+                    }
+                }
+            }
+        }
+        let mut calls = 0;
+        assert_eq!(
+            contains_validity(1000, 1, None, |_| {
+                calls += 1;
+                true
+            }),
+            Valid
+        );
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn termination_preserves_multiplicity_and_complete_scan_errors() {
