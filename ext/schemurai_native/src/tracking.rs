@@ -217,26 +217,19 @@ impl Engine {
                     result
                 }
                 Op::Any(nodes) | Op::One(nodes) => {
-                    let mut matched = Tracked::new(Valid);
-                    let mut count = 0;
-                    let mut result = Valid;
-                    for &(child, multiplicity) in nodes {
-                        let branch = self.eval_tracked_kind(child, value, depth + 1, active, kind);
-                        if branch.status == Unsupported {
-                            result = Unsupported;
-                            break;
-                        }
-                        if branch.status == Valid {
-                            count += multiplicity;
-                            matched.merge(branch);
-                        }
-                    }
-                    if result != Valid {
-                        result
-                    } else if count == 0 || (matches!(op, Op::One(_)) && count != 1) {
-                        Invalid
+                    let branch_kind = if matches!(op, Op::Any(_)) {
+                        evaluation::BranchKind::Any
                     } else {
-                        evaluation.merge(matched)
+                        evaluation::BranchKind::One
+                    };
+                    match evaluation::scan_branches(
+                        nodes,
+                        evaluation::BranchPolicy::Complete,
+                        |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
+                    ) {
+                        Err(status) => status,
+                        Ok(result) if !branch_kind.accepts(result.matches) => Invalid,
+                        Ok(result) => evaluation.merge(result.coverage),
                     }
                 }
                 Op::Not(child) => match self.eval(*child, value, depth + 1, active) {
@@ -338,17 +331,14 @@ impl Engine {
             }
         }
         if let Some(child) = r.contains {
-            let mut count = 0;
-            for index in 0..len {
-                match self.eval(child, unsafe { sn_entry(value, index) }, depth, active) {
-                    Valid => {
-                        count += 1;
-                        evaluation.item(index);
-                    }
-                    Invalid => {}
-                    Unsupported => return Unsupported,
-                }
-            }
+            let count = match evaluation::scan_contains(
+                len,
+                |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
+                |index| evaluation.item(index),
+            ) {
+                Ok(count) => count,
+                Err(status) => return status,
+            };
             if bounds(count, Some(r.min_contains), r.max_contains) == Invalid {
                 return Invalid;
             }
@@ -387,22 +377,16 @@ impl Engine {
                 return Invalid;
             }
         }
-        let mut found = 0;
-        for (index, &(key, child)) in r.properties.iter().enumerate() {
-            let item = unsafe { sn_lookup(value, key) };
-            if item == self.undefined {
-                if r.required_properties[index] {
-                    return Invalid;
-                }
-                continue;
-            }
-            found += 1;
+        let found = match r.visit_properties(value, len, self.undefined, |index, child, item| {
             let result = self.record_value(child, item, depth, active);
-            if result != Valid {
-                return result;
+            if result == Valid {
+                evaluation.known_property(r.property_indices[index]);
             }
-            evaluation.known_property(r.property_indices[index]);
-        }
+            result
+        }) {
+            Ok(found) => found,
+            Err(status) => return status,
+        };
         if r.names.is_some() || !r.patterns.is_empty() || (r.additional.is_some() && found < len) {
             let result = self.tracked_object_walk(r, value, depth, active, evaluation, false);
             if result != Valid {
@@ -494,26 +478,25 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
                     return result as i32;
                 }
             }
-            let mut matched = c.rules.property_keys.contains(&key_location);
-            for (pattern, child) in &c.rules.patterns {
-                match pattern.eval(key) {
-                    Unsupported => return Unsupported as i32,
-                    Invalid => {}
-                    Valid => {
-                        matched = true;
-                        let result = c.engine.eval(*child, value, c.depth, c.active);
-                        if result != Valid {
-                            return result as i32;
+            let result =
+                c.rules
+                    .visit_value_rules::<false>(key, Some(key_location), |_, _, child| {
+                        match c.engine.eval(child, value, c.depth, c.active) {
+                            Valid => {
+                                if let Some(index) = known {
+                                    c.evaluation.known_property(index);
+                                } else {
+                                    c.evaluation.properties.insert(key_location);
+                                }
+                                Ok(())
+                            }
+                            status => Err(status),
                         }
-                        if let Some(index) = known {
-                            c.evaluation.known_property(index);
-                        } else {
-                            c.evaluation.properties.insert(key_location);
-                        }
-                    }
-                }
-            }
-            if matched { None } else { c.rules.additional }
+                    });
+            return match result {
+                Ok(_) => Valid as i32,
+                Err(status) => status as i32,
+            };
         };
         if let Some(child) = child {
             let result = c.engine.eval(child, value, c.depth, c.active);

@@ -23,6 +23,98 @@ RSpec.describe "native VALUE execution" do
     Schemurai.const_get(:VM)::Evaluator
   end
 
+  def expect_native_policy_results(schemas, values)
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), values.map { |value| [vm.valid?(value), vm.validate(value).errors] }]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, expected|
+      values.zip(expected).each do |value, (valid, errors)|
+        expect(native.valid?(value)).to eq(valid), value.inspect
+        expect(native.validate(value).errors).to eq(errors), value.inspect
+      end
+    end
+  end
+
+  it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}
+    wrappers = [{"allOf" => [leaf]}, {"if" => {"required" => ["id"]}, "then" => leaf},
+      {"$ref" => "#/$defs/leaf", "$defs" => {"leaf" => leaf}}, {"dependentSchemas" => {"id" => leaf}}]
+    schemas = wrappers.flat_map do |wrapper|
+      nested = {"allOf" => [wrapper]}
+      3.times { nested = {"allOf" => [nested]} }
+      [dialect.merge(wrapper).merge("unevaluatedProperties" => false),
+        dialect.merge(nested).merge("unevaluatedProperties" => false)]
+    end
+    # References in nested schemas must resolve from the document root.
+    schemas.each { |schema| schema["$defs"] = {"leaf" => leaf} }
+    values = [{}, {"id" => 1}, {"id" => "bad"}, {"id" => 1, "extra" => nil}, {"id" => "bad", "extra" => nil}]
+    expect_native_policy_results(schemas, values)
+  end
+
+  it "keeps attempted array locations separate from exported branch annotations" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    leaf = {"prefixItems" => [{"type" => "integer"}], "contains" => {"type" => "string"}}
+    schemas = [{"allOf" => [leaf]}, {"if" => {"minItems" => 1}, "then" => leaf},
+      {"$ref" => "#/$defs/leaf", "$defs" => {"leaf" => leaf}},
+      {"allOf" => [{"allOf" => [leaf]}, {"prefixItems" => [true, true]}]}].map do |wrapper|
+      dialect.merge(wrapper).merge("unevaluatedItems" => false)
+    end
+    expect_native_policy_results(schemas, [[], [1], ["bad"], [1, "ok"], ["bad", "ok"], [1, "ok", false]])
+  end
+
+  it "shares sparse property lookup while preserving required fields and ordered errors" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    properties = 130.times.to_h { |i| ["p#{i}", {"type" => "integer"}] }
+    schema = dialect.merge("properties" => properties, "required" => %w[p1 p64])
+    schemas = [schema, schema.merge("patternProperties" => {"^p" => {"minimum" => 1}}, "additionalProperties" => false),
+      schema.merge("propertyNames" => {"pattern" => "^p[0-9]+$"}, "unevaluatedProperties" => false),
+      dialect.merge("allOf" => [schema], "unevaluatedProperties" => false)]
+    values = [{}, {"p1" => 1}, {"p64" => 2, "p1" => 1}, {"p64" => "bad", "p1" => false},
+      {"extra" => nil, "p64" => 2, "p1" => 0}, 130.times.to_h { |i| ["p#{i}", i + 1] }]
+    expect_native_policy_results(schemas, values)
+  end
+
+  it "retains schema-order fallback and identity lookups in sparse objects" do # rubocop:disable RSpec/ExampleLength
+    properties = 64.times.to_h { |i| ["p#{i}", {"type" => "integer"}] }
+    properties["p1"] = {"pattern" => "(?=x)"}
+    native = Schemurai.compile({"properties" => properties}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?({"p1" => "x", "p0" => "bad"})).to be(false)
+    expect(program.valid?({"p2" => "bad", "p1" => "x"})).to be_nil
+    expect(program.diagnostics({"p1" => "x", "p0" => "bad"})).to be_nil
+    mutable = {"p0" => 1}
+    expect(program.valid?(mutable)).to be(true)
+    mutable["p0"] = "bad"
+    expect(program.valid?(mutable)).to be(false)
+    mutable.clear
+    expect(program.valid?(mutable)).to be(true)
+    schema = {"properties" => properties, "required" => ["p0"]}
+    vm = Schemurai.compile(schema, backend: :vm)
+    native = Schemurai.compile(schema, backend: :native)
+    ordinary = {"p2" => 1, "p0" => 2}
+    [ordinary, ordinary.dup.compare_by_identity, ordinary.dup.compare_by_identity.freeze].each do |value|
+      expect(native.valid?(value)).to eq(vm.valid?(value))
+      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    end
+  end
+
+  it "keeps conclusive validity separate from later diagnostic exceptions" do
+    schema = {"anyOf" => [true, {"pattern" => "^x"}]}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    value = "x".encode(Encoding::UTF_16LE)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?(value)).to be(true)
+    expect(program.diagnostics(value)).to be_nil
+    expect(native.valid?(value)).to eq(vm.valid?(value))
+    [native, vm].each { |validator| expect { validator.validate(value) }.to raise_error(Encoding::CompatibilityError) }
+  end
+
   it "compares arbitrary integer constants and mixed Float values without VM evaluation" do # rubocop:disable RSpec/ExampleLength
     random = Random.new(8417)
     integers = [2**62, -(2**63), 2**63 - 1, 2**100, -(2**127), 2**200 + 1, 2**1023, 2**4096 + 3]

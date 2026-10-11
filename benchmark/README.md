@@ -262,6 +262,51 @@ JSON_SCHEMA_VALIDATOR_LIB=../baseline/lib BENCHMARK_ONLY=suite \
   bundle exec ruby benchmark/draft2020_12.rb
 ```
 
+## Native evaluation policies
+
+`native_policies.rb` measures sparse and dense property lookup and deeply nested
+`allOf`, conditionals and references whose annotations are consumed by
+`unevaluatedProperties`. Each case includes valid and invalid inputs and both
+`valid?` and `validate`. Compilation is excluded. Before measuring, the runner
+requires native validity/diagnostic coverage and compares validity and complete
+ordered errors with the VM.
+
+```sh
+BENCHMARK_JSON=policy-results.json \
+  bundle exec ruby --yjit -Ilib -Iext/schemurai_native benchmark/native_policies.rb
+```
+
+`BENCHMARK_WIDTH` defaults to 1000, `BENCHMARK_DEPTH` to 8,
+`BENCHMARK_ITERATIONS` to 11 and `BENCHMARK_BATCH` to 50. The runner alternates
+VM/native measurement order, reports median elapsed time and measures Ruby
+allocations separately. Native allocation overhead is included in elapsed time;
+allocation counts describe Ruby objects only. For comparisons, use the same
+script and settings with each extension on the Ruby load path.
+
+Comparing the preceding native implementation with shared branch/property scans
+and combined diagnostic/annotation collection, on Ruby 4.0.6 with YJIT,
+x86_64 Linux, width 1000, depth 8, 11 samples and batches of 50:
+
+| Native workload | Before (µs) | After (µs) | Speedup |
+| --- | ---: | ---: | ---: |
+| Sparse properties / valid / `valid?` | 14.395 | 0.145 | 99.04x |
+| Sparse tracked properties / valid / `valid?` | 13.600 | 0.144 | 94.12x |
+| Nested `allOf` / valid / `validate` | 188.860 | 40.168 | 4.70x |
+| Nested conditional / valid / `validate` | 190.184 | 40.978 | 4.64x |
+| Nested references / valid / `validate` | 207.255 | 41.956 | 4.94x |
+| Nested `allOf` / invalid / `validate` | 407.294 | 242.951 | 1.68x |
+
+Invalid nested conditional/reference diagnostics improved by 1.68–1.71x.
+Ruby allocation counts were unchanged in all 24 method/validity combinations:
+zero for `valid?`, three for successful `validate`, and 11 or 17 for invalid
+results. Sparse lookup uses temporary native candidate storage and compiled
+property/required indices; those are not reflected in Ruby allocation counts.
+The early-invalid sparse case increased from 0.078 to 0.112 µs because candidate
+discovery precedes the first property check. Dense-object diagnostics increased
+by about 3–4% in this comparison; nested validity remained within about 4%.
+These local results do not establish a speedup for every input. The artifacts
+are `schemurai-policies-before.json` and `schemurai-policies-after.json`.
+
 ## Rust native backend versus YJIT
 
 Build the extension as described in `docs/backend-selection.md`, then run:
