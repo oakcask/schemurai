@@ -1060,6 +1060,18 @@ impl std::ops::Deref for Execution<'_> {
 }
 impl Execution<'_> {
     fn eval(&self, node: usize, value: Value, depth: usize, active: scope::Context<'_>) -> Verdict {
+        self.eval_with_kind(node, value, depth, active, None)
+    }
+    // Same-location applicators borrow an immutable instance under the GVL.
+    // A full key guard can be reused; descendants at other locations recheck.
+    fn eval_with_kind(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        known_kind: Option<i32>,
+    ) -> Verdict {
         let frame = scope::ScopeFrame {
             resource: self.metadata[node].resource,
             parent: active.scope,
@@ -1070,7 +1082,13 @@ impl Execution<'_> {
         };
         let active = self.enter_scope(node, active, &frame);
         if self.tracks[node] {
-            return self.eval_tracked(node, value, depth, active).status;
+            return match known_kind {
+                Some(kind) => {
+                    self.eval_tracked_kind(node, value, depth, active, kind)
+                        .status
+                }
+                None => self.eval_tracked(node, value, depth, active).status,
+            };
         }
         if depth > MAX_EVALUATION_DEPTH {
             return Unsupported;
@@ -1080,11 +1098,13 @@ impl Execution<'_> {
         {
             return rules.eval_guarded(self.caches, *required, value);
         }
-        let kind = if value & self.fixnum_flag != 0 {
-            TYPE_INTEGRAL_NUMBER
-        } else {
-            self.instance_kind(node, value)
-        };
+        let kind = known_kind.unwrap_or_else(|| {
+            if value & self.fixnum_flag != 0 {
+                TYPE_INTEGRAL_NUMBER
+            } else {
+                self.instance_kind(node, value)
+            }
+        });
         if kind == TYPE_UNSUPPORTED {
             return Unsupported;
         }
@@ -1099,7 +1119,7 @@ impl Execution<'_> {
                             value,
                             parent: active.active,
                         };
-                        self.eval(
+                        self.eval_with_kind(
                             self.reference_target(*target, active),
                             value,
                             depth + 1,
@@ -1107,13 +1127,14 @@ impl Execution<'_> {
                                 active: Some(&frame),
                                 ..active
                             },
+                            Some(kind),
                         )
                     }
                 }
                 Op::All(nodes) => {
                     let mut outcome = Valid;
                     for &n in nodes {
-                        outcome = self.eval(n, value, depth + 1, active);
+                        outcome = self.eval_with_kind(n, value, depth + 1, active, Some(kind));
                         if outcome != Valid {
                             break;
                         }
@@ -1121,32 +1142,36 @@ impl Execution<'_> {
                     outcome
                 }
                 Op::Any(nodes) | Op::One(nodes) => {
-                    let kind = if matches!(op, Op::Any(_)) {
+                    let branch_kind = if matches!(op, Op::Any(_)) {
                         evaluation::BranchKind::Any
                     } else {
                         evaluation::BranchKind::One
                     };
                     match evaluation::scan_branches(
                         nodes,
-                        evaluation::BranchPolicy::Validity(kind),
-                        |child| self.eval(child, value, depth + 1, active),
+                        evaluation::BranchPolicy::Validity(branch_kind),
+                        |child| self.eval_with_kind(child, value, depth + 1, active, Some(kind)),
                     ) {
-                        Ok(result) => verdict(kind.accepts(result.matches)),
+                        Ok(result) => verdict(branch_kind.accepts(result.matches)),
                         Err(status) => status,
                     }
                 }
-                Op::Not(n) => match self.eval(*n, value, depth + 1, active) {
+                Op::Not(n) => match self.eval_with_kind(*n, value, depth + 1, active, Some(kind)) {
                     Valid => Invalid,
                     Invalid => Valid,
                     Unsupported => Unsupported,
                 },
-                Op::Conditional(c, yes, no) => match self.eval(*c, value, depth + 1, active) {
-                    Unsupported => Unsupported,
-                    result => match if result == Valid { yes } else { no } {
-                        Some(n) => self.eval(*n, value, depth + 1, active),
-                        None => Valid,
-                    },
-                },
+                Op::Conditional(c, yes, no) => {
+                    match self.eval_with_kind(*c, value, depth + 1, active, Some(kind)) {
+                        Unsupported => Unsupported,
+                        result => match if result == Valid { yes } else { no } {
+                            Some(n) => {
+                                self.eval_with_kind(*n, value, depth + 1, active, Some(kind))
+                            }
+                            None => Valid,
+                        },
+                    }
+                }
                 Op::Array(required, rules) => {
                     if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
