@@ -586,6 +586,43 @@ RSpec.describe "native VALUE execution" do
     expect(status.success?).to be(true), stderr
   end
 
+  it "checks shared container graphs without expanding repeated descendants" do # rubocop:disable RSpec/ExampleLength
+    shapes = [->(child) { [child, 1, child] }, ->(child) { {"a" => child, "b" => 1, "c" => child} }]
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    shapes.each do |shape|
+      left = right = 0
+      32.times do
+        left = shape.call(left)
+        right = shape.call(right)
+      end
+      [[], Array.new(17) { |i| "padding#{i}" }].each do |padding|
+        values = [*padding, left, right]
+        expect(program.valid?(values)).to be(false)
+        expect(program.diagnostics(values)).not_to be_nil
+      end
+    end
+  end
+
+  it "discards structural results between calls and after compaction" do # rubocop:disable RSpec/ExampleLength
+    leaf = [0.0]
+    shared = [leaf, 1, leaf]
+    other_leaf = [0.0]
+    other = [other_leaf, 1, other_leaf]
+    padding = Array.new(17) { |i| "padding#{i}" }
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    vm = Schemurai.compile({"uniqueItems" => true}, backend: :vm)
+    [0.0, 1.0, Float::NAN, Float::INFINITY, 0.0].each do |number|
+      leaf[0] = number
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      [[], padding].each do |prefix|
+        values = [*prefix, shared, other]
+        expect(native.valid?(values)).to eq(vm.valid?(values))
+        expect(native.validate(values).errors).to eq(vm.validate(values).errors)
+      end
+    end
+  end
+
   it "compares shared containers recursively for non-finite uniqueness" do # rubocop:disable RSpec/ExampleLength
     containers = [Float::NAN, Float::INFINITY, -Float::INFINITY, 0.0, -0.0].flat_map do |number|
       [[number], {"number" => number}, [{"nested" => [number]}]]

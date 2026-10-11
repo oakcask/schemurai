@@ -20,6 +20,7 @@ mod protocol {
 }
 use protocol::*;
 mod scope;
+mod structural;
 mod tracking;
 type Value = usize;
 unsafe extern "C" {
@@ -1881,6 +1882,14 @@ fn immediate_integer(value: Value) -> i64 {
     (value as isize >> 1) as i64
 }
 fn equal(a: Value, b: Value, depth: usize) -> Verdict {
+    equal_cached(a, b, depth, &mut structural::Cache::new(depth))
+}
+fn equal_cached(
+    a: Value,
+    b: Value,
+    depth: usize,
+    memo: &mut structural::Cache<(Value, Value, usize), Verdict>,
+) -> Verdict {
     if depth > MAX_EVALUATION_DEPTH {
         return Unsupported;
     }
@@ -1943,7 +1952,15 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
     if unsafe { sn_same_class(a, b) } == 0 {
         return Invalid;
     }
-    match ka {
+    let container = ka == TYPE_ARRAY || ka == TYPE_OBJECT;
+    let key = (a, b, depth);
+    if container
+        && memo.eligible(depth)
+        && let Some(result) = memo.get(key)
+    {
+        return result;
+    }
+    let result = match ka {
         TYPE_STRING => verdict(unsafe { sn_string_equal(a, b) } != 0),
         TYPE_ARRAY => {
             let len = unsafe { sn_len(a) };
@@ -1951,10 +1968,11 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
                 return Invalid;
             }
             for i in 0..len {
-                let result = equal(
+                let result = equal_cached(
                     unsafe { sn_entry(a, i) },
                     unsafe { sn_entry(b, i) },
                     depth + 1,
+                    memo,
                 );
                 if result != Valid {
                     return result;
@@ -1969,18 +1987,23 @@ fn equal(a: Value, b: Value, depth: usize) -> Verdict {
             let mut context = EqualityContext {
                 other: b,
                 depth: depth + 1,
+                memo,
             };
             decode(unsafe {
                 sn_hash_each(
                     a,
-                    (&mut context as *mut EqualityContext).cast(),
+                    (&mut context as *mut EqualityContext<'_>).cast(),
                     equal_entry,
                 )
             })
         }
         TYPE_UNSUPPORTED => Unsupported,
         _ => Invalid,
+    };
+    if container && memo.eligible(depth) {
+        memo.record(key, result);
     }
+    result
 }
 fn decode(result: i32) -> Verdict {
     match result {
@@ -1989,13 +2012,14 @@ fn decode(result: i32) -> Verdict {
         _ => Unsupported,
     }
 }
-struct EqualityContext {
+struct EqualityContext<'a> {
     other: Value,
     depth: usize,
+    memo: &'a mut structural::Cache<(Value, Value, usize), Verdict>,
 }
 unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let c = unsafe { &*context.cast::<EqualityContext>() };
+        let c = unsafe { &mut *context.cast::<EqualityContext<'_>>() };
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -2003,7 +2027,7 @@ unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value)
         if unsafe { sn_missing(other) } != 0 {
             Invalid as i32
         } else {
-            equal(value, other, c.depth) as i32
+            equal_cached(value, other, c.depth, c.memo) as i32
         }
     }))
     .unwrap_or(Unsupported as i32)
@@ -2083,6 +2107,21 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     mix(result ^ TYPE_STRING as u64)
 }
 fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -> Option<u64> {
+    fingerprint_cached(
+        value,
+        depth,
+        fixnum_flag,
+        big_hint,
+        &mut structural::Cache::new(depth),
+    )
+}
+fn fingerprint_cached(
+    value: Value,
+    depth: usize,
+    fixnum_flag: Value,
+    big_hint: bool,
+    memo: &mut structural::Cache<(Value, usize), Option<u64>>,
+) -> Option<u64> {
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
@@ -2112,7 +2151,15 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
         }
         return Some(mix(n.to_bits() ^ TYPE_NUMBER as u64));
     }
-    match kind {
+    let container = kind == TYPE_ARRAY || kind == TYPE_OBJECT;
+    let key = (value, depth);
+    if container
+        && memo.eligible(depth)
+        && let Some(result) = memo.get(key)
+    {
+        return result;
+    }
+    let result = match kind {
         TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
         TYPE_NULL => Some(mix(TYPE_NULL as u64)),
         TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
@@ -2134,7 +2181,7 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
-                hash = mix(hash ^ fingerprint(item, depth + 1, fixnum_flag, false)?);
+                hash = mix(hash ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo)?);
             }
             Some(hash)
         }
@@ -2144,23 +2191,29 @@ fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -
                 hash: 0,
                 depth: depth + 1,
                 fixnum_flag,
+                memo,
             };
             let status = unsafe {
                 sn_hash_each_key_view(
                     value,
-                    (&mut c as *mut FingerprintContext).cast(),
+                    (&mut c as *mut FingerprintContext<'_>).cast(),
                     fingerprint_entry,
                 )
             };
             (status == VERDICT_VALID).then(|| mix(c.hash ^ len as u64 ^ TYPE_OBJECT as u64))
         }
         _ => None,
+    };
+    if container && memo.eligible(depth) {
+        memo.record(key, result);
     }
+    result
 }
-struct FingerprintContext {
+struct FingerprintContext<'a> {
     hash: u64,
     depth: usize,
     fixnum_flag: Value,
+    memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
 }
 unsafe extern "C" fn fingerprint_entry(
     context: *mut c_void,
@@ -2169,8 +2222,8 @@ unsafe extern "C" fn fingerprint_entry(
     value: Value,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
-        let c = unsafe { &mut *context.cast::<FingerprintContext>() };
-        let Some(hash) = fingerprint(value, c.depth, c.fixnum_flag, false) else {
+        let c = unsafe { &mut *context.cast::<FingerprintContext<'_>>() };
+        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo) else {
             return Unsupported as i32;
         };
         c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));

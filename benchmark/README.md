@@ -191,6 +191,45 @@ retained programs and constructor scratch, rather than isolating native buffers.
 Regression coverage includes new names and resources discovered while compiling
 overrides, missing-binding fallback, ordered diagnostics and GC compaction.
 
+## Shared container equality and fingerprints
+
+`native_shared_containers.rb` keeps shared Ruby input graphs intact and reuses a
+native program for `uniqueItems`. Each level repeats a child nonadjacently, so
+D levels have O(D) containers but previously required O(2^D) equality/hash work.
+Two separately constructed graphs test structural equality rather than object
+identity. Two entries use equality directly; seventeen entries exercise the
+fingerprint index and collision comparison. Measurements use seven batches of
+five native validity calls, with compilation outside timing.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/native_shared_containers.rb
+```
+
+Ruby 4.0.6, Rust 1.99.0, release build, YJIT disabled, median microseconds:
+
+| Input | Before | After |
+| --- | ---: | ---: |
+| Shared array depth 20, 2 entries | 49,493.226 | 2.779 |
+| Shared array depth 20, 17 entries | 72,105.756 | 6.072 |
+| Shared object depth 20, 2 entries | 126,566.698 | 6.255 |
+| Shared object depth 20, 17 entries | 230,391.754 | 12.887 |
+| Ordinary tree width 32 | 3.152 | 3.126 |
+| Ordinary tree width 256 | 24.945 | 24.210 |
+
+One comparison/hash owns a FIFO cache of at most 4,096 completed container
+results. Equality keys retain both ordered identities and depth; hash keys retain
+identity and depth. Caches skip the first four relative levels to avoid
+bookkeeping for shallow ordinary trees. Deeper trees incur extra lookup/storage
+work even without sharing. Reuse preserves full checks of NaN and unsupported
+children, depth limits and exact collision equality. It never persists across
+calls or Ruby callbacks, so mutation and GC compaction need no invalidation.
+The binary chain's reusable working set fits, giving O(D) traversal after a
+constant prefix. Eviction bounds memory without guaranteeing polynomial time
+for every shared graph. Regressions use depth 32, nonadjacent repeated arrays
+and objects, separately built equal graphs, mutation, non-finite numbers and
+compaction. Native `const`/`enum` share the same primitives; this benchmark avoids
+schema processing that can expand a shared schema value before native execution.
+
 ## Wide integer fingerprints
 
 `native_wide_fingerprints.rb` exercises 4,097-bit integers whose low 1,024 bits

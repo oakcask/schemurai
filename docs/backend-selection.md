@@ -567,6 +567,21 @@ checked during the fingerprint walk, avoiding a second preliminary key walk;
 non-string keys still delegate before any Ruby lookup. These views are read
 under the GVL without Ruby allocation or callbacks and are reacquired for every
 validation, including after instance mutation.
+Structural equality and fingerprints also reuse completed container results
+within a single comparison or hash. Ordered value pairs plus evaluation depth
+key equality; value identity plus depth keys fingerprints. The first four
+relative levels skip cache bookkeeping for shallow ordinary trees. Deeper
+shared graphs can reuse whole subtrees, including nonadjacent repeated children,
+without treating identical containers as automatically equal: NaN descendants,
+unsupported children, key validation and depth fallback retain their behavior.
+Each cache retains at most 4,096 results with FIFO eviction and is discarded
+before another comparison/hash or Ruby callback. This bounds auxiliary storage;
+it does not guarantee polynomial traversal for arbitrary graphs whose reusable
+working set exceeds the limit. When the working set fits, the repeated binary
+container chain takes O(D) work after a constant four-level prefix instead of
+O(2^D). Large branching factors still require scanning their actual edges.
+Ordinary deep trees pay table bookkeeping. `benchmark/native_shared_containers.rb`
+covers shared array/hash graphs and an ordinary shallow-tree control.
 Known schema key fingerprints are cached once during compilation. Array/object
 rule payloads live separately from scalar opcodes to keep instruction storage
 compact. No Ruby allocation or callback occurs during these traversals.
