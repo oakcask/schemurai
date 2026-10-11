@@ -68,6 +68,34 @@ RSpec.describe "native VALUE execution" do
       {"records" => [{"x" => 1, "extra" => 2}]}, {"records" => [{}]}, {"x" => 1, "y" => 2}, {}, {"extra" => 1}])
   end
 
+  it "shares static reference successes without suppressing distinct failure paths or later fallback" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    definitions = {"d0" => {"type" => "integer", "minimum" => 1}}
+    1.upto(4) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }
+    schema = dialect.merge("$defs" => definitions, "$ref" => "#/$defs/d4")
+    leaf = {"anyOf" => [true, {"pattern" => "(?=x)"}]}
+    fallback = dialect.merge("$defs" => {"leaf" => leaf}, "allOf" => Array.new(2) { {"$ref" => "#/$defs/leaf"} })
+    vm = Schemurai.compile(fallback, backend: :vm)
+    native = Schemurai.compile(fallback, backend: :native)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(runner.valid?("x")).to be(true)
+    expect(runner.diagnostics("x")).to be_nil
+    expect(native.validate("x").errors).to eq(vm.validate("x").errors)
+    expect_native_policy_results([schema], [1, 0, "bad"])
+  end
+
+  it "limits shared reference memoization to one invocation" do
+    schema = {"$defs" => {"leaf" => {"properties" => {"x" => {"minimum" => 1}}}},
+              "allOf" => Array.new(2) { {"$ref" => "#/$defs/leaf"} }}
+    native = Schemurai.compile(schema, backend: :native)
+    value = {"x" => 1}
+    expect(native.valid?(value)).to be(true)
+    expect(native.validate(value).errors).to be_empty
+    value["x"] = 0
+    expect(native.valid?(value)).to be(false)
+    expect(native.validate(value).errors.size).to eq(2)
+  end
+
   it "exports annotations from diagnostic applicators without retaining failed children" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     leaf = {"properties" => {"id" => {"type" => "integer"}}, "required" => ["id"]}

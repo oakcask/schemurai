@@ -31,6 +31,11 @@ pub(super) struct ScopeFrame<'a> {
     pub parent: Option<&'a ScopeFrame<'a>>,
     pub primary_binding: Option<usize>,
 }
+impl Reference {
+    pub(super) fn static_target(self) -> Option<usize> {
+        matches!(self.kind, ReferenceKind::Static).then_some(self.target)
+    }
+}
 impl Engine {
     pub(super) fn compile_scope(
         &mut self,

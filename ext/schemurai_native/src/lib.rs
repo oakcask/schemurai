@@ -10,6 +10,7 @@ mod diagnostics;
 mod enumeration;
 mod evaluation;
 mod format;
+mod memo;
 mod number;
 mod pattern;
 // Some shared constants are consumed only by C or Ruby.
@@ -528,6 +529,7 @@ pub struct Engine {
     pattern_cache_count: usize,
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
+    memoizable: Vec<bool>,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), Option<usize>>,
@@ -1051,6 +1053,7 @@ impl Engine {
 struct Execution<'a> {
     engine: &'a Engine,
     caches: &'a pattern::Caches,
+    memo: memo::Memo,
 }
 impl std::ops::Deref for Execution<'_> {
     type Target = Engine;
@@ -1065,6 +1068,25 @@ impl Execution<'_> {
     // Same-location applicators borrow an immutable instance under the GVL.
     // A full key guard can be reused; descendants at other locations recheck.
     fn eval_with_kind(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        known_kind: Option<i32>,
+    ) -> Verdict {
+        if !self.memoizable[node] {
+            return self.eval_uncached(node, value, depth, active, known_kind);
+        }
+        let key = (node, value, depth);
+        if let Some(status) = self.memo.verdict(key) {
+            return status;
+        }
+        let status = self.eval_uncached(node, value, depth, active, known_kind);
+        self.memo.record_verdict(key, status);
+        status
+    }
+    fn eval_uncached(
         &self,
         node: usize,
         value: Value,
@@ -2444,6 +2466,7 @@ pub unsafe extern "C" fn sn_compile(
             e.root = e.compile(program)?;
         }
         e.bind_dynamic_anchors()?;
+        e.compile_memoization();
         Ok::<_, Value>(())
     })) {
         Ok(Ok(())) => VERDICT_VALID,
@@ -2496,7 +2519,12 @@ pub unsafe extern "C" fn sn_valid(
         let e = unsafe { &*engine };
         let local = pattern::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
-        Execution { engine: e, caches }.eval(root, value, 0, scope::Context::default()) as i32
+        Execution {
+            engine: e,
+            caches,
+            memo: memo::Memo::default(),
+        }
+        .eval(root, value, 0, scope::Context::default()) as i32
     }))
     .unwrap_or(STATUS_PANIC)
 }

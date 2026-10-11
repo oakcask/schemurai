@@ -122,6 +122,28 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Result<Tracked, Verdict> {
+        // A diagnostic success is established by complete traversal, never by
+        // a short-circuit validity result. Annotation-producing calls still run.
+        let reusable = self.memoizable[node] && !ANNOTATIONS && !self.tracks[node];
+        let key = (node, value, depth);
+        if reusable && self.memo.diagnostic_success(key) {
+            return Ok(Tracked::new(Valid));
+        }
+        let result = self.collect_uncached::<ANNOTATIONS>(report, node, value, depth, active, kind);
+        if reusable && matches!(&result, Ok(coverage) if coverage.status == Valid) {
+            self.memo.record_diagnostic_success(key);
+        }
+        result
+    }
+    fn collect_uncached<const ANNOTATIONS: bool>(
+        &self,
+        report: &mut Report,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind: i32,
+    ) -> Result<Tracked, Verdict> {
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
@@ -910,7 +932,11 @@ pub unsafe extern "C" fn sn_diagnose(
         let engine = unsafe { &*engine };
         let local = pattern::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
-        let execution = Execution { engine, caches };
+        let execution = Execution {
+            engine,
+            caches,
+            memo: memo::Memo::default(),
+        };
         let mut report = Report::default();
         execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())?;
         Ok::<_, Verdict>(Box::into_raw(Box::new(report)))

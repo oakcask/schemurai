@@ -39,3 +39,10 @@ end
   ]}
   measure("global-property-ids padding=#{padding} records=1000", schema, {"records" => Array.new(1000) { {"x" => 1} }}, calls: 10)
 end
+[4, 8, 12, 16].each do |depth|
+  definitions = {"d0" => {"type" => "integer", "minimum" => 1}}
+  1.upto(depth) do |i|
+    definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }}
+  end
+  measure("shared-reference depth=#{depth}", {"$defs" => definitions, "$ref" => "#/$defs/d#{depth}"}, 1, calls: 5)
+end
