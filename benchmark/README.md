@@ -3,6 +3,11 @@
 The benchmark suite measures Schemurai performance for regression detection and
 performance development. Each runner verifies correctness before measuring.
 
+The `benchmark / pull request` and `benchmark / native backends` workflows run
+only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
+afterward do not start another run; remove and re-add the label to benchmark
+the updated PR. Other labels do not run benchmarks.
+
 ## VM evaluation tracking
 
 `vm_evaluation.rb` measures `valid?` and detailed `validate` on large objects
@@ -291,8 +296,7 @@ with YJIT on Ubuntu 24.04 x64 and arm64. Workflow Summary contains each
 case's VM/native timings, speedup and native Ruby allocation count, along
 with the number reaching the 10× target. The full JSON is retained as an
 artifact per runner. Correctness and native-coverage checks fail the job;
-timing differences on hosted runners are informational. The workflow also
-supports manual dispatch.
+timing differences on hosted runners are informational.
 
 The extension reads low-word collision metadata through public integer packing.
 Exact comparison and wider retries still determine uniqueness; Ruby objects and

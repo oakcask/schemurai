@@ -1,24 +1,8 @@
 name: benchmark / native backends
 
 on:
-  push:
-    branches: [main]
-    paths: &benchmark_paths
-      - .github/workflows/benchmark--native-backends.yaml
-      - .gitmodules
-      - .ruby-version
-      - Gemfile
-      - Gemfile.lock
-      - rust-toolchain.toml
-      - schemurai.gemspec
-      - benchmark/native.rb
-      - script/native-benchmark-summary
-      - spec/native_benchmark_summary_spec.rb
-      - lib/**/*
-      - ext/**/*
   pull_request:
-    paths: *benchmark_paths
-  workflow_dispatch:
+    types: [labeled]
 
 permissions:
   contents: read
@@ -28,6 +12,7 @@ env:
 
 jobs:
   compare:
+    if: github.event.label.name == 'workflow:enable-benchmark'
     strategy:
       fail-fast: false
       matrix:

@@ -2,18 +2,7 @@ name: benchmark / pull request
 
 on:
   pull_request:
-    paths:
-      - .github/workflows/benchmark--pull-request.yaml
-      - .gitmodules
-      - .ruby-version
-      - Gemfile
-      - Gemfile.lock
-      - schemurai.gemspec
-      - benchmark/**/*
-      - lib/**/*
-      - references/JSON-Schema-Test-Suite
-      - script/benchmark-compare
-      - spec/schemurai_benchmark/comparison_spec.rb
+    types: [labeled]
 
 permissions:
   contents: read
@@ -25,6 +14,7 @@ env:
 
 jobs:
   compare:
+    if: github.event.label.name == 'workflow:enable-benchmark'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
