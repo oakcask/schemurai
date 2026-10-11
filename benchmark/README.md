@@ -8,6 +8,41 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Shared native reference annotations
+
+`native_algorithms.rb` includes chains with two references to the preceding
+definition at every level. The object leaf evaluates property `x`, the array
+leaf evaluates index zero, and the root rejects unevaluated locations. Before
+annotation memoization, successful traversal expanded to O(2^D) evaluations
+for depth D even though the compiled graph has O(D) nodes. With invocation-local
+coverage reuse, these equal-depth chains take O(D) evaluations plus annotation
+copying and merging. The runner checks native coverage and exact VM parity
+before timing, with compilation excluded.
+
+```sh
+FILTER='shared-reference annotations=' ruby --yjit -Ilib -Iext/schemurai_native benchmark/native_algorithms.rb
+```
+
+Local medians on Ruby 4.0.6/YJIT, x86_64-linux, compared with `2439118`:
+
+| Kind / depth | Before validity (µs) | After validity (µs) | Before diagnostics (µs) | After diagnostics (µs) |
+| --- | ---: | ---: | ---: | ---: |
+| Object / 4 | 1.349 | 0.895 | 4.422 | 1.847 |
+| Object / 8 | 20.410 | 1.622 | 70.842 | 3.194 |
+| Object / 12 | 363.548 | 2.215 | 1,148.681 | 4.730 |
+| Object / 16 | 6,168.412 | 3.187 | 18,547.277 | 6.617 |
+| Array / 4 | 1.351 | 0.820 | 4.825 | 2.083 |
+| Array / 8 | 21.344 | 1.594 | 76.069 | 3.176 |
+| Array / 12 | 389.558 | 2.372 | 1,260.346 | 5.012 |
+| Array / 16 | 6,485.829 | 3.646 | 20,249.494 | 6.859 |
+
+Each memo cache has at most 4,096 results; stored annotation allocations share
+a 65,536-slot budget. Cache saturation keeps the ordinary traversal. Dynamic
+or cyclic reachable references remain uncached. Failing diagnostics retain
+distinct schema-path errors and can require exponential output size. These
+measurements establish improvement for the successful static-reference workload,
+not a complexity bound for arbitrary schemas or an all-suite speedup.
+
 ## VM evaluation tracking
 
 `vm_evaluation.rb` measures `valid?` and detailed `validate` on large objects

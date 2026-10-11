@@ -26,7 +26,7 @@ pub(super) type KeySet = HashSet<JsonKey, BuildHasherDefault<BucketHasher>>;
 
 // Store only nonempty words. The common single-word case needs no allocation,
 // even when its property IDs are near the end of a large compiled engine.
-#[derive(Default)]
+#[derive(Clone, Default)]
 enum PropertyWords {
     #[default]
     Empty,
@@ -34,7 +34,7 @@ enum PropertyWords {
     Dense(usize, Vec<u64>),
     Many(HashMap<usize, u64>),
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PropertyBits {
     words: PropertyWords,
     count: usize,
@@ -134,6 +134,7 @@ impl PropertyBits {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Tracked {
     pub status: Verdict,
     properties: KeySet,
@@ -141,6 +142,16 @@ pub(super) struct Tracked {
     items: Vec<u64>,
 }
 impl Tracked {
+    // Bound retained annotation slots independently of the number of results.
+    pub(super) fn memo_slots(&self) -> usize {
+        self.properties.capacity()
+            + self.items.capacity()
+            + match &self.known_properties.words {
+                PropertyWords::Empty | PropertyWords::Single(..) => 0,
+                PropertyWords::Dense(_, words) => words.capacity(),
+                PropertyWords::Many(words) => words.capacity(),
+            }
+    }
     pub(super) fn new(status: Verdict) -> Self {
         Self {
             status,
@@ -253,6 +264,25 @@ impl Execution<'_> {
     // No Ruby callback can mutate it, so its guarded kind can be reused while
     // each branch still enters its own resource scope and checks depth.
     pub(super) fn eval_tracked_kind(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind: i32,
+    ) -> Tracked {
+        if !self.memoizable[node] {
+            return self.eval_tracked_uncached(node, value, depth, active, kind);
+        }
+        let key = (node, value, depth);
+        if let Some(result) = self.memo.tracked(key) {
+            return result;
+        }
+        let result = self.eval_tracked_uncached(node, value, depth, active, kind);
+        self.memo.record_tracked(key, &result);
+        result
+    }
+    fn eval_tracked_uncached(
         &self,
         node: usize,
         value: Value,
