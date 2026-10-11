@@ -78,6 +78,96 @@ Compilation callbacks use `rb_protect` in C; Ruby exceptions return through
 Rust as ordinary errors and are raised after the Rust stack has unwound.
 Rust panics are caught at evaluation/compilation entry points.
 
+### Evaluation design policy
+
+Native evaluation should share compiled rule metadata, predicates, lookup
+strategies and container scans between `valid?` and `validate`. Execution policy
+controls early termination, evaluated-location collection and error collection.
+An optimization to a shared algorithm should therefore benefit every applicable
+execution policy without requiring a second implementation of the same rule.
+Branch scans and `contains` match counting now use shared helpers in
+`ext/schemurai_native/src/evaluation.rs`. Ordinary and tracked validity use a
+shared declared-property scan, and all three modes share property, pattern and
+additional-property routing. The `eval`, `eval_tracked_kind` and `collect`
+traversals retain their policy-specific control flow and scalar specializations.
+
+The responsibilities are:
+
+| Responsibility | Shared behavior | Policy-specific behavior |
+| --- | --- | --- |
+| Rule checks | Type guards, JSON equality, numeric failure bits, string assertions and compiled operands | Convert failures into a verdict or ordered errors |
+| Object lookup | Key guards, property lookup, pattern matching and selection of additional properties | Record evaluated keys and construct error paths |
+| Array scans | Item selection, borrowed storage and scalar scan specializations | Stop on a conclusive verdict or visit remaining errors; record evaluated indices |
+| Applicators and references | Branch evaluation, resource scope, cycle guards and annotation merge rules | Decide which branches must be visited and which errors are exposed |
+
+Validity may stop once its answer is conclusive. Detailed validation must visit
+all locations needed for complete ordered errors. Either mode must visit all
+successful branches and matching locations whose annotations are needed by
+`unevaluatedProperties` or `unevaluatedItems`; annotation demand is separate
+from the choice of public method. For example, an `anyOf` success can terminate
+evaluation when further branch annotations and compatibility checks are
+unnecessary. A failing `oneOf` diagnostic may still need the exact number of
+matching branches, and a failing `contains` diagnostic may need the exact match
+count. Error details constrain
+termination as well as error locations.
+
+Where diagnostics need both errors and evaluated locations, the child traversal
+should return its verdict and annotation result while collecting errors. The
+caller should consume that result rather than evaluate the same subtree again
+solely to recover annotations. This is implemented for `allOf`, conditional
+branches, references and tracked schema dependencies. Preserve the distinction
+between locally attempted locations retained by diagnostics and successful
+annotations exported by an applicator. Error count alone is not a substitute
+for the evaluation result.
+
+Sharing must preserve the existing VM compatibility behavior: complete error
+fields and order, numeric equality, key encodings and identity-Hash handling,
+dynamic scope, recursion/depth limits, unsupported results and named exceptions.
+Changing termination or lookup order requires checking these behaviors, including
+an unsupported or exceptional value after an earlier conclusive branch.
+Borrowed Ruby storage remains protected by the GVL and must not span a Ruby
+allocation or callback. Do not cache instance results across public calls;
+instances and registry resolution can change between calls.
+
+Policy specialization should keep unused annotation and reporting work out of
+the validity path. Shared code may use generics, callbacks or focused helpers;
+a single interpreter loop or a runtime policy object is not required. Retain a
+specialized path only when its workload or output requirements justify it, and
+have it reuse the shared predicates and compiled metadata.
+
+Review duplication by mapping each keyword across ordinary validity, tracked
+validity and diagnostics. Compare traversal direction, termination conditions,
+subtree evaluation count and specialization selection, even when the source
+text differs. Extend the shared branch/property scans and combined
+diagnostic/annotation results incrementally to other container specializations.
+JSON equality and uniqueness also provide examples of shared checks.
+
+Declared-property scans adapt to sparse objects: when schema properties exceed
+four times the input size and there are more than eight declarations, discover
+matching property indices through the same compiled lookup table used by
+diagnostics. Sort and deduplicate candidates before evaluating them so validity
+retains schema order. Precompiled required-property indices preserve the position
+of missing-required failures, and final lookups use schema key handles to retain
+identity-Hash semantics. Dense objects keep direct schema-order lookups.
+The sparse scan takes O(N log N + R) expected work and O(N) temporary native
+storage for N input keys and R required declared properties, excluding child
+evaluation and key-byte processing.
+
+Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
+exceptions and exact match counts. `contains` scans also retain complete
+counting and unsupported-value detection. Shared scans make these termination
+requirements explicit rather than assuming both public methods can stop at the
+same point.
+
+Each runtime refactoring must check native coverage without VM fallback and
+compare both validity and full ordered errors with the VM. Exercise annotation
+demand, invalid and unsupported cases, mutable instances and GC compaction as
+applicable. Measure `valid?` and `validate` separately on valid and invalid inputs,
+with compilation excluded, and include sparse objects, large branch sets and
+nested applicators when those algorithms change. Report Ruby allocations and
+native buffer costs where relevant; zero Ruby allocations do not imply zero
+native allocation overhead.
+
 Native instructions currently handle primitive types, unions, basic string
 lengths, numeric limits and decimal multiples, built-in formats, combiners and conditionals, tuple/list items,
 contains, properties, required names, property names, additional properties,

@@ -17,9 +17,13 @@ pub struct Report {
     errors: Vec<Error>,
     instance_path: String,
     schema_path: String,
+    // Explicit failure signal for the current evaluation, independent of the
+    // number or rendering of diagnostic records. Child evaluations isolate it.
+    failed: bool,
 }
 impl Report {
     fn add(&mut self, keyword: &'static str, source: (i32, Value), instance: Value, detail: usize) {
+        self.failed = true;
         let schema_path = if keyword == "falseSchema" {
             self.schema_path.clone()
         } else {
@@ -35,12 +39,12 @@ impl Report {
             detail,
         });
     }
-    fn scoped(
+    fn scoped<T>(
         &mut self,
         segment: &str,
         instance: Option<usize>,
-        visit: impl FnOnce(&mut Self) -> Result<(), Verdict>,
-    ) -> Result<(), Verdict> {
+        visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
+    ) -> Result<T, Verdict> {
         use std::fmt::Write;
         let schema_len = self.schema_path.len();
         let instance_len = self.instance_path.len();
@@ -54,13 +58,13 @@ impl Report {
         self.instance_path.truncate(instance_len);
         result
     }
-    fn property(
+    fn property<T>(
         &mut self,
         segment: &str,
         key: Value,
         schema_key: Option<Value>,
-        visit: impl FnOnce(&mut Self) -> Result<(), Verdict>,
-    ) -> Result<(), Verdict> {
+        visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
+    ) -> Result<T, Verdict> {
         let name = pointer_name(key)?;
         let segment = if let Some(key) = schema_key {
             format!("{segment}/{}", pointer_name(key)?)
@@ -92,14 +96,14 @@ fn pointer_name(value: Value) -> Result<String, Verdict> {
 }
 
 impl Engine {
-    fn collect(
+    fn collect<const ANNOTATIONS: bool>(
         &self,
         report: &mut Report,
         node: usize,
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-    ) -> Result<(), Verdict> {
+    ) -> Result<Tracked, Verdict> {
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
@@ -116,7 +120,8 @@ impl Engine {
                 .or(self.metadata[node].primary_binding),
         };
         let active = self.enter_scope(node, active, &frame);
-        let tracked = self.tracks[node];
+        let tracked = ANNOTATIONS || self.tracks[node];
+        let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
         for (op, &source) in self.nodes[node].iter().zip(&self.error_operands[node]) {
             match op {
@@ -239,7 +244,7 @@ impl Engine {
                             coverage.item(index);
                         }
                         report.scoped(&format!("prefixItems/{index}"), Some(index), |r| {
-                            self.collect(
+                            self.collect::<false>(
                                 r,
                                 child,
                                 unsafe { sn_entry(value, index) },
@@ -254,7 +259,7 @@ impl Engine {
                                 coverage.item(index);
                             }
                             report.scoped(&format!("items/{index}"), Some(index), |r| {
-                                self.collect(
+                                self.collect::<false>(
                                     r,
                                     child,
                                     unsafe { sn_entry(value, index) },
@@ -269,7 +274,7 @@ impl Engine {
                                     coverage.item(index);
                                 }
                                 report.scoped("additionalItems", Some(index), |r| {
-                                    self.collect(
+                                    self.collect::<false>(
                                         r,
                                         child,
                                         unsafe { sn_entry(value, index) },
@@ -331,9 +336,9 @@ impl Engine {
                                 |index, item| match report.scoped(
                                     "items",
                                     Some(start + index),
-                                    |r| self.collect(r, child, item, depth + 1, active),
+                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
                                 ) {
-                                    Ok(()) => Valid,
+                                    Ok(_) => Valid,
                                     Err(status) => status,
                                 },
                             );
@@ -353,9 +358,9 @@ impl Engine {
                                 |index, item| match report.scoped(
                                     "items",
                                     Some(start + index),
-                                    |r| self.collect(r, child, item, depth + 1, active),
+                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
                                 ) {
-                                    Ok(()) => Valid,
+                                    Ok(_) => Valid,
                                     Err(status) => status,
                                 },
                             );
@@ -375,9 +380,9 @@ impl Engine {
                                 |index, item| match report.scoped(
                                     "items",
                                     Some(start + index),
-                                    |r| self.collect(r, child, item, depth + 1, active),
+                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
                                 ) {
-                                    Ok(()) => Valid,
+                                    Ok(_) => Valid,
                                     Err(status) => status,
                                 },
                             );
@@ -417,26 +422,34 @@ impl Engine {
                                     continue;
                                 }
                                 report.scoped("items", Some(index), |r| {
-                                    self.collect(r, child, item, depth + 1, active)
+                                    self.collect::<false>(r, child, item, depth + 1, active)
                                 })?;
                             }
                         }
                     }
                     if let Some(child) = rules.contains {
-                        let mut matches = 0;
                         let values = if len == 0 {
                             &[]
                         } else {
                             unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
                         };
-                        for (index, &item) in values.iter().enumerate() {
-                            if !self.needs_diagnostics(child, item, depth + 1, active)? {
-                                matches += 1;
+                        let matches = evaluation::scan_contains(
+                            len,
+                            |index| match self.needs_diagnostics(
+                                child,
+                                values[index],
+                                depth + 1,
+                                active,
+                            ) {
+                                Ok(needs) => verdict(!needs),
+                                Err(status) => status,
+                            },
+                            |index| {
                                 if tracked {
                                     coverage.item(index);
                                 }
-                            }
-                        }
+                            },
+                        )?;
                         if bounds(matches, Some(rules.min_contains), rules.max_contains) == Invalid
                         {
                             report.add("contains", source, value, matches);
@@ -451,7 +464,7 @@ impl Engine {
                                 continue;
                             }
                             report.scoped("unevaluatedItems", Some(index), |r| {
-                                self.collect(
+                                self.collect::<false>(
                                     r,
                                     child,
                                     unsafe { sn_entry(value, index) },
@@ -540,27 +553,42 @@ impl Engine {
                                 if missing(value, *name, self.undefined) {
                                     continue;
                                 }
-                                if self.needs_diagnostics(*child, value, depth + 1, active)? {
-                                    report.scoped(
+                                if tracked {
+                                    let result = report.scoped(
                                         &format!("{keyword}/{}", pointer_name(*name)?),
                                         None,
-                                        |r| self.collect(r, *child, value, depth + 1, active),
+                                        |r| {
+                                            self.collect::<true>(
+                                                r,
+                                                *child,
+                                                value,
+                                                depth + 1,
+                                                active,
+                                            )
+                                        },
                                     )?;
-                                }
-                                if tracked {
-                                    let result = self.eval_tracked_kind(
-                                        *child,
-                                        value,
-                                        depth + 1,
-                                        active,
-                                        kind,
-                                    );
-                                    if result.status == Unsupported {
-                                        return Err(Unsupported);
-                                    }
                                     if result.status == Valid {
                                         coverage.merge(result);
                                     }
+                                } else if self.needs_diagnostics(
+                                    *child,
+                                    value,
+                                    depth + 1,
+                                    active,
+                                )? {
+                                    report.scoped(
+                                        &format!("{keyword}/{}", pointer_name(*name)?),
+                                        None,
+                                        |r| {
+                                            self.collect::<false>(
+                                                r,
+                                                *child,
+                                                value,
+                                                depth + 1,
+                                                active,
+                                            )
+                                        },
+                                    )?;
                                 }
                             }
                         }
@@ -599,17 +627,15 @@ impl Engine {
                 Op::All(nodes) => {
                     let mut coverage = Tracked::new(Valid);
                     for (index, &child) in nodes.iter().enumerate() {
-                        report.scoped(&format!("allOf/{index}"), None, |r| {
-                            self.collect(r, child, value, depth + 1, active)
+                        let result = report.scoped(&format!("allOf/{index}"), None, |r| {
+                            if tracked {
+                                self.collect::<true>(r, child, value, depth + 1, active)
+                            } else {
+                                self.collect::<false>(r, child, value, depth + 1, active)
+                            }
                         })?;
                         if tracked {
-                            coverage.merge_diagnostics(self.eval_tracked_kind(
-                                child,
-                                value,
-                                depth + 1,
-                                active,
-                                kind,
-                            ))?;
+                            coverage.merge_diagnostics(result)?;
                         }
                     }
                     if tracked {
@@ -617,40 +643,34 @@ impl Engine {
                     }
                 }
                 Op::Any(nodes) | Op::One(nodes) => {
-                    let mut matches = 0;
-                    let mut coverage = Tracked::new(Valid);
-                    for &(child, multiplicity) in nodes {
-                        let branch = if tracked {
-                            self.eval_tracked_kind(child, value, depth + 1, active, kind)
-                        } else {
-                            Tracked::new(self.eval(child, value, depth + 1, active))
-                        };
-                        match branch.status {
-                            Unsupported => return Err(Unsupported),
-                            Valid => {
-                                matches += multiplicity;
-                                if tracked {
-                                    coverage.merge(branch);
-                                }
-                            }
-                            Invalid => {}
+                    let branch_kind = if matches!(op, Op::Any(_)) {
+                        evaluation::BranchKind::Any
+                    } else {
+                        evaluation::BranchKind::One
+                    };
+                    // Complete scanning preserves exact oneOf counts and VM
+                    // exceptions from branches after an anyOf success.
+                    let result = if tracked {
+                        evaluation::scan_branches(
+                            nodes,
+                            evaluation::BranchPolicy::Complete,
+                            |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
+                        )?
+                    } else {
+                        let result = evaluation::scan_branches(
+                            nodes,
+                            evaluation::BranchPolicy::Complete,
+                            |child| self.eval(child, value, depth + 1, active),
+                        )?;
+                        evaluation::BranchMatches {
+                            matches: result.matches,
+                            coverage: Tracked::new(Valid),
                         }
-                    }
-                    if (matches!(op, Op::Any(_)) && matches == 0)
-                        || (matches!(op, Op::One(_)) && matches != 1)
-                    {
-                        report.add(
-                            if matches!(op, Op::Any(_)) {
-                                "anyOf"
-                            } else {
-                                "oneOf"
-                            },
-                            source,
-                            value,
-                            matches,
-                        );
+                    };
+                    if !branch_kind.accepts(result.matches) {
+                        report.add(branch_kind.keyword(), source, value, result.matches);
                     } else if tracked {
-                        prior.merge_diagnostics(coverage)?;
+                        prior.merge_diagnostics(result.coverage)?;
                     }
                 }
                 Op::Not(child) => match self.eval(*child, value, depth + 1, active) {
@@ -676,17 +696,15 @@ impl Engine {
                         Invalid => (no, "else"),
                     };
                     if let Some(child) = child {
-                        report.scoped(segment, None, |r| {
-                            self.collect(r, *child, value, depth + 1, active)
+                        let result = report.scoped(segment, None, |r| {
+                            if tracked {
+                                self.collect::<true>(r, *child, value, depth + 1, active)
+                            } else {
+                                self.collect::<false>(r, *child, value, depth + 1, active)
+                            }
                         })?;
                         if tracked {
-                            coverage.merge_diagnostics(self.eval_tracked_kind(
-                                *child,
-                                value,
-                                depth + 1,
-                                active,
-                                kind,
-                            ))?;
+                            coverage.merge_diagnostics(result)?;
                         }
                     }
                     if tracked {
@@ -707,34 +725,29 @@ impl Engine {
                         OP_DYNAMIC_REF => "$dynamicRef",
                         _ => "$ref",
                     };
-                    report.scoped(keyword, None, |r| {
-                        self.collect(
-                            r,
-                            self.reference_target(*target, active),
-                            value,
-                            depth + 1,
-                            scope::Context {
-                                active: Some(&frame),
-                                ..active
-                            },
-                        )
+                    let target = self.reference_target(*target, active);
+                    let active = scope::Context {
+                        active: Some(&frame),
+                        ..active
+                    };
+                    let result = report.scoped(keyword, None, |r| {
+                        if tracked {
+                            self.collect::<true>(r, target, value, depth + 1, active)
+                        } else {
+                            self.collect::<false>(r, target, value, depth + 1, active)
+                        }
                     })?;
                     if tracked {
-                        prior.merge_diagnostics(self.eval_tracked_kind(
-                            self.reference_target(*target, active),
-                            value,
-                            depth + 1,
-                            scope::Context {
-                                active: Some(&frame),
-                                ..active
-                            },
-                            kind,
-                        ))?;
+                        prior.merge_diagnostics(result)?;
                     }
                 }
             }
         }
-        Ok(())
+        let failed = report.failed;
+        report.failed |= parent_failed;
+        // Diagnostic coverage keeps local attempted locations for subsequent
+        // unevaluated checks; only a successful evaluation exports annotations.
+        Ok(if failed { Tracked::new(Invalid) } else { prior })
     }
 
     fn needs_diagnostics(
@@ -790,7 +803,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
             if c.engine.needs_diagnostics(child, item, c.depth, c.active)? {
                 report.property(segment, key, schema_key, |r| {
-                    c.engine.collect(r, child, item, c.depth, c.active)
+                    c.engine.collect::<false>(r, child, item, c.depth, c.active)
                 })?;
             }
             Ok::<_, Verdict>(())
@@ -818,28 +831,12 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
                 c.coverage.property(c.engine, key);
                 return Ok(());
             }
-            let mut matched = false;
-            if !c.rules.properties.is_empty()
-                && let Some(&(name, child)) =
-                    c.rules.property_targets.get(&tracking::JsonKey::new(key))
-            {
-                matched = true;
-                visit(c.report, child, value, "properties", Some(name))?;
-            }
-            for ((pattern, child), &name) in c.rules.patterns.iter().zip(&c.rules.pattern_names) {
-                match pattern.eval(key) {
-                    Unsupported => return Err(Unsupported),
-                    Valid => {
-                        matched = true;
-                        visit(c.report, *child, value, "patternProperties", Some(name))?;
-                    }
-                    Invalid => {}
-                }
-            }
-            if !matched && let Some(child) = c.rules.additional {
-                visit(c.report, child, value, "additionalProperties", None)?;
-            }
-            if c.tracked && (matched || c.rules.additional.is_some()) {
+            let evaluated =
+                c.rules
+                    .visit_value_rules::<true>(key, None, |segment, name, child| {
+                        visit(c.report, child, value, segment, name)
+                    })?;
+            if c.tracked && evaluated {
                 c.coverage.property(c.engine, key);
             }
             Ok(())
@@ -876,7 +873,7 @@ pub unsafe extern "C" fn sn_diagnose(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let engine = unsafe { &*engine };
         let mut report = Report::default();
-        engine.collect(
+        engine.collect::<false>(
             &mut report,
             engine.root,
             instance,

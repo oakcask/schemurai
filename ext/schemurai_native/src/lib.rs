@@ -7,6 +7,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 mod content;
 mod diagnostics;
+mod evaluation;
 mod format;
 mod number;
 mod pattern;
@@ -248,6 +249,12 @@ enum DiagnosticDependency {
     Required(Value, Vec<Value>, &'static str),
     Schema(Value, usize, &'static str),
 }
+#[derive(Clone, Copy, Debug)]
+struct PropertyTarget {
+    name: Value,
+    child: usize,
+    index: usize,
+}
 #[derive(Debug)]
 struct Object {
     record: Option<RecordObject>,
@@ -256,10 +263,11 @@ struct Object {
     required: Vec<Value>,
     required_order: Vec<Value>,
     properties: Vec<(Value, usize)>,
-    property_targets: HashMap<tracking::JsonKey, (Value, usize), BuildHasherDefault<BucketHasher>>,
+    property_targets: HashMap<tracking::JsonKey, PropertyTarget, BuildHasherDefault<BucketHasher>>,
     patterns: Vec<(pattern::Pattern, usize)>,
     pattern_names: Vec<Value>,
     required_properties: Vec<bool>,
+    required_property_indices: Vec<usize>,
     property_keys: tracking::KeySet,
     property_indices: Vec<usize>,
     additional: Option<usize>,
@@ -331,6 +339,122 @@ impl RecordShortIndex {
     }
 }
 impl Object {
+    fn visit_properties(
+        &self,
+        value: Value,
+        len: usize,
+        undefined: Value,
+        mut visit: impl FnMut(usize, usize, Value) -> Verdict,
+    ) -> Result<usize, Verdict> {
+        let mut found = 0;
+        if self.properties.len() > len.saturating_mul(4).max(8)
+            && self.property_targets.len() == self.properties.len()
+        {
+            // Discover only present schema fields, then retain schema order for
+            // validity, including required failures and unsupported children.
+            let mut candidates = PropertyCandidates {
+                rules: self,
+                indices: Vec::with_capacity(len.min(self.properties.len())),
+            };
+            let status = decode(unsafe {
+                sn_hash_each(
+                    value,
+                    (&mut candidates as *mut PropertyCandidates).cast(),
+                    property_candidate,
+                )
+            });
+            if status != Valid {
+                return Err(status);
+            }
+            candidates.indices.sort_unstable();
+            candidates.indices.dedup();
+            let missing_required = self
+                .required_property_indices
+                .iter()
+                .copied()
+                .find(|&index| missing(value, self.properties[index].0, undefined));
+            for index in candidates.indices {
+                if missing_required.is_some_and(|missing| missing <= index) {
+                    return Err(Invalid);
+                }
+                let (key, child) = self.properties[index];
+                // Use the schema handle for the final lookup to retain identity
+                // Hash semantics, even when an equal input key found the index.
+                let item = unsafe { sn_lookup(value, key) };
+                if item == undefined {
+                    continue;
+                }
+                found += 1;
+                match visit(index, child, item) {
+                    Valid => {}
+                    status => return Err(status),
+                }
+            }
+            if missing_required.is_some() {
+                return Err(Invalid);
+            }
+        } else {
+            for (index, &(key, child)) in self.properties.iter().enumerate() {
+                let item = unsafe { sn_lookup(value, key) };
+                if item == undefined {
+                    if self.required_properties[index] {
+                        return Err(Invalid);
+                    }
+                    continue;
+                }
+                found += 1;
+                match visit(index, child, item) {
+                    Valid => {}
+                    status => return Err(status),
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    // All execution policies use the same property/pattern/additional routing.
+    // Schema-order validity scans have already visited declared properties;
+    // input-order diagnostic scans visit them here as well.
+    fn visit_value_rules<const PROPERTIES: bool>(
+        &self,
+        key: Value,
+        location: Option<tracking::JsonKey>,
+        mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
+    ) -> Result<bool, Verdict> {
+        // Tracked scans already fingerprinted this key for location lookup.
+        // Reuse that result, and skip hashing for pattern-only object rules.
+        let mut matched = if self.properties.is_empty() {
+            false
+        } else if PROPERTIES {
+            if let Some(target) = self
+                .property_targets
+                .get(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
+            {
+                visit("properties", Some(target.name), target.child)?;
+                true
+            } else {
+                false
+            }
+        } else {
+            self.property_keys
+                .contains(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
+        };
+        for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
+            match pattern.eval(key) {
+                Unsupported => return Err(Unsupported),
+                Invalid => {}
+                Valid => {
+                    matched = true;
+                    visit("patternProperties", Some(name), *child)?;
+                }
+            }
+        }
+        if !matched && let Some(child) = self.additional {
+            visit("additionalProperties", None, child)?;
+        }
+        Ok(matched || self.additional.is_some())
+    }
+
     fn with_record(mut self) -> Self {
         if self.required_order.len() > 64
             || !self.patterns.is_empty()
@@ -718,7 +842,13 @@ impl Engine {
                         }
                         let property_targets = properties
                             .iter()
-                            .map(|&(key, child)| (tracking::JsonKey::new(key), (key, child)))
+                            .enumerate()
+                            .map(|(index, &(name, child))| {
+                                (
+                                    tracking::JsonKey::new(name),
+                                    PropertyTarget { name, child, index },
+                                )
+                            })
                             .collect();
                         let property_locations: Vec<_> = properties
                             .iter()
@@ -732,13 +862,18 @@ impl Engine {
                                 *self.property_ids.entry(key).or_insert(next)
                             })
                             .collect();
-                        let required_properties = properties
+                        let required_properties: Vec<bool> = properties
                             .iter()
                             .map(|&(key, _)| {
                                 required
                                     .iter()
                                     .any(|&name| unsafe { sn_string_equal(key, name) } != 0)
                             })
+                            .collect();
+                        let required_property_indices = required_properties
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, &required)| required.then_some(index))
                             .collect();
                         let required = required
                             .into_iter()
@@ -812,6 +947,7 @@ impl Engine {
                             patterns,
                             pattern_names,
                             required_properties,
+                            required_property_indices,
                             property_keys,
                             property_indices,
                             additional: self.child(operand, b"additional\0")?,
@@ -956,32 +1092,18 @@ impl Engine {
                     outcome
                 }
                 Op::Any(nodes) | Op::One(nodes) => {
-                    let mut matches = 0;
-                    let mut unknown = false;
-                    for &(n, multiplicity) in nodes {
-                        match self.eval(n, value, depth + 1, active) {
-                            Valid => matches += multiplicity,
-                            Unsupported => {
-                                unknown = true;
-                                break;
-                            }
-                            Invalid => {}
-                        }
-                        if matches > 0 && matches!(op, Op::Any(_)) {
-                            break;
-                        }
-                        if matches > 1 && matches!(op, Op::One(_)) {
-                            break;
-                        }
-                    }
-                    if unknown {
-                        Unsupported
+                    let kind = if matches!(op, Op::Any(_)) {
+                        evaluation::BranchKind::Any
                     } else {
-                        verdict(if matches!(op, Op::Any(_)) {
-                            matches > 0
-                        } else {
-                            matches == 1
-                        })
+                        evaluation::BranchKind::One
+                    };
+                    match evaluation::scan_branches(
+                        nodes,
+                        evaluation::BranchPolicy::Validity(kind),
+                        |child| self.eval(child, value, depth + 1, active),
+                    ) {
+                        Ok(result) => verdict(kind.accepts(result.matches)),
+                        Err(status) => status,
                     }
                 }
                 Op::Not(n) => match self.eval(*n, value, depth + 1, active) {
@@ -1218,14 +1340,14 @@ impl Engine {
             }
         }
         if let Some(child) = r.contains {
-            let mut matches = 0;
-            for i in 0..len {
-                match self.eval(child, unsafe { sn_entry(value, i) }, depth, active) {
-                    Valid => matches += 1,
-                    Unsupported => return Unsupported,
-                    Invalid => {}
-                }
-            }
+            let matches = match evaluation::scan_contains(
+                len,
+                |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
+                |_| {},
+            ) {
+                Ok(matches) => matches,
+                Err(status) => return status,
+            };
             if bounds(matches, Some(r.min_contains), r.max_contains) == Invalid {
                 return Invalid;
             }
@@ -1395,21 +1517,12 @@ impl Engine {
                 return Invalid;
             }
         }
-        let mut found = 0;
-        for (index, &(key, child)) in r.properties.iter().enumerate() {
-            let item = unsafe { sn_lookup(value, key) };
-            if item == self.undefined {
-                if r.required_properties[index] {
-                    return Invalid;
-                }
-                continue;
-            }
-            found += 1;
-            let result = self.eval(child, item, depth, active);
-            if result != Valid {
-                return result;
-            }
-        }
+        let found = match r.visit_properties(value, len, self.undefined, |_, child, item| {
+            self.eval(child, item, depth, active)
+        }) {
+            Ok(found) => found,
+            Err(status) => return status,
+        };
         if r.names.is_some() || !r.patterns.is_empty() || (r.additional.is_some() && found < len) {
             let mut context = ObjectContext {
                 engine: self,
@@ -2194,6 +2307,24 @@ fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
     slots.resize(capacity, S::EMPTY);
     Some(slots)
 }
+struct PropertyCandidates<'a> {
+    rules: &'a Object,
+    indices: Vec<usize>,
+}
+unsafe extern "C" fn property_candidate(context: *mut c_void, key: Value, _: Value) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let c = unsafe { &mut *context.cast::<PropertyCandidates<'_>>() };
+        if unsafe { sn_kind(key) } != TYPE_STRING {
+            return Unsupported as i32;
+        }
+        if let Some(target) = c.rules.property_targets.get(&tracking::JsonKey::new(key)) {
+            c.indices.push(target.index);
+        }
+        Valid as i32
+    }))
+    .unwrap_or(Unsupported as i32)
+}
+
 struct ObjectContext<'a> {
     engine: &'a Engine,
     rules: &'a Object,
@@ -2216,24 +2347,17 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
                 return result as i32;
             }
         }
-        let mut matched = c.rules.property_keys.contains(&tracking::JsonKey::new(key));
-        for (pattern, child) in &c.rules.patterns {
-            match pattern.eval(key) {
-                Unsupported => return Unsupported as i32,
-                Invalid => {}
-                Valid => {
-                    matched = true;
-                    let result = c.engine.eval(*child, value, c.depth, c.active);
-                    if result != Valid {
-                        return result as i32;
-                    }
+        match c
+            .rules
+            .visit_value_rules::<false>(key, None, |_, _, child| {
+                match c.engine.eval(child, value, c.depth, c.active) {
+                    Valid => Ok(()),
+                    status => Err(status),
                 }
-            }
+            }) {
+            Ok(_) => Valid as i32,
+            Err(status) => status as i32,
         }
-        if !matched && let Some(child) = c.rules.additional {
-            return c.engine.eval(child, value, c.depth, c.active) as i32;
-        }
-        Valid as i32
     }))
     .unwrap_or(Unsupported as i32)
 }
