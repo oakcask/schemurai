@@ -421,6 +421,84 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "indexes large enums with exact numeric and structural equality after compaction" do # rubocop:disable RSpec/ExampleLength
+    integers = [-(2**62), -(2**53) - 1, -1, 0, 1, 2**53, 2**53 + 1, 2**62, 2**200, 2**1024, 2**4096]
+    choices = integers + [Float::MAX, 0.5, nil, true, false, "item", [1, "two"], {"id" => 1, "nested" => [2, "three"]}]
+    rule = {"enum" => choices}
+    values = choices + integers.map(&:to_f) + [Float::NAN, Float::INFINITY, -Float::INFINITY, -0.0,
+      {"nested" => [2.0, "three"], "id" => 1.0}, [1.0, "two"], [1, "bad"], {"id" => 1, "nested" => [3, "three"]}, "missing"]
+    schemas = [rule, {"type" => "array", "items" => rule},
+      {"type" => "object", "properties" => {"value" => rule}, "required" => ["value"]}]
+    expect_native_policy_results(schemas, values + [values] + values.map { |value| {"value" => value} })
+  end
+
+  it "resolves large enum fingerprint collisions with full equality" do # rubocop:disable RSpec/ExampleLength
+    choices = Array.new(32) { |index| 2**4096 + (index << 1088) + 1 }
+    rules = [{"enum" => choices}, {"enum" => choices.map { |value| {"id" => value} }}]
+    values = choices + [2**4096 + (32 << 1088) + 1, -choices.first, choices.first.to_f]
+    expect_native_policy_results(rules, values + values.map { |value| {"id" => value} })
+  end
+
+  it "retains linear enum comparisons when nested inputs cannot be fingerprinted" do # rubocop:disable RSpec/ExampleLength
+    choices = Array.new(17) { |index| [index] }
+    schema = {"enum" => choices}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    # Different lengths reject the container without inspecting its contents.
+    rejected = [Object.new, 1]
+    expect(program.valid?(rejected)).to be(false)
+    expect(program.diagnostics(rejected)).not_to be_nil
+    # Equal shapes reach the unsupported nested value and retain VM fallback.
+    unsupported = [Object.new]
+    expect(program.valid?(unsupported)).to be_nil
+    expect(program.diagnostics(unsupported)).to be_nil
+    [rejected, unsupported].each do |value|
+      expect(native.valid?(value)).to eq(vm.valid?(value))
+      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    end
+  end
+
+  it "matches enum validity and errors across the linear lookup threshold" do
+    schemas = [16, 17, 64].map { |size| {"enum" => Array.new(size) { |index| index }} }
+    expect_native_policy_results(schemas, [-1, 0, 15, 16, 63, 64, -0.0, 16.0, 63.0, "16", nil, [Object.new]])
+  end
+
+  it "retains schema-order enum comparisons when a candidate cannot be fingerprinted" do # rubocop:disable RSpec/ExampleLength
+    deep = 0
+    257.times { deep = [deep] }
+    schema = {"enum" => Array.new(17) { |index| [index] } + [deep]}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?([16])).to be(true)
+    expect(program.diagnostics([16])).not_to be_nil
+    expect(program.valid?(42)).to be(false)
+    expect(program.diagnostics(42)).not_to be_nil
+    expect(program.valid?(deep)).to be_nil
+    expect(program.diagnostics(deep)).to be_nil
+    [[16], 42, deep].each do |value|
+      expect(native.valid?(value)).to eq(vm.valid?(value))
+      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+    end
+  end
+
+  it "preserves enum depth fallback" do # rubocop:disable RSpec/ExampleLength
+    rule = {"enum" => Array.new(17) { |index| [index] }}
+    instance = [16]
+    256.times do
+      rule = {"items" => rule}
+      instance = [instance]
+    end
+    native = Schemurai.compile(rule, backend: :native)
+    vm = Schemurai.compile(rule, backend: :vm)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?(instance)).to be_nil
+    expect(program.diagnostics(instance)).to be_nil
+    expect(native.valid?(instance)).to eq(vm.valid?(instance))
+    expect(native.validate(instance).errors).to eq(vm.validate(instance).errors)
+  end
+
   it "checks small records with required duplicates and additional-property rules in Rust" do # rubocop:disable RSpec/ExampleLength
     cases = [
       [{"type" => "object", "properties" => {"id" => {"type" => "integer"}}, "required" => Array.new(64, "id"), "additionalProperties" => false},

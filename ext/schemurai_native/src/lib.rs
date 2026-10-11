@@ -7,6 +7,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 mod content;
 mod diagnostics;
+mod enumeration;
 mod evaluation;
 mod format;
 mod number;
@@ -115,7 +116,7 @@ enum Op {
     Ref(scope::Reference),
     Type(i32),
     Const(Value),
-    Enum(Vec<Value>),
+    Enum(Box<enumeration::Enumeration>),
     All(Vec<usize>),
     Any(Vec<(usize, usize)>),
     One(Vec<(usize, usize)>),
@@ -704,7 +705,10 @@ impl Engine {
                     Op::Type(unsafe { sn_integer(mask) } as i32)
                 }
                 OP_CONST => Op::Const(operand),
-                OP_ENUM => Op::Enum(self.values(operand)),
+                OP_ENUM => Op::Enum(Box::new(enumeration::Enumeration::compile(
+                    self.values(operand),
+                    self.fixnum_flag,
+                ))),
                 OP_ALL_OF => Op::All(self.children(operand)?),
                 OP_ANY_OF => Op::Any(self.branches(operand)?),
                 OP_ONE_OF => Op::One(self.branches(operand)?),
@@ -1150,16 +1154,7 @@ impl Engine {
             Op::Boolean(v) => verdict(*v),
             Op::Type(mask) => verdict(kind & mask != 0),
             Op::Const(v) => equal(*v, value, depth),
-            Op::Enum(values) => {
-                let mut outcome = Invalid;
-                for &v in values {
-                    outcome = equal(v, value, depth);
-                    if outcome != Invalid {
-                        break;
-                    }
-                }
-                outcome
-            }
+            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag),
             Op::Number(required, rules) => {
                 if *required != 0 && kind & required == 0 {
                     Invalid
@@ -2463,6 +2458,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
             .iter()
             .flatten()
             .map(|op| match op {
+                Op::Enum(values) => values.memory_usage(),
                 Op::String(_, rules) => {
                     std::mem::size_of::<StringRules>()
                         + rules
