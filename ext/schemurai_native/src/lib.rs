@@ -2461,9 +2461,10 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
             return result;
         }
     }
+    let mut fingerprints = structural::Cache::batch(depth);
     indexed_unique(
         values,
-        |item| fingerprint_budgeted(item, depth, fixnum_flag, big_hint, budget),
+        |item| fingerprint_cached(item, depth, fixnum_flag, big_hint, &mut fingerprints, budget),
         |a, b| equal_budgeted(a, b, depth, budget),
     )
 }
