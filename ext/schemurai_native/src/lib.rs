@@ -13,6 +13,7 @@ mod evaluation;
 mod format;
 mod graph;
 mod instance_graph;
+mod integer_scan;
 mod memo;
 mod memo_scope;
 mod number;
@@ -1658,7 +1659,12 @@ impl Execution<'_> {
             }
             _ => None,
         };
-        for &value in values {
+        let prefix = if self.budget.timed() {
+            0
+        } else {
+            integer_scan::valid_prefix(values, min, max, self.fixnum_flag)
+        };
+        for &value in &values[prefix..] {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
