@@ -2044,6 +2044,26 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "preserves mixed-item results at every vector block position" do # rubocop:disable RSpec/ExampleLength
+    schema = {"type" => "array", "items" => {"type" => "integer", "minimum" => -16, "maximum" => 16}}
+    vm = Schemurai.compile(schema, backend: :vm)
+    native = Schemurai.compile(schema, backend: :native)
+    original = Array.new(33) { |at| at % 33 - 16 }
+    inputs = original.each_index.flat_map do |at|
+      [-17, 17, -(2**62) - 1, 2**62, 1.5, nil, "value", Rational(1, 2)].map do |value|
+        input = original.dup
+        input[at] = value
+        input
+      end
+    end
+    inputs.concat([[], original, [0] * 16, [0] * 17, [0] * 32, [0] * 65])
+    inputs.concat([[-17, Rational(1, 2)], [Rational(1, 2), -17]].map { |tail| [0] * 16 + tail })
+    inputs.each do |input|
+      expect(native.valid?(input)).to eq(vm.valid?(input)), input.inspect
+      expect(native.validate(input).errors).to eq(vm.validate(input).errors), input.inspect
+    end
+  end
+
   it "checks oversized Integer bounds and ordered diagnostics without VM execution" do # rubocop:disable RSpec/ExampleLength
     bounds = [-(2**127), -0.3, 0, 0.3, 2**100, 2**127 - 1]
     values = [127, 128, 129, 200, 1024, 4096].flat_map { |power| [2**power - 1, 2**power, 2**power + 1, -(2**power) - 1, -(2**power), -(2**power) + 1] }
