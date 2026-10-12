@@ -66,9 +66,8 @@ fn neon_prefix(values: &[Value], min: i64, max: i64) -> usize {
         vandq_u64, vceqq_u64, vcgeq_s64, vcleq_s64, vdupq_n_s64, vdupq_n_u64, vgetq_lane_u64,
         vld1q_u64, vreinterpretq_s64_u64,
     };
-    let lower = vdupq_n_s64(min);
-    let upper = vdupq_n_s64(max);
-    let tag = vdupq_n_u64(1);
+    // This function is compiled only when the target guarantees NEON.
+    let (lower, upper, tag) = unsafe { (vdupq_n_s64(min), vdupq_n_s64(max), vdupq_n_u64(1)) };
     let mut consumed = 0;
     for block in values.as_chunks::<2>().0 {
         // Baseline NEON; the unaligned load stays within two borrowed VALUEs.
