@@ -8,6 +8,110 @@ require "rbconfig"
 require_relative "../oracle/lib/case_catalog"
 
 RSpec.describe "native VALUE execution" do
+  it "stops native evaluation and diagnostics cooperatively without VM delegation" do # rubocop:disable RSpec/ExampleLength
+    validator = Schemurai.compile({"items" => {"type" => "integer"}}, backend: :native)
+    # Keep Ruby's clock fixed so the exhaustion assertion specifically tests Rust.
+    allow(Process).to receive(:clock_gettime).and_call_original
+    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+    budgets = []
+    budget_class = Schemurai.const_get(:Internal).const_get(:LimitBudget)
+    allow(budget_class).to receive(:new).and_wrap_original do |original, *args, **options|
+      budget = original.call(*args, **options)
+      allow(budget).to receive(:raise_native_limit).and_call_original
+      budgets << budget
+      budget
+    end
+    allow(Schemurai.const_get(:VM).const_get(:LimitedEvaluator)).to receive(:new).and_raise("VM execution fallback")
+    [:valid?, :validate].each do |method|
+      expect { validator.public_send(method, Array.new(2_000_000, 1), timeout: 0.001) }.to raise_error(Schemurai::LimitExceeded) { |error|
+        expect(error.limit).to eq(:timeout)
+      }
+      expect(budgets.last).to have_received(:raise_native_limit).with(2, 0)
+    end
+    definitions = {"n0" => false}
+    1.upto(24) { |i| definitions["n#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/n#{i - 1}"} }} }
+    diagnostic = Schemurai.compile({"$defs" => definitions, "$ref" => "#/$defs/n24"}, backend: :native)
+    expect { diagnostic.validate(nil, timeout: 0.005) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:timeout)
+    }
+    expect(budgets.last).to have_received(:raise_native_limit).with(2, 0)
+    expect(validator.valid?([1], timeout: 10)).to be(true)
+    expect(validator.validate([1], timeout: 10).valid?).to be(true)
+  end
+
+  it "applies independent kwargs defaults and exact error boundaries", :aggregate_failures do
+    validator = Schemurai.compile({"items" => false}, backend: :native, max_errors: 1, timeout: 0)
+    expect { validator.validate([1, 2], max_errors: nil) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:timeout)
+    }
+    expect { validator.validate([1, 2], timeout: nil) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect([error.limit, error.maximum, error.attempted]).to eq([:max_errors, 1, 2])
+    }
+    expect(validator.validate([1], timeout: nil).errors.length).to eq(1)
+    expect(validator.validate([1, 2], max_errors: nil, timeout: nil).errors.length).to eq(2)
+    expect(validator.valid?([1, 2], timeout: nil)).to be(false)
+    expect { validator.validate([1], max_errors: 0, timeout: nil) }.to raise_error(Schemurai::LimitExceeded)
+    expect(validator.validate([], max_errors: 0, timeout: nil).valid?).to be(true)
+  end
+
+  it "retains the original duration deadline when native transfers to VM", :aggregate_failures do
+    validator = Schemurai.compile({"type" => "array"}, backend: :native)
+    value = Class.new(Array).new
+    allow(Process).to receive(:clock_gettime).and_call_original
+    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+    vm = Schemurai.const_get(:VM).const_get(:LimitedEvaluator)
+    allow(vm).to receive(:new).and_wrap_original do |original, *args, **options|
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2)
+      original.call(*args, **options)
+    end
+    expect { validator.valid?(value, timeout: 0.1) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:timeout)
+      expect(error.attempted).to eq(0.2)
+    }
+    expect(vm).to have_received(:new).once
+  end
+
+  it "includes Ruby message rendering in the original duration budget", :aggregate_failures do
+    validator = Schemurai.compile(false, backend: :native)
+    renderer = Schemurai.const_get(:Native).const_get(:Diagnostics)
+    allow(Process).to receive(:clock_gettime).and_call_original
+    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+    allow(renderer).to receive(:error).and_wrap_original do |original, *args|
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2)
+      original.call(*args)
+    end
+    expect { validator.validate(nil, timeout: 0.1) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:timeout)
+    }
+    expect(renderer).to have_received(:error).once
+  end
+
+  it "enforces native limits without routing bounded calls through the Ruby evaluator" do # rubocop:disable RSpec/ExampleLength
+    ruby_limited = Schemurai.const_get(:Internal).const_get(:LimitedEvaluator)
+    allow(ruby_limited).to receive(:new).and_raise("Ruby execution fallback")
+    validator = Schemurai.compile({"items" => false}, backend: :native, max_errors: 1)
+    allow(Schemurai.const_get(:VM).const_get(:LimitedEvaluator)).to receive(:new).and_raise("VM execution fallback")
+    program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    allow(program).to receive(:diagnostics).and_raise("unbounded diagnostics")
+    expect { validator.validate([1, 2]) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:max_errors)
+    }
+    expect(validator.validate([1]).errors.length).to eq(1)
+    expect(validator.valid?([1])).to be(false)
+    expect(validator.backend).to eq(:native)
+  end
+
+  it "interrupts exponentially expanding failing diagnostics during native collection" do # rubocop:disable RSpec/ExampleLength
+    definitions = {"n0" => false}
+    1.upto(32) { |i| definitions["n#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/n#{i - 1}"} }} }
+    validator = Schemurai.compile({"$defs" => definitions, "$ref" => "#/$defs/n32"}, backend: :native)
+    [:max_errors].each do |cap|
+      expect { validator.validate(nil, **{cap => 100}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+        expect(error.limit).to eq(cap)
+      }
+    end
+  end
+
   it "keeps native type, numeric and scope masks compatible with the Ruby compiler", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
     Schemurai.compile(true, backend: :native)
     native = Schemurai.const_get(:Native)::Protocol

@@ -28,6 +28,7 @@ module Schemurai
 
     module_function def load_vm!
       require_relative VM_FEATURE
+      require_relative "vm/limited_evaluator"
     end
   end
 end

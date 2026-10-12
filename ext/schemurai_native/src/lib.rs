@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+mod budget;
 mod content;
 mod diagnostics;
 mod enumeration;
@@ -351,6 +352,7 @@ impl Object {
         value: Value,
         len: usize,
         undefined: Value,
+        budget: &budget::Budget,
         mut visit: impl FnMut(usize, usize, Value) -> Verdict,
     ) -> Result<usize, Verdict> {
         let mut found = 0;
@@ -361,6 +363,7 @@ impl Object {
             // validity, including required failures and unsupported children.
             let mut candidates = PropertyCandidates {
                 rules: self,
+                budget,
                 indices: Vec::with_capacity(len.min(self.properties.len())),
             };
             let status = decode(unsafe {
@@ -375,12 +378,20 @@ impl Object {
             }
             candidates.indices.sort_unstable();
             candidates.indices.dedup();
-            let missing_required = self
-                .required_property_indices
-                .iter()
-                .copied()
-                .find(|&index| missing(value, self.properties[index].0, undefined));
+            let mut missing_required = None;
+            for &index in &self.required_property_indices {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
+                if missing(value, self.properties[index].0, undefined) {
+                    missing_required = Some(index);
+                    break;
+                }
+            }
             for index in candidates.indices {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 if missing_required.is_some_and(|missing| missing <= index) {
                     return Err(Invalid);
                 }
@@ -402,6 +413,9 @@ impl Object {
             }
         } else {
             for (index, &(key, child)) in self.properties.iter().enumerate() {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 let item = unsafe { sn_lookup(value, key) };
                 if item == undefined {
                     if self.required_properties[index] {
@@ -425,6 +439,7 @@ impl Object {
     fn visit_value_rules<const PROPERTIES: bool>(
         &self,
         caches: &pattern::Caches,
+        budget: &budget::Budget,
         key: Value,
         location: Option<tracking::JsonKey>,
         mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
@@ -453,6 +468,9 @@ impl Object {
             .and_then(|group| group.matches(key))
         {
             while matches != 0 {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 let index = matches.trailing_zeros() as usize;
                 matches &= matches - 1;
                 matched = true;
@@ -464,6 +482,9 @@ impl Object {
             }
         } else {
             for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 match pattern.eval(caches, key) {
                     Unsupported => return Err(Unsupported),
                     Invalid => {}
@@ -1105,6 +1126,7 @@ struct Execution<'a> {
     engine: &'a Engine,
     caches: &'a pattern::Caches,
     memo: memo::Memo,
+    budget: budget::Budget,
 }
 impl std::ops::Deref for Execution<'_> {
     type Target = Engine;
@@ -1126,9 +1148,21 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         known_kind: Option<i32>,
     ) -> Verdict {
-        let Some(key) = self.memo.key(self, node, value, depth, active) else {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
+        let Some(key) = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget)
+        else {
+            if self.budget.hit.get().0 != 0 {
+                return Unsupported;
+            }
             return self.eval_uncached(node, value, depth, active, known_kind);
         };
+        if self.budget.hit.get().0 != 0 {
+            return Unsupported;
+        }
         if let Some(status) = self.memo.verdict(key) {
             return status;
         }
@@ -1181,6 +1215,9 @@ impl Execution<'_> {
             return Unsupported;
         }
         for op in &self.nodes[node] {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let outcome = match op {
                 Op::Ref(target) => {
                     if RefFrame::contains(active.active, node, value) {
@@ -1206,6 +1243,9 @@ impl Execution<'_> {
                 Op::All(nodes) => {
                     let mut outcome = Valid;
                     for &n in nodes {
+                        if !self.budget.checkpoint() {
+                            return Unsupported;
+                        }
                         outcome = self.eval_with_kind(n, value, depth + 1, active, Some(kind));
                         if outcome != Valid {
                             break;
@@ -1275,8 +1315,8 @@ impl Execution<'_> {
             Op::Unsupported => Unsupported,
             Op::Boolean(v) => verdict(*v),
             Op::Type(mask) => verdict(kind & mask != 0),
-            Op::Const(v) => equal(*v, value, depth),
-            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag),
+            Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
+            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag, &self.budget),
             Op::Number(required, rules) => {
                 if *required != 0 && kind & required == 0 {
                     Invalid
@@ -1299,17 +1339,23 @@ impl Execution<'_> {
         }
     }
     fn array(&self, r: &Array, value: Value, depth: usize, active: scope::Context<'_>) -> Verdict {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag);
+            let result = unique(value, depth, self.fixnum_flag, &self.budget);
             if result != Valid {
                 return result;
             }
         }
         for (i, &child) in r.prefix.iter().take(len).enumerate() {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
             if result != Valid {
                 return result;
@@ -1317,6 +1363,9 @@ impl Execution<'_> {
         }
         if r.list {
             for (i, &child) in r.items.iter().take(len).enumerate() {
+                if !self.budget.checkpoint() {
+                    return Unsupported;
+                }
                 let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
                 if result != Valid {
                     return result;
@@ -1324,6 +1373,9 @@ impl Execution<'_> {
             }
             if let Some(child) = r.additional {
                 for i in r.items.len()..len {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
                     if result != Valid {
                         return result;
@@ -1381,12 +1433,22 @@ impl Execution<'_> {
             };
             let object_active = self.enter_scope(child, active, &frame);
             let pattern = string.and_then(|(required, rules)| {
-                rules.pattern_only().map(|pattern| (required, pattern))
+                rules
+                    .pattern_only()
+                    .map(|pattern| (required, pattern))
+                    .filter(|_| !self.budget.timed())
             });
-            let format = string
-                .and_then(|(required, rules)| rules.format_only().map(|format| (required, format)));
+            let format = string.and_then(|(required, rules)| {
+                rules
+                    .format_only()
+                    .map(|format| (required, format))
+                    .filter(|_| !self.budget.timed())
+            });
             let content = string.and_then(|(required, rules)| {
-                rules.content_only().map(|content| (required, content))
+                rules
+                    .content_only()
+                    .map(|content| (required, content))
+                    .filter(|_| !self.budget.timed())
             });
             if let Some((required, pattern)) = pattern {
                 let result = pattern.eval_items(
@@ -1433,6 +1495,9 @@ impl Execution<'_> {
                 }
             } else {
                 for &item in values.iter().skip(r.prefix.len()) {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     let result = if let Some((required, rules)) = number {
                         rules.eval_guarded(required, item)
                     } else if let Some((required, rules)) = string {
@@ -1485,7 +1550,7 @@ impl Execution<'_> {
         len: usize,
         depth: usize,
     ) -> Option<Verdict> {
-        if depth > MAX_EVALUATION_DEPTH || self.tracks[child] {
+        if depth > MAX_EVALUATION_DEPTH || self.tracks[child] || self.budget.timed() {
             return None;
         }
         let [op] = self.nodes[child].as_slice() else {
@@ -1548,6 +1613,9 @@ impl Execution<'_> {
             _ => None,
         };
         for &value in values {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let result = if value & self.fixnum_flag != 0 {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
@@ -1572,6 +1640,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
     ) -> Verdict {
         for &value in values {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let kind = if value & self.fixnum_flag != 0 {
                 TYPE_INTEGRAL_NUMBER
             } else {
@@ -1597,6 +1668,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
         if let Some(record) = &r.record {
             // C initializes only the written key/value pairs. The untouched
             // tail is never read, including empty and unsupported records.
@@ -1643,6 +1717,9 @@ impl Execution<'_> {
                 status,
             };
             for entry in entries.as_chunks::<2>().0 {
+                if !self.budget.checkpoint() {
+                    return Unsupported;
+                }
                 if record_entry(&mut context, entry[0], entry[1]) != Valid {
                     return Unsupported;
                 }
@@ -1677,13 +1754,20 @@ impl Execution<'_> {
             return Invalid;
         }
         for &key in &r.required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if missing(value, key, self.undefined) {
                 return Invalid;
             }
         }
-        let found = match r.visit_properties(value, len, self.undefined, |_, child, item| {
-            self.eval(child, item, depth, active)
-        }) {
+        let found = match r.visit_properties(
+            value,
+            len,
+            self.undefined,
+            &self.budget,
+            |_, child, item| self.eval(child, item, depth, active),
+        ) {
             Ok(found) => found,
             Err(status) => return status,
         };
@@ -1701,8 +1785,14 @@ impl Execution<'_> {
             }
         }
         for (name, required) in &r.dependent_required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, *name, self.undefined) {
                 for &key in required {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     if missing(value, key, self.undefined) {
                         return Invalid;
                     }
@@ -1710,6 +1800,9 @@ impl Execution<'_> {
             }
         }
         for &(name, child) in &r.dependent_schemas {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, name, self.undefined) {
                 let result = self.eval(child, value, depth, active);
                 if result != Valid {
@@ -1733,6 +1826,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
         match self.nodes[node].as_slice() {
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.length_only() =>
@@ -1891,15 +1987,19 @@ fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<u
 fn immediate_integer(value: Value) -> i64 {
     (value as isize >> 1) as i64
 }
-fn equal(a: Value, b: Value, depth: usize) -> Verdict {
-    equal_cached(a, b, depth, &mut structural::Cache::new(depth))
+fn equal_budgeted(a: Value, b: Value, depth: usize, budget: &budget::Budget) -> Verdict {
+    equal_cached(a, b, depth, &mut structural::Cache::new(depth), budget)
 }
 fn equal_cached(
     a: Value,
     b: Value,
     depth: usize,
     memo: &mut structural::Cache<(Value, Value, usize), Verdict>,
+    budget: &budget::Budget,
 ) -> Verdict {
+    if !budget.checkpoint() {
+        return Unsupported;
+    }
     if depth > MAX_EVALUATION_DEPTH {
         return Unsupported;
     }
@@ -1983,6 +2083,7 @@ fn equal_cached(
                     unsafe { sn_entry(b, i) },
                     depth + 1,
                     memo,
+                    budget,
                 );
                 if result != Valid {
                     return result;
@@ -1998,6 +2099,7 @@ fn equal_cached(
                 other: b,
                 depth: depth + 1,
                 memo,
+                budget,
             };
             decode(unsafe {
                 sn_hash_each(
@@ -2026,6 +2128,7 @@ struct EqualityContext<'a> {
     other: Value,
     depth: usize,
     memo: &'a mut structural::Cache<(Value, Value, usize), Verdict>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -2033,11 +2136,14 @@ unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value)
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
+        if !c.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         let other = unsafe { sn_lookup(c.other, key) };
         if unsafe { sn_missing(other) } != 0 {
             Invalid as i32
         } else {
-            equal_cached(value, other, c.depth, c.memo) as i32
+            equal_cached(value, other, c.depth, c.memo, c.budget) as i32
         }
     }))
     .unwrap_or(Unsupported as i32)
@@ -2117,12 +2223,28 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     mix(result ^ TYPE_STRING as u64)
 }
 fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -> Option<u64> {
+    fingerprint_budgeted(
+        value,
+        depth,
+        fixnum_flag,
+        big_hint,
+        &budget::Budget::default(),
+    )
+}
+fn fingerprint_budgeted(
+    value: Value,
+    depth: usize,
+    fixnum_flag: Value,
+    big_hint: bool,
+    budget: &budget::Budget,
+) -> Option<u64> {
     fingerprint_cached(
         value,
         depth,
         fixnum_flag,
         big_hint,
         &mut structural::Cache::new(depth),
+        budget,
     )
 }
 fn fingerprint_cached(
@@ -2131,7 +2253,11 @@ fn fingerprint_cached(
     fixnum_flag: Value,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
+    budget: &budget::Budget,
 ) -> Option<u64> {
+    if !budget.checkpoint() {
+        return None;
+    }
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
@@ -2191,7 +2317,9 @@ fn fingerprint_cached(
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
-                hash = mix(hash ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo)?);
+                hash =
+                    mix(hash
+                        ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo, budget)?);
             }
             Some(hash)
         }
@@ -2202,6 +2330,7 @@ fn fingerprint_cached(
                 depth: depth + 1,
                 fixnum_flag,
                 memo,
+                budget,
             };
             let status = unsafe {
                 sn_hash_each_key_view(
@@ -2224,6 +2353,7 @@ struct FingerprintContext<'a> {
     depth: usize,
     fixnum_flag: Value,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn fingerprint_entry(
     context: *mut c_void,
@@ -2233,7 +2363,11 @@ unsafe extern "C" fn fingerprint_entry(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<FingerprintContext<'_>>() };
-        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo) else {
+        if !c.budget.checkpoint() {
+            return Unsupported as i32;
+        }
+        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo, c.budget)
+        else {
             return Unsupported as i32;
         };
         c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));
@@ -2258,15 +2392,19 @@ impl Hasher for BucketHasher {
         }
     }
 }
-fn unique(value: Value, depth: usize, fixnum_flag: Value) -> Verdict {
+fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budget) -> Verdict {
     let len = unsafe { sn_len(value) };
+    if !budget.checkpoint() {
+        return Unsupported;
+    }
     if len <= 16 {
         for i in 0..len {
             for previous in 0..i {
-                match equal(
+                match equal_budgeted(
                     unsafe { sn_entry(value, previous) },
                     unsafe { sn_entry(value, i) },
                     depth,
+                    budget,
                 ) {
                     Valid => return Invalid,
                     Unsupported => return Unsupported,
@@ -2280,30 +2418,34 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value) -> Verdict {
     // This is a checked optimization hint, not an instance shape assumption.
     let big_hint = unsafe { sn_is_bignum(values[0]) } != 0;
     if big_hint
+        && !budget.timed()
         && depth <= MAX_EVALUATION_DEPTH
         && let Some(result) = number::ordered_big_unique(values)
     {
         return result;
     }
     if big_hint && depth <= MAX_EVALUATION_DEPTH {
-        let result = unordered_big_unique(values);
+        let result = unordered_big_unique(values, budget);
         if result != Unsupported {
             return result;
         }
     }
     indexed_unique(
         values,
-        |item| fingerprint(item, depth, fixnum_flag, big_hint),
-        |a, b| equal(a, b, depth),
+        |item| fingerprint_budgeted(item, depth, fixnum_flag, big_hint, budget),
+        |a, b| equal_budgeted(a, b, depth, budget),
     )
 }
 // Keep Big-only sampling and retry state out of the common scalar path.
 #[inline(never)]
-fn unordered_big_unique(values: &[Value]) -> Verdict {
+fn unordered_big_unique(values: &[Value], budget: &budget::Budget) -> Verdict {
     let mut all_big = true;
     let result = indexed_unique_short(
         values,
         |item| {
+            if !budget.checkpoint() {
+                return None;
+            }
             let hash = number::big_low_fingerprint(item);
             if hash.is_none() {
                 all_big = false;
@@ -2311,6 +2453,9 @@ fn unordered_big_unique(values: &[Value]) -> Verdict {
             hash
         },
         |a, b| {
+            if !budget.checkpoint() {
+                return Unsupported;
+            }
             // Distinct integers sharing the short sample need the wider pass.
             if unsafe { sn_big_equal(a, b) } != 0 {
                 Valid
@@ -2323,15 +2468,41 @@ fn unordered_big_unique(values: &[Value]) -> Verdict {
         return result;
     }
     if all_big {
-        let result = indexed_unique_impl::<true>(values, number::big_low64_fingerprint, |a, b| {
-            verdict(unsafe { sn_big_equal(a, b) } != 0)
-        });
+        let result = indexed_unique_impl::<true>(
+            values,
+            |item| {
+                if !budget.checkpoint() {
+                    None
+                } else {
+                    number::big_low64_fingerprint(item)
+                }
+            },
+            |a, b| {
+                if !budget.checkpoint() {
+                    return Unsupported;
+                }
+                verdict(unsafe { sn_big_equal(a, b) } != 0)
+            },
+        );
         if result != Unsupported {
             return result;
         }
-        let result = indexed_unique(values, number::big_only_fingerprint, |a, b| {
-            verdict(unsafe { sn_big_equal(a, b) } != 0)
-        });
+        let result = indexed_unique(
+            values,
+            |item| {
+                if !budget.checkpoint() {
+                    None
+                } else {
+                    number::big_only_fingerprint(item)
+                }
+            },
+            |a, b| {
+                if !budget.checkpoint() {
+                    return Unsupported;
+                }
+                verdict(unsafe { sn_big_equal(a, b) } != 0)
+            },
+        );
         if result != Unsupported {
             return result;
         }
@@ -2526,10 +2697,14 @@ fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
 struct PropertyCandidates<'a> {
     rules: &'a Object,
     indices: Vec<usize>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn property_candidate(context: *mut c_void, key: Value, _: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<PropertyCandidates<'_>>() };
+        if !c.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -2554,6 +2729,9 @@ struct ObjectContext<'a> {
 pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &*context.cast::<ObjectContext>() };
+        if !c.engine.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -2563,14 +2741,16 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
                 return result as i32;
             }
         }
-        match c
-            .rules
-            .visit_value_rules::<false>(c.engine.caches, key, None, |_, _, child| {
-                match c.engine.eval(child, value, c.depth, c.active) {
-                    Valid => Ok(()),
-                    status => Err(status),
-                }
-            }) {
+        match c.rules.visit_value_rules::<false>(
+            c.engine.caches,
+            &c.engine.budget,
+            key,
+            None,
+            |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
+                Valid => Ok(()),
+                status => Err(status),
+            },
+        ) {
             Ok(_) => Valid as i32,
             Err(status) => status as i32,
         }
@@ -2670,10 +2850,49 @@ pub unsafe extern "C" fn sn_valid(
             engine: e,
             caches,
             memo: memo::Memo::default(),
+            budget: budget::Budget::default(),
         }
         .eval(root, value, 0, scope::Context::default()) as i32
     }))
     .unwrap_or(STATUS_PANIC)
+}
+/// # Safety
+/// Same requirements as sn_valid; all limit/output pointers must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_valid_with_limits(
+    engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
+    value: Value,
+    limits: *const budget::Limits,
+    outcome: *mut budget::Outcome,
+) -> i32 {
+    let budget = budget::Budget::new(unsafe { *limits });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let execution = Execution {
+            engine: unsafe { &*engine },
+            caches,
+            memo: memo::Memo::default(),
+            budget,
+        };
+        let result = if execution.budget.check_deadline() {
+            execution.eval(root, value, 0, scope::Context::default())
+        } else {
+            Unsupported
+        };
+        let result = if execution.budget.check_deadline() {
+            result
+        } else {
+            Unsupported
+        };
+        unsafe {
+            ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();
+        }
+        result as i32
+    }));
+    result.unwrap_or(STATUS_PANIC)
 }
 /// # Safety
 /// Engine must be an owned pointer returned by sn_new, freed exactly once.

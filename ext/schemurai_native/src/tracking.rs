@@ -253,6 +253,9 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH {
             return Tracked::new(Unsupported);
         }
+        if !self.budget.checkpoint() {
+            return Tracked::new(Unsupported);
+        }
         let kind = if value & self.fixnum_flag != 0 {
             TYPE_INTEGRAL_NUMBER
         } else {
@@ -271,9 +274,21 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Tracked {
-        let Some(key) = self.memo.key(self, node, value, depth, active) else {
+        if !self.budget.checkpoint() {
+            return Tracked::new(Unsupported);
+        }
+        let Some(key) = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget)
+        else {
+            if self.budget.hit.get().0 != 0 {
+                return Tracked::new(Unsupported);
+            }
             return self.eval_tracked_uncached(node, value, depth, active, kind);
         };
+        if self.budget.hit.get().0 != 0 || !self.budget.checkpoint() {
+            return Tracked::new(Unsupported);
+        }
         if let Some(result) = self.memo.tracked(key) {
             return result;
         }
@@ -306,6 +321,9 @@ impl Execution<'_> {
         }
         let mut evaluation = Tracked::new(Valid);
         for op in &self.nodes[node] {
+            if !self.budget.checkpoint() {
+                return Tracked::new(Unsupported);
+            }
             let result = match op {
                 Op::Ref(target) => {
                     if RefFrame::contains(active.active, node, value) {
@@ -331,6 +349,9 @@ impl Execution<'_> {
                 Op::All(nodes) => {
                     let mut result = Valid;
                     for &child in nodes {
+                        if !self.budget.checkpoint() {
+                            return Tracked::new(Unsupported);
+                        }
                         result = evaluation.merge(self.eval_tracked_kind(
                             child,
                             value,
@@ -425,17 +446,23 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         evaluation: &mut Tracked,
     ) -> Verdict {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag);
+            let result = unique(value, depth, self.fixnum_flag, &self.budget);
             if result != Valid {
                 return result;
             }
         }
         for (index, &child) in r.prefix.iter().take(len).enumerate() {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let result = self.eval(child, unsafe { sn_entry(value, index) }, depth, active);
             if result != Valid {
                 return result;
@@ -443,6 +470,9 @@ impl Execution<'_> {
             evaluation.item(index);
         }
         for index in 0..len {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let child = if r.list {
                 r.items.get(index).copied().or(r.additional)
             } else if index >= r.prefix.len() {
@@ -476,6 +506,9 @@ impl Execution<'_> {
                 return Invalid;
             }
             for index in 0..len {
+                if !self.budget.checkpoint() {
+                    return Unsupported;
+                }
                 if evaluation.contains_item(index) {
                     continue;
                 }
@@ -496,22 +529,34 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         evaluation: &mut Tracked,
     ) -> Verdict {
+        if !self.budget.checkpoint() {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
         for &key in &r.required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if missing(value, key, self.undefined) {
                 return Invalid;
             }
         }
-        let found = match r.visit_properties(value, len, self.undefined, |index, child, item| {
-            let result = self.record_value(child, item, depth, active);
-            if result == Valid {
-                evaluation.known_property(r.property_indices[index]);
-            }
-            result
-        }) {
+        let found = match r.visit_properties(
+            value,
+            len,
+            self.undefined,
+            &self.budget,
+            |index, child, item| {
+                let result = self.record_value(child, item, depth, active);
+                if result == Valid {
+                    evaluation.known_property(r.property_indices[index]);
+                }
+                result
+            },
+        ) {
             Ok(found) => found,
             Err(status) => return status,
         };
@@ -522,8 +567,14 @@ impl Execution<'_> {
             }
         }
         for (name, required) in &r.dependent_required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, *name, self.undefined) {
                 for &key in required {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     if missing(value, key, self.undefined) {
                         return Invalid;
                     }
@@ -531,6 +582,9 @@ impl Execution<'_> {
             }
         }
         for &(key, child) in &r.dependent_schemas {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, key, self.undefined) {
                 let result = evaluation.merge(self.eval_tracked(child, value, depth, active));
                 if result != Valid {
@@ -586,6 +640,9 @@ struct TrackingContext<'a> {
 unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<TrackingContext>() };
+        if !c.engine.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -608,6 +665,7 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
             }
             let result = c.rules.visit_value_rules::<false>(
                 c.engine.caches,
+                &c.engine.budget,
                 key,
                 Some(key_location),
                 |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {

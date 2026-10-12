@@ -19,6 +19,14 @@ module Schemurai
   class Error < StandardError
   end
 
+  class LimitExceeded < Error
+    attr_reader limit: Symbol
+    attr_reader maximum: Integer | Float
+    attr_reader attempted: Integer | Float
+
+    def initialize: (Symbol limit, Integer | Float maximum, Integer | Float attempted) -> void
+  end
+
   class ResolutionError < Error
   end
 
@@ -63,10 +71,10 @@ module Schemurai
   end
 
   class Validator
-    def initialize: (_Evaluator evaluator) -> void
+    def initialize: (_Evaluator evaluator, ?max_errors: Integer?, ?timeout: (Integer | Float)?, ?bounded_evaluator: (^() -> untyped)?) -> void
     def backend: () -> backend
-    def validate: (json_value instance) -> Result
-    def valid?: (json_value instance) -> bool
+    def validate: (json_value instance, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Result
+    def valid?: (json_value instance, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> bool
   end
 
   class SchemaRegistry
@@ -76,25 +84,25 @@ module Schemurai
 
     def validate_schema?: () -> bool
 
-    def compile: (schema schema, ?base_uri: String?, ?content: bool, ?format: bool) -> Validator
+    def compile: (schema schema, ?base_uri: String?, ?content: bool, ?format: bool, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Validator
 
-    def validate_schema: (schema schema) -> Result
-    def valid_schema?: (schema schema) -> bool
+    def validate_schema: (schema schema, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Result
+    def valid_schema?: (schema schema, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> bool
     def make_shareable: () -> self
     def shareable?: () -> bool
 
-    def validator_for: (String uri, ?content: bool, ?format: bool) -> Validator
+    def validator_for: (String uri, ?content: bool, ?format: bool, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Validator
   end
 
   def self.backend: () -> backend
 
-  def self.compile: (schema schema, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> Validator
+  def self.compile: (schema schema, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Validator
 
-  def self.validate_schema: (schema schema, ?schemas: schemas, ?backend: backend_selection) -> Result
+  def self.validate_schema: (schema schema, ?schemas: schemas, ?backend: backend_selection, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Result
 
-  def self.valid_schema?: (schema schema, ?schemas: schemas, ?backend: backend_selection) -> bool
+  def self.valid_schema?: (schema schema, ?schemas: schemas, ?backend: backend_selection, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> bool
 
-  def self.validate: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> Result
+  def self.validate: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> Result
 
-  def self.valid?: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> bool
+  def self.valid?: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?max_errors: Integer?, ?timeout: (Integer | Float)?) -> bool
 end
