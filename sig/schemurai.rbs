@@ -15,7 +15,7 @@ module Schemurai
   type backend_selection = backend | :default
 
   # Validation limits accepted by compile and individual calls.
-  type limits = Limits | Hash[Symbol, Integer?] | nil
+  type limits = Limits | Hash[Symbol, (Integer | Float)?] | nil
 
   VERSION: String
 
@@ -24,18 +24,19 @@ module Schemurai
 
   class LimitExceeded < Error
     attr_reader limit: Symbol
-    attr_reader maximum: Integer
-    attr_reader attempted: Integer
+    attr_reader maximum: Integer | Float
+    attr_reader attempted: Integer | Float
 
-    def initialize: (Symbol limit, Integer maximum, Integer attempted) -> void
+    def initialize: (Symbol limit, Integer | Float maximum, Integer | Float attempted) -> void
   end
 
   class Limits
     attr_reader max_errors: Integer?
     attr_reader max_output_bytes: Integer?
     attr_reader max_evaluations: Integer?
+    attr_reader max_duration: (Integer | Float)?
 
-    def initialize: (?max_errors: Integer?, ?max_output_bytes: Integer?, ?max_evaluations: Integer?) -> void
+    def initialize: (?max_errors: Integer?, ?max_output_bytes: Integer?, ?max_evaluations: Integer?, ?max_duration: (Integer | Float)?) -> void
     def enabled?: () -> bool
     def self.coerce: (limits value) -> Limits
   end

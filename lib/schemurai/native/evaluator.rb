@@ -24,6 +24,7 @@ module Schemurai
         if limits
           budget = Internal::LimitBudget.new(limits)
           result = @program.valid_with_budget(instance, budget)
+          budget.check_deadline!
           return result.nil? ? limited_vm.valid?(instance, budget: budget) : result
         end
         result = @program.valid?(instance)
@@ -43,6 +44,7 @@ module Schemurai
             budget.record_error(error)
             error
           end
+          budget.check_deadline!
           return Result.new(errors)
         end
         rows = @program.diagnostics(instance)

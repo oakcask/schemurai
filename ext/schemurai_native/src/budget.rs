@@ -1,6 +1,7 @@
 //! Invocation-local native limits. Exhaustion is terminal, not VM delegation.
 use super::*;
 use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -9,6 +10,7 @@ pub struct Limits {
     pub max_output_bytes: usize,
     pub max_evaluations: usize,
     pub enabled: u32,
+    pub max_duration: f64,
 }
 #[repr(C)]
 #[derive(Default)]
@@ -22,15 +24,55 @@ pub(super) struct Budget {
     pub limits: Limits,
     pub spent: Cell<usize>,
     pub hit: Cell<(u32, usize)>,
+    deadline: Option<Instant>,
+    checks: Cell<usize>,
 }
 impl Budget {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
+            deadline: if limits.enabled & 8 != 0 {
+                Duration::try_from_secs_f64(limits.max_duration.max(0.0))
+                    .ok()
+                    .and_then(|duration| Instant::now().checked_add(duration))
+            } else {
+                None
+            },
             ..Self::default()
         }
     }
+    pub fn timed(&self) -> bool {
+        self.limits.enabled & 8 != 0
+    }
+    pub fn check_deadline(&self) -> bool {
+        if self.hit.get().0 != 0 {
+            return false;
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.hit.set((4, 0));
+            return false;
+        }
+        true
+    }
+    pub fn checkpoint(&self) -> bool {
+        if !self.timed() {
+            return true;
+        }
+        let checks = self.checks.get().wrapping_add(1);
+        self.checks.set(checks);
+        if checks & 255 == 0 {
+            self.check_deadline()
+        } else {
+            self.hit.get().0 == 0
+        }
+    }
     pub fn charge(&self, amount: usize) -> bool {
+        if !self.checkpoint() {
+            return false;
+        }
         if self.limits.enabled & 4 == 0 {
             return true;
         }
@@ -67,7 +109,7 @@ impl Budget {
     }
     pub fn scalar(&self, value: Value) -> bool {
         if self.limits.enabled & 4 == 0 {
-            return true;
+            return self.checkpoint();
         }
         self.charge(unsafe { sn_scalar_bytes(value) })
     }
@@ -76,7 +118,7 @@ impl Budget {
     }
     pub fn array(&self, value: Value) -> bool {
         if self.limits.enabled & 4 == 0 {
-            return true;
+            return self.checkpoint();
         }
         let len = unsafe { sn_len(value) };
         if !self.charge(len) {
@@ -86,7 +128,7 @@ impl Budget {
     }
     pub fn object(&self, value: Value, rules: &Object) -> bool {
         if self.limits.enabled & 4 == 0 {
-            return true;
+            return self.checkpoint();
         }
         let len = unsafe { sn_len(value) };
         if !self.charge(
@@ -152,6 +194,36 @@ pub(super) fn json_bytes(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_is_checked_between_polls_and_exhaustion_is_sticky() {
+        let mut budget = Budget::new(Limits {
+            max_duration: 10.0,
+            enabled: 8,
+            ..Limits::default()
+        });
+        assert!(budget.check_deadline());
+        budget.deadline = Some(Instant::now() - Duration::from_secs(1));
+        for _ in 0..255 {
+            assert!(budget.checkpoint());
+        }
+        assert!(!budget.checkpoint());
+        assert_eq!(budget.hit.get(), (4, 0));
+        assert!(!budget.charge(1));
+        assert_eq!(budget.spent.get(), 0);
+    }
+
+    #[test]
+    fn huge_finite_deadlines_do_not_panic() {
+        assert!(
+            Budget::new(Limits {
+                max_duration: f64::MAX,
+                enabled: 8,
+                ..Limits::default()
+            })
+            .check_deadline()
+        );
+    }
 
     #[test]
     fn exhaustion_is_sticky_and_reports_the_attempted_work() {

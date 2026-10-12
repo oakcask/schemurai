@@ -353,6 +353,7 @@ impl Object {
         value: Value,
         len: usize,
         undefined: Value,
+        budget: &budget::Budget,
         mut visit: impl FnMut(usize, usize, Value) -> Verdict,
     ) -> Result<usize, Verdict> {
         let mut found = 0;
@@ -363,6 +364,7 @@ impl Object {
             // validity, including required failures and unsupported children.
             let mut candidates = PropertyCandidates {
                 rules: self,
+                budget,
                 indices: Vec::with_capacity(len.min(self.properties.len())),
             };
             let status = decode(unsafe {
@@ -377,12 +379,20 @@ impl Object {
             }
             candidates.indices.sort_unstable();
             candidates.indices.dedup();
-            let missing_required = self
-                .required_property_indices
-                .iter()
-                .copied()
-                .find(|&index| missing(value, self.properties[index].0, undefined));
+            let mut missing_required = None;
+            for &index in &self.required_property_indices {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
+                if missing(value, self.properties[index].0, undefined) {
+                    missing_required = Some(index);
+                    break;
+                }
+            }
             for index in candidates.indices {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 if missing_required.is_some_and(|missing| missing <= index) {
                     return Err(Invalid);
                 }
@@ -404,6 +414,9 @@ impl Object {
             }
         } else {
             for (index, &(key, child)) in self.properties.iter().enumerate() {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 let item = unsafe { sn_lookup(value, key) };
                 if item == undefined {
                     if self.required_properties[index] {
@@ -427,6 +440,7 @@ impl Object {
     fn visit_value_rules<const PROPERTIES: bool>(
         &self,
         caches: &pattern::Caches,
+        budget: &budget::Budget,
         key: Value,
         location: Option<tracking::JsonKey>,
         mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
@@ -455,6 +469,9 @@ impl Object {
             .and_then(|group| group.matches(key))
         {
             while matches != 0 {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 let index = matches.trailing_zeros() as usize;
                 matches &= matches - 1;
                 matched = true;
@@ -466,6 +483,9 @@ impl Object {
             }
         } else {
             for ((pattern, child), &name) in self.patterns.iter().zip(&self.pattern_names) {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
                 match pattern.eval(caches, key) {
                     Unsupported => return Err(Unsupported),
                     Invalid => {}
@@ -1196,6 +1216,9 @@ impl Execution<'_> {
             return Unsupported;
         }
         for op in &self.nodes[node] {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let outcome = match op {
                 Op::Ref(target) => {
                     if RefFrame::contains(active.active, node, value) {
@@ -1221,6 +1244,9 @@ impl Execution<'_> {
                 Op::All(nodes) => {
                     let mut outcome = Valid;
                     for &n in nodes {
+                        if !self.budget.checkpoint() {
+                            return Unsupported;
+                        }
                         outcome = self.eval_with_kind(n, value, depth + 1, active, Some(kind));
                         if outcome != Valid {
                             break;
@@ -1328,6 +1354,9 @@ impl Execution<'_> {
             }
         }
         for (i, &child) in r.prefix.iter().take(len).enumerate() {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
             if result != Valid {
                 return result;
@@ -1335,6 +1364,9 @@ impl Execution<'_> {
         }
         if r.list {
             for (i, &child) in r.items.iter().take(len).enumerate() {
+                if !self.budget.checkpoint() {
+                    return Unsupported;
+                }
                 let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
                 if result != Valid {
                     return result;
@@ -1342,6 +1374,9 @@ impl Execution<'_> {
             }
             if let Some(child) = r.additional {
                 for i in r.items.len()..len {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     let result = self.eval(child, unsafe { sn_entry(value, i) }, depth, active);
                     if result != Valid {
                         return result;
@@ -1399,12 +1434,22 @@ impl Execution<'_> {
             };
             let object_active = self.enter_scope(child, active, &frame);
             let pattern = string.and_then(|(required, rules)| {
-                rules.pattern_only().map(|pattern| (required, pattern))
+                rules
+                    .pattern_only()
+                    .map(|pattern| (required, pattern))
+                    .filter(|_| !self.budget.timed())
             });
-            let format = string
-                .and_then(|(required, rules)| rules.format_only().map(|format| (required, format)));
+            let format = string.and_then(|(required, rules)| {
+                rules
+                    .format_only()
+                    .map(|format| (required, format))
+                    .filter(|_| !self.budget.timed())
+            });
             let content = string.and_then(|(required, rules)| {
-                rules.content_only().map(|content| (required, content))
+                rules
+                    .content_only()
+                    .map(|content| (required, content))
+                    .filter(|_| !self.budget.timed())
             });
             if let Some((required, pattern)) = pattern {
                 let result = pattern.eval_items(
@@ -1451,6 +1496,9 @@ impl Execution<'_> {
                 }
             } else {
                 for &item in values.iter().skip(r.prefix.len()) {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     let result = if let Some((required, rules)) = number {
                         rules.eval_guarded(required, item)
                     } else if let Some((required, rules)) = string {
@@ -1503,7 +1551,7 @@ impl Execution<'_> {
         len: usize,
         depth: usize,
     ) -> Option<Verdict> {
-        if depth > MAX_EVALUATION_DEPTH || self.tracks[child] {
+        if depth > MAX_EVALUATION_DEPTH || self.tracks[child] || self.budget.timed() {
             return None;
         }
         let [op] = self.nodes[child].as_slice() else {
@@ -1566,6 +1614,9 @@ impl Execution<'_> {
             _ => None,
         };
         for &value in values {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let result = if value & self.fixnum_flag != 0 {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
@@ -1590,6 +1641,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
     ) -> Verdict {
         for &value in values {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             let kind = if value & self.fixnum_flag != 0 {
                 TYPE_INTEGRAL_NUMBER
             } else {
@@ -1664,6 +1718,9 @@ impl Execution<'_> {
                 status,
             };
             for entry in entries.as_chunks::<2>().0 {
+                if !self.budget.checkpoint() {
+                    return Unsupported;
+                }
                 if record_entry(&mut context, entry[0], entry[1]) != Valid {
                     return Unsupported;
                 }
@@ -1698,13 +1755,20 @@ impl Execution<'_> {
             return Invalid;
         }
         for &key in &r.required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if missing(value, key, self.undefined) {
                 return Invalid;
             }
         }
-        let found = match r.visit_properties(value, len, self.undefined, |_, child, item| {
-            self.eval(child, item, depth, active)
-        }) {
+        let found = match r.visit_properties(
+            value,
+            len,
+            self.undefined,
+            &self.budget,
+            |_, child, item| self.eval(child, item, depth, active),
+        ) {
             Ok(found) => found,
             Err(status) => return status,
         };
@@ -1722,8 +1786,14 @@ impl Execution<'_> {
             }
         }
         for (name, required) in &r.dependent_required {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, *name, self.undefined) {
                 for &key in required {
+                    if !self.budget.checkpoint() {
+                        return Unsupported;
+                    }
                     if missing(value, key, self.undefined) {
                         return Invalid;
                     }
@@ -1731,6 +1801,9 @@ impl Execution<'_> {
             }
         }
         for &(name, child) in &r.dependent_schemas {
+            if !self.budget.checkpoint() {
+                return Unsupported;
+            }
             if !missing(value, name, self.undefined) {
                 let result = self.eval(child, value, depth, active);
                 if result != Valid {
@@ -2624,10 +2697,14 @@ fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
 struct PropertyCandidates<'a> {
     rules: &'a Object,
     indices: Vec<usize>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn property_candidate(context: *mut c_void, key: Value, _: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<PropertyCandidates<'_>>() };
+        if !c.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -2652,6 +2729,9 @@ struct ObjectContext<'a> {
 pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &*context.cast::<ObjectContext>() };
+        if !c.engine.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
@@ -2661,14 +2741,16 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
                 return result as i32;
             }
         }
-        match c
-            .rules
-            .visit_value_rules::<false>(c.engine.caches, key, None, |_, _, child| {
-                match c.engine.eval(child, value, c.depth, c.active) {
-                    Valid => Ok(()),
-                    status => Err(status),
-                }
-            }) {
+        match c.rules.visit_value_rules::<false>(
+            c.engine.caches,
+            &c.engine.budget,
+            key,
+            None,
+            |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
+                Valid => Ok(()),
+                status => Err(status),
+            },
+        ) {
             Ok(_) => Valid as i32,
             Err(status) => status as i32,
         }
@@ -2795,7 +2877,16 @@ pub unsafe extern "C" fn sn_valid_with_limits(
             memo: memo::Memo::default(),
             budget: std::rc::Rc::new(work),
         };
-        let result = execution.eval(root, value, 0, scope::Context::default());
+        let result = if execution.budget.check_deadline() {
+            execution.eval(root, value, 0, scope::Context::default())
+        } else {
+            Unsupported
+        };
+        let result = if execution.budget.check_deadline() {
+            result
+        } else {
+            Unsupported
+        };
         unsafe {
             (*outcome).spent = execution.budget.spent.get();
             ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();

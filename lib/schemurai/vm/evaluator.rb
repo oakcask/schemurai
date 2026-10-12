@@ -127,6 +127,7 @@ module Schemurai
         end
         instruction_index = 1
         while (opcode = code[instruction_index])
+          @budget&.checkpoint
           operand = code[instruction_index + 1]
           case opcode
           when :boolean
@@ -178,6 +179,7 @@ module Schemurai
           when :oneOf
             matches = 0
             operand.each do |child|
+              @budget&.checkpoint
               matches += 1 if evaluate_valid(child, instance)
               return false if matches > 1
             end
@@ -237,6 +239,7 @@ module Schemurai
 
         instruction_index = 1
         while (opcode = code[instruction_index])
+          @budget&.checkpoint
           operand = code[instruction_index + 1]
           case opcode
           when :boolean
@@ -345,6 +348,7 @@ module Schemurai
         return target unless rules.fragment == "" && target.recursive_anchor?
 
         @dynamic_scope&.each do |resource|
+          @budget&.checkpoint
           compiled = @compiler.compile(resource.root)
           return compiled if compiled.recursive_anchor?
         end
@@ -359,6 +363,7 @@ module Schemurai
         return target unless target.dynamic_anchor == fragment
 
         Array(@dynamic_scope).each do |resource|
+          @budget&.checkpoint
           dynamic = @graph.dynamic_anchor(resource, fragment)
           return @compiler.compile(dynamic) if dynamic
         end
@@ -560,6 +565,7 @@ module Schemurai
 
         if (prefix_items = rules.prefix_items)
           prefix_items.each_with_index do |child, index|
+            @budget&.checkpoint
             break if index >= length
             return false unless evaluate_valid(child, value[index])
           end
@@ -568,12 +574,14 @@ module Schemurai
         items = rules.items
         if rules.items_list
           items.each_with_index do |child, index|
+            @budget&.checkpoint
             break if index >= length
             return false unless evaluate_valid(child, value[index])
           end
           if length > items.length && (additional = rules.additional)
             index = items.length
             while index < length
+              @budget&.checkpoint
               return false unless evaluate_valid(additional, value[index])
               index += 1
             end
@@ -582,6 +590,7 @@ module Schemurai
           start = rules.prefix_items&.length || 0
           index = start
           while index < length
+            @budget&.checkpoint
             return false unless evaluate_valid(items, value[index])
             index += 1
           end
@@ -618,6 +627,7 @@ module Schemurai
 
         if (prefix_items = rules.prefix_items)
           prefix_items.each_with_index do |child, index|
+            @budget&.checkpoint
             break if index >= value.length
             valid = evaluate_child_at(child, value[index], index, "prefixItems", index)
             return Evaluation.invalid if !valid && !@errors
@@ -628,6 +638,7 @@ module Schemurai
         items = rules.items
         if rules.items_list
           items.each_with_index do |child, index|
+            @budget&.checkpoint
             break if index >= value.length
             valid = evaluate_child_at(child, value[index], index, "items", index)
             return Evaluation.invalid if !valid && !@errors
@@ -635,6 +646,7 @@ module Schemurai
           end
           if value.length > items.length && (additional = rules.additional)
             (items.length...value.length).each do |index|
+              @budget&.checkpoint
               valid = evaluate_child_at(additional, value[index], index, "additionalItems")
               return Evaluation.invalid if !valid && !@errors
               (evaluation ||= tracked_evaluation).record_item(index)
@@ -643,6 +655,7 @@ module Schemurai
         elsif items
           start = rules.prefix_items&.length || 0
           (start...value.length).each do |index|
+            @budget&.checkpoint
             valid = evaluate_child_at(items, value[index], index, "items")
             return Evaluation.invalid if !valid && !@errors
             (evaluation ||= tracked_evaluation).record_item(index)
@@ -653,6 +666,7 @@ module Schemurai
           matched = nil
           index = 0
           while index < value.length
+            @budget&.checkpoint
             (matched ||= []) << index if trial(contains, value[index]).valid?
             index += 1
           end
@@ -673,6 +687,7 @@ module Schemurai
           prior_items = prior_evaluation.evaluated_items
           index = 0
           while index < value.length
+            @budget&.checkpoint
             if prior_items.include?(index) || evaluation&.evaluated_items&.include?(index)
               index += 1
               next
@@ -692,7 +707,10 @@ module Schemurai
         length = value.length
         return false if rules.max_properties && length > rules.max_properties
         return false if rules.min_properties && length < rules.min_properties
-        if rules.required && !rules.required.all? { |name| value.key?(name) }
+        if rules.required && !rules.required.all? do |name|
+          @budget&.checkpoint
+          value.key?(name)
+        end
           return false
         end
 
@@ -701,6 +719,7 @@ module Schemurai
         additional = rules.additional
         unless properties.empty? && patterns.nil? && additional.nil?
           value.each do |name, property_value|
+            @budget&.checkpoint
             matched = false
             if (child = properties[name])
               matched = true
@@ -708,6 +727,7 @@ module Schemurai
             end
             if patterns
               patterns.each do |pattern, child|
+                @budget&.checkpoint
                 next unless ecma_regexp(pattern).match?(name)
                 matched = true
                 return false unless evaluate_valid(child, property_value)
@@ -722,9 +742,13 @@ module Schemurai
         end
         if (dependencies = rules.dependencies)
           dependencies.each do |name, dependency|
+            @budget&.checkpoint
             next unless value.key?(name)
             if dependency.is_a?(Array)
-              return false unless dependency.all? { |required_name| value.key?(required_name) }
+              return false unless dependency.all? do |required_name|
+                @budget&.checkpoint
+                value.key?(required_name)
+              end
             else
               return false unless evaluate_valid(dependency, value)
             end
@@ -732,12 +756,17 @@ module Schemurai
         end
         if (dependent_required = rules.dependent_required)
           dependent_required.each do |name, required_names|
+            @budget&.checkpoint
             next unless value.key?(name)
-            return false unless required_names.all? { |required_name| value.key?(required_name) }
+            return false unless required_names.all? do |required_name|
+              @budget&.checkpoint
+              value.key?(required_name)
+            end
           end
         end
         if (dependent_schemas = rules.dependent_schemas)
           dependent_schemas.each do |name, child|
+            @budget&.checkpoint
             next unless value.key?(name)
             return false unless evaluate_valid(child, value)
           end
@@ -763,6 +792,7 @@ module Schemurai
         end
         if (required = rules.required)
           required.each do |name|
+            @budget&.checkpoint
             next if value.key?(name)
             return Evaluation.invalid unless @errors
 
@@ -773,6 +803,7 @@ module Schemurai
         properties = rules.properties
         patterns = rules.patterns
         value.each do |name, property_value|
+          @budget&.checkpoint
           matched = false
           if (child = properties[name])
             matched = true
@@ -782,6 +813,7 @@ module Schemurai
           end
           if patterns
             patterns.each do |pattern, child|
+              @budget&.checkpoint
               next unless ecma_regexp(pattern).match?(name)
               matched = true
               valid = evaluate_child_at(child, property_value, name, "patternProperties", pattern)
@@ -798,15 +830,18 @@ module Schemurai
 
         if (property_names = rules.property_names)
           value.each_key do |name|
+            @budget&.checkpoint
             valid = evaluate_child_at(property_names, name, name, "propertyNames")
             return Evaluation.invalid if !valid && !@errors
           end
         end
         if (dependencies = rules.dependencies)
           dependencies.each do |name, dependency|
+            @budget&.checkpoint
             next unless value.key?(name)
             if dependency.is_a?(Array)
               dependency.each do |required_name|
+                @budget&.checkpoint
                 unless value.key?(required_name)
                   return Evaluation.invalid unless @errors
 
@@ -817,6 +852,7 @@ module Schemurai
               result = evaluate_at(dependency, value, MISSING_SEGMENT, "dependencies", name)
               if result.valid? && !result.evaluated_properties.empty?
                 result.evaluated_properties.each do |property|
+                  @budget&.checkpoint
                   (evaluation ||= tracked_evaluation).record_property(property)
                 end
               end
@@ -825,8 +861,10 @@ module Schemurai
         end
         if (dependent_required = rules.dependent_required)
           dependent_required.each do |name, required_names|
+            @budget&.checkpoint
             next unless value.key?(name)
             required_names.each do |required_name|
+              @budget&.checkpoint
               unless value.key?(required_name)
                 return Evaluation.invalid unless @errors
 
@@ -837,10 +875,12 @@ module Schemurai
         end
         if (dependent_schemas = rules.dependent_schemas)
           dependent_schemas.each do |name, child|
+            @budget&.checkpoint
             next unless value.key?(name)
             result = evaluate_at(child, value, MISSING_SEGMENT, "dependentSchemas", name)
             if result.valid? && !result.evaluated_properties.empty?
               result.evaluated_properties.each do |property|
+                @budget&.checkpoint
                 (evaluation ||= tracked_evaluation).record_property(property)
               end
             end
@@ -849,6 +889,7 @@ module Schemurai
         if (unevaluated = rules.unevaluated)
           prior_properties = prior_evaluation.evaluated_properties
           value.each_key do |name|
+            @budget&.checkpoint
             next if prior_properties.include?(name) || evaluation&.evaluated_properties&.include?(name)
 
             valid = evaluate_child_at(unevaluated, value[name], name, "unevaluatedProperties")
@@ -867,6 +908,7 @@ module Schemurai
         when :allOf
           index = 0
           while index < operand.length
+            @budget&.checkpoint
             evaluation = evaluation.merge(evaluate_at(operand[index], value, MISSING_SEGMENT, "allOf", index))
             index += 1
           end
@@ -874,6 +916,7 @@ module Schemurai
           matches = 0
           index = 0
           while index < operand.length
+            @budget&.checkpoint
             result = trial(operand[index], value)
             if result.valid?
               matches += 1
@@ -887,6 +930,7 @@ module Schemurai
           matched_evaluation = nil
           index = 0
           while index < operand.length
+            @budget&.checkpoint
             result = trial(operand[index], value)
             if result.valid?
               matches += 1
@@ -989,6 +1033,7 @@ module Schemurai
         case left
         when Hash
           left.length == right.length && left.all? do |key, value|
+            @budget&.checkpoint
             right.key?(key) && json_equal?(value, right[key])
           end
         when Array
@@ -996,6 +1041,7 @@ module Schemurai
 
           index = 0
           while index < left.length
+            @budget&.checkpoint
             return false unless json_equal?(left[index], right[index])
             index += 1
           end
@@ -1024,6 +1070,7 @@ module Schemurai
         escaped = false
         in_class = false
         pattern.each_char do |character|
+          @budget&.checkpoint
           if escaped
             translated << case character
             when "d" then in_class ? "0-9" : "[0-9]"

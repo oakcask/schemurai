@@ -227,6 +227,9 @@ impl Execution<'_> {
         let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
         for (op, &source) in self.nodes[node].iter().zip(&self.error_operands[node]) {
+            if !self.budget.checkpoint() {
+                return Err(Unsupported);
+            }
             match op {
                 Op::Unsupported => return Err(Unsupported),
                 Op::Boolean(false) => {
@@ -266,6 +269,9 @@ impl Execution<'_> {
                             (EXCLUSIVE_MINIMUM, "exclusiveMinimum"),
                             (MULTIPLE_OF, "multipleOf"),
                         ] {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if bits & bit != 0 {
                                 report.add(keyword, source, value, 0)?;
                             }
@@ -346,6 +352,9 @@ impl Execution<'_> {
                         }
                     }
                     for (index, &child) in rules.prefix.iter().take(len).enumerate() {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         if tracked {
                             coverage.item(index);
                         }
@@ -361,6 +370,9 @@ impl Execution<'_> {
                     }
                     if rules.list {
                         for (index, &child) in rules.items.iter().take(len).enumerate() {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if tracked {
                                 coverage.item(index);
                             }
@@ -376,6 +388,9 @@ impl Execution<'_> {
                         }
                         if let Some(child) = rules.additional {
                             for index in rules.items.len()..len {
+                                if !self.budget.checkpoint() {
+                                    return Err(Unsupported);
+                                }
                                 if tracked {
                                     coverage.item(index);
                                 }
@@ -411,6 +426,7 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
+                        let pattern = pattern.filter(|_| !self.budget.timed());
                         let number = match self.nodes[child].as_slice() {
                             [Op::Number(required, number)] if depth < MAX_EVALUATION_DEPTH => {
                                 Some((*required, number))
@@ -423,16 +439,21 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
+                        let format = format.filter(|_| !self.budget.timed());
                         let content = match self.nodes[child].as_slice() {
                             [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.content_only().map(|content| (*required, content))
                             }
                             _ => None,
                         };
+                        let content = content.filter(|_| !self.budget.timed());
                         if let Some((required, pattern)) = pattern {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -456,6 +477,9 @@ impl Execution<'_> {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -478,6 +502,9 @@ impl Execution<'_> {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -499,6 +526,9 @@ impl Execution<'_> {
                         } else {
                             for (index, &item) in values.iter().enumerate().skip(rules.prefix.len())
                             {
+                                if !self.budget.checkpoint() {
+                                    return Err(Unsupported);
+                                }
                                 if tracked {
                                     coverage.item(index);
                                 }
@@ -567,6 +597,9 @@ impl Execution<'_> {
                         .filter(|_| prior.item_count() < len && coverage.item_count() < len)
                     {
                         for index in 0..len {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if prior.contains_item(index) || coverage.contains_item(index) {
                                 continue;
                             }
@@ -605,6 +638,9 @@ impl Execution<'_> {
                         report.add("minProperties", source, value, len)?;
                     }
                     for &name in &rules.required_order {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         if missing(value, name, self.undefined) {
                             report.add("required", source, name, 0)?;
                         }
@@ -648,12 +684,18 @@ impl Execution<'_> {
                         }
                     }
                     for dependency in &rules.diagnostic_dependencies {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         match dependency {
                             DiagnosticDependency::Required(name, names, keyword) => {
                                 if missing(value, *name, self.undefined) {
                                     continue;
                                 }
                                 for &required in names {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     if missing(value, required, self.undefined) {
                                         report.add(keyword, (source.0, *name), required, 0)?;
                                     }
@@ -737,6 +779,9 @@ impl Execution<'_> {
                 Op::All(nodes) => {
                     let mut coverage = Tracked::new(Valid);
                     for (index, &child) in nodes.iter().enumerate() {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         let result = report.scoped(&format!("allOf/{index}"), None, |r| {
                             if tracked {
                                 self.collect_kind::<true>(r, child, value, depth + 1, active, kind)
@@ -930,6 +975,9 @@ struct ObjectDiagnostics<'a, 'b, 'c> {
 unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<ObjectDiagnostics<'_, '_, '_>>() };
+        if !c.engine.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
             if c.engine.needs_diagnostics(child, item, c.depth, c.active)? {
                 report.property(segment, key, schema_key, |r| {
@@ -963,6 +1011,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
             }
             let evaluated = c.rules.visit_value_rules::<true>(
                 c.engine.caches,
+                &c.engine.budget,
                 key,
                 None,
                 |segment, name, child| visit(c.report, child, value, segment, name),
@@ -1063,8 +1112,16 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             work: Some(execution.budget.clone()),
             ..Report::default()
         };
-        let result =
-            execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default());
+        let result = if execution.budget.check_deadline() {
+            execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())
+        } else {
+            Err(Unsupported)
+        };
+        let result = if execution.budget.check_deadline() {
+            result
+        } else {
+            Err(Unsupported)
+        };
         let hit = if report.limit_hit.0 != 0 {
             report.limit_hit
         } else {

@@ -32,6 +32,52 @@ RSpec.describe "configurable validation limits" do
         expect(validator.validate([], limits: {max_errors: 0}).valid?).to be(true)
       end
 
+      it "applies a duration deadline to both operations and permits overrides", :aggregate_failures do
+        compiled = Schemurai.compile(true, backend: backend, limits: {max_duration: 0})
+        [:validate, :valid?].each do |method|
+          expect { compiled.public_send(method, nil) }.to raise_error(Schemurai::LimitExceeded) { |error|
+            expect(error.limit).to eq(:max_duration)
+            expect(error.maximum).to eq(0)
+            expect(error.attempted).to be >= 0
+          }
+          result = compiled.public_send(method, nil, limits: {max_duration: 10})
+          expect((method == :valid?) ? result : result.valid?).to be(true)
+          result = compiled.public_send(method, nil, limits: nil)
+          expect((method == :valid?) ? result : result.valid?).to be(true)
+        end
+      end
+
+      it "polls required scans even when no child schema or error is evaluated", :aggregate_failures do
+        schema = {"required" => Array.new(1000) { |i| "p#{i}" }}
+        value = schema.fetch("required").to_h { |name| [name, 1] }
+        compiled = Schemurai.compile(schema, backend: backend)
+        allow(Process).to receive(:clock_gettime).and_call_original
+        [:validate, :valid?].each do |method|
+          allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+          visits = 0
+          allow(value).to receive(:key?).and_wrap_original do |original, *args|
+            visits += 1
+            allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2)
+            original.call(*args)
+          end
+          expect { compiled.public_send(method, value, limits: {max_duration: 0.1}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+            expect(error.limit).to eq(:max_duration)
+          }
+          expect(visits).to be_between(1, 256)
+        end
+      end
+
+      it "checks the deadline before returning a short completed call", :aggregate_failures do
+        compiled = Schemurai.compile(true, backend: backend)
+        allow(Process).to receive(:clock_gettime).and_call_original
+        [:validate, :valid?].each do |method|
+          allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0, 0.0, 0.2)
+          expect { compiled.public_send(method, nil, limits: {max_duration: 0.1}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+            expect(error.limit).to eq(:max_duration)
+          }
+        end
+      end
+
       it "counts compact JSON bytes including escaping and array punctuation", :aggregate_failures do
         schema = {"additionalProperties" => false}
         value = {"日本語\"\\\n\u0001/~" => 1, "second" => 2}
@@ -83,7 +129,7 @@ RSpec.describe "configurable validation limits" do
 
       it "preserves independent limits in a shareable registry", :aggregate_failures do
         registry = Schemurai::SchemaRegistry.new(schemas: {"urn:limited" => {"items" => false}}, backend: backend).make_shareable
-        limits = Schemurai::Limits.new(max_errors: 1)
+        limits = Schemurai::Limits.new(max_errors: 1, max_duration: 10)
         ractor = Ractor.new(registry, limits) do |shared, caps|
           shared.validator_for("urn:limited", limits: caps).validate([1, 2])
         rescue Schemurai::LimitExceeded => error
@@ -101,6 +147,10 @@ RSpec.describe "configurable validation limits" do
       expect { Schemurai::Limits.new(max_output_bytes: value) }.to raise_error(ArgumentError)
       expect { Schemurai::Limits.new(max_evaluations: value) }.to raise_error(ArgumentError)
     end
+    [-1, Float::NAN, Float::INFINITY, -Float::INFINITY, "1", false, 10**1000].each do |value|
+      expect { Schemurai::Limits.new(max_duration: value) }.to raise_error(ArgumentError)
+    end
+    expect(Schemurai::Limits.new(max_duration: 0.1).enabled?).to be(true)
     expect { Schemurai.compile(true, limits: {unknown: 1}) }.to raise_error(ArgumentError)
     expect { Schemurai.compile(true, limits: 1) }.to raise_error(ArgumentError)
     expect(Schemurai::Limits.new.frozen?).to be(true)
@@ -109,6 +159,8 @@ RSpec.describe "configurable validation limits" do
   it "applies limits to explicit meta-schema validation", :aggregate_failures do
     expect { Schemurai.validate_schema({"type" => "integer"}, limits: {max_evaluations: 0}) }.to raise_error(Schemurai::LimitExceeded)
     expect { Schemurai.valid_schema?({"type" => "integer"}, limits: {max_evaluations: 0}) }.to raise_error(Schemurai::LimitExceeded)
+    expect { Schemurai.validate_schema({"type" => "integer"}, limits: {max_duration: 0}) }.to raise_error(Schemurai::LimitExceeded)
+    expect { Schemurai.valid_schema?({"type" => "integer"}, limits: {max_duration: 0}) }.to raise_error(Schemurai::LimitExceeded)
     expect(Schemurai.valid_schema?({"type" => "unknown"}, limits: {max_errors: 0, max_output_bytes: 0})).to be(false)
     expect(Schemurai.valid_schema?({"type" => "integer"}, limits: {max_errors: 0, max_output_bytes: 0})).to be(true)
   end

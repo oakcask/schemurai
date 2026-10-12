@@ -221,7 +221,7 @@ module Schemurai
     end
 
     # Returns whether +instance+ is valid without building a detailed error list.
-    # +max_evaluations+ applies; diagnostic count/byte limits are ignored.
+    # Work and duration limits apply; diagnostic count/byte limits are ignored.
     def valid?(instance, limits: @limits)
       selected = Limits.coerce(limits)
       return @evaluator.valid?(instance) unless selected.enabled?

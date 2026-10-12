@@ -16,6 +16,7 @@ module Schemurai
           @budget.record_error(error)
           errors << error
         end
+        @budget.check_deadline!
         Result.new(errors)
       ensure
         @budget = nil
@@ -23,7 +24,9 @@ module Schemurai
 
       def valid?(instance, limits:)
         @budget = LimitBudget.new(limits)
-        super(instance)
+        result = super(instance)
+        @budget.check_deadline!
+        result
       ensure
         @budget = nil
       end
@@ -39,6 +42,9 @@ module Schemurai
       end
 
       private def visit_node(node, instance)
+        @budget.checkpoint
+        return unless @budget.work_limited?
+
         schema = node.schema
         @budget.evaluations(1 + (schema.is_a?(Hash) ? schema.length : 0))
         scalar_work(instance) unless instance.is_a?(Hash) || instance.is_a?(Array)
@@ -60,6 +66,8 @@ module Schemurai
       end
 
       private def array_scan(node, value)
+        return unless @budget.work_limited?
+
         schema = node.schema
         prefix = schema["prefixItems"]
         items = schema["items"]
@@ -77,6 +85,8 @@ module Schemurai
       end
 
       private def object_scan(node, value)
+        return unless @budget.work_limited?
+
         schema = node.schema
         patterns = schema.fetch("patternProperties", {})
         @budget.evaluations(value.length * (1 + patterns.length) + Array(schema["required"]).length)
@@ -92,18 +102,27 @@ module Schemurai
       end
 
       private def valid_string?(node, value)
+        @budget.check_deadline!
         scalar_work(value)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def check_string(node, value)
+        @budget.check_deadline!
         scalar_work(value)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def decimal(value)
+        @budget.check_deadline!
         scalar_work(value)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def type?(value, type)
@@ -113,18 +132,27 @@ module Schemurai
       end
 
       private def ecma_regexp(pattern)
+        @budget.check_deadline!
         scalar_work(pattern)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def valid_content?(schema, value)
+        @budget.check_deadline!
         scalar_work(value)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def check_content(schema, value)
+        @budget.check_deadline!
         scalar_work(value)
-        super
+        result = super
+        @budget.check_deadline!
+        result
       end
 
       private def unique_items?(values)
@@ -133,6 +161,9 @@ module Schemurai
       end
 
       private def json_equal?(left, right)
+        @budget.checkpoint
+        return super unless @budget.work_limited?
+
         @budget.evaluations(1 + ((left.is_a?(Hash) || left.is_a?(Array)) ? left.length : 0))
         scalar_work(left)
         scalar_work(right)
@@ -141,6 +172,9 @@ module Schemurai
       end
 
       private def json_fingerprint(value)
+        @budget.checkpoint
+        return super unless @budget.work_limited?
+
         @budget.evaluations(1 + ((value.is_a?(Hash) || value.is_a?(Array)) ? value.length : 0))
         scalar_work(value)
         value.each_key { |key| scalar_work(key) } if value.is_a?(Hash)
@@ -163,6 +197,8 @@ module Schemurai
       end
 
       private def scalar_work(value, multiplier: 1)
+        return unless @budget.work_limited?
+
         size = case value
         when String then value.bytesize
         when Integer then (value.bit_length + 7) / 8

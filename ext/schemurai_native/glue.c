@@ -140,7 +140,7 @@ static VALUE runner(VALUE self, VALUE root) {
     RB_GC_GUARD(self);
     return object;
 }
-typedef struct { size_t max_errors, max_output_bytes, max_evaluations; uint32_t enabled; } native_limits;
+typedef struct { size_t max_errors, max_output_bytes, max_evaluations; uint32_t enabled; double max_duration; } native_limits;
 typedef struct { size_t spent; uint32_t kind; size_t attempted; } native_outcome;
 extern int sn_valid_with_limits(const void *, const void *, size_t, VALUE, const native_limits *, native_outcome *);
 static native_limits read_limits(VALUE budget) {
@@ -151,6 +151,8 @@ static native_limits read_limits(VALUE budget) {
         VALUE cap = rb_ary_entry(caps, i);
         if (!NIL_P(cap)) { *targets[i] = NUM2SIZET(cap); limits.enabled |= 1u << i; }
     }
+    VALUE duration = rb_funcall(budget, rb_intern("native_duration"), 0);
+    if (!NIL_P(duration)) { limits.max_duration = NUM2DBL(duration); limits.enabled |= 8; }
     RB_GC_GUARD(caps);
     return limits;
 }
@@ -532,6 +534,7 @@ static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, con
     size_t count = sn_report_len(h->report);
     VALUE output = rb_ary_new_capa(count);
     for (size_t index = 0; index < count; index++) {
+        if (!NIL_P(budget) && index % 256 == 0) rb_funcall(budget, rb_intern("check_deadline!"), 0);
         diagnostic_record r;
         sn_report_record(h->report, index, &r);
         VALUE row = rb_ary_new_capa(7);

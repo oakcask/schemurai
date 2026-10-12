@@ -7,6 +7,7 @@ module Schemurai
         # Avoid building an index for small arrays and early duplicates.
         if values.length <= 16
           values.each_with_index do |item, index|
+            @budget&.checkpoint
             index.times { |previous| return false if json_equal?(values[previous], item) }
           end
           return true
@@ -16,6 +17,7 @@ module Schemurai
         # Store a single index until a collision needs a bucket array.
         index = 0
         while index < values.length
+          @budget&.checkpoint
           item = values[index]
           fingerprint = json_fingerprint(item)
           if (bucket = buckets[fingerprint])

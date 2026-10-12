@@ -1,0 +1,3100 @@
+{
+  "implementation": "PR 189 cooperative max_duration prototype",
+  "cpu": "AMD Ryzen 9 7900X",
+  "caps": {
+    "max_errors": 2000,
+    "max_output_bytes": 1000000,
+    "max_evaluations": 10000000,
+    "max_duration": 10
+  },
+  "summary": [
+    {
+      "backend": "ruby",
+      "workload": "successful",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 1608.302,
+        "max_errors": 2285.919,
+        "max_output_bytes": 2298.527,
+        "max_evaluations": 5144.296,
+        "max_duration": 2563.459,
+        "all": 5708.0
+      }
+    },
+    {
+      "backend": "ruby",
+      "workload": "successful",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 3368.262,
+        "max_errors": 4264.796,
+        "max_output_bytes": 4273.524,
+        "max_evaluations": 7425.594,
+        "max_duration": 4478.346,
+        "all": 7893.673
+      }
+    },
+    {
+      "backend": "ruby",
+      "workload": "failing",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 2.715,
+        "max_errors": 4.199,
+        "max_output_bytes": 4.202,
+        "max_evaluations": 7.551,
+        "max_duration": 4.801,
+        "all": 8.643
+      }
+    },
+    {
+      "backend": "ruby",
+      "workload": "failing",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 6717.203,
+        "max_errors": 8739.166,
+        "max_output_bytes": 22383.461,
+        "max_evaluations": 13554.656,
+        "max_duration": 9062.973,
+        "all": 30534.916
+      }
+    },
+    {
+      "backend": "vm",
+      "workload": "successful",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 534.467,
+        "max_errors": 860.787,
+        "max_output_bytes": 875.127,
+        "max_evaluations": 2518.514,
+        "max_duration": 1016.176,
+        "all": 2902.567
+      }
+    },
+    {
+      "backend": "vm",
+      "workload": "successful",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 1935.973,
+        "max_errors": 2527.885,
+        "max_output_bytes": 2546.177,
+        "max_evaluations": 4450.166,
+        "max_duration": 2746.271,
+        "all": 4852.199
+      }
+    },
+    {
+      "backend": "vm",
+      "workload": "failing",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 1.226,
+        "max_errors": 2.37,
+        "max_output_bytes": 2.38,
+        "max_evaluations": 4.542,
+        "max_duration": 2.97,
+        "all": 5.383
+      }
+    },
+    {
+      "backend": "vm",
+      "workload": "failing",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 5384.048,
+        "max_errors": 7424.486,
+        "max_output_bytes": 21148.758,
+        "max_evaluations": 11148.33,
+        "max_duration": 7705.352,
+        "all": 28041.049
+      }
+    },
+    {
+      "backend": "native",
+      "workload": "successful",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 19.739,
+        "max_errors": 20.758,
+        "max_output_bytes": 20.796,
+        "max_evaluations": 53.374,
+        "max_duration": 23.517,
+        "all": 59.298
+      }
+    },
+    {
+      "backend": "native",
+      "workload": "successful",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 118.572,
+        "max_errors": 120.365,
+        "max_output_bytes": 120.143,
+        "max_evaluations": 156.642,
+        "max_duration": 125.969,
+        "all": 166.921
+      }
+    },
+    {
+      "backend": "native",
+      "workload": "failing",
+      "method": "valid?",
+      "microseconds": {
+        "unlimited": 0.33,
+        "max_errors": 1.218,
+        "max_output_bytes": 1.223,
+        "max_evaluations": 5.824,
+        "max_duration": 1.637,
+        "all": 6.819
+      }
+    },
+    {
+      "backend": "native",
+      "workload": "failing",
+      "method": "validate",
+      "microseconds": {
+        "unlimited": 1943.631,
+        "max_errors": 2386.252,
+        "max_output_bytes": 15636.189,
+        "max_evaluations": 2852.39,
+        "max_duration": 2459.254,
+        "all": 18520.846
+      }
+    }
+  ],
+  "runs": [
+    {
+      "metadata": {
+        "ruby": "ruby 4.0.6 (2026-07-14 revision 03b6d3f889) +PRISM [x86_64-linux]",
+        "yjit": false,
+        "baseline": false,
+        "rounds": 9,
+        "batch_seconds": 0.05
+      },
+      "measurements": [
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 32,
+          "microseconds": 1623.1,
+          "samples": [
+            1630.232,
+            1622.809,
+            1621.645,
+            1626.501,
+            1629.263,
+            1625.569,
+            1622.898,
+            1623.1,
+            1590.253
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 22,
+          "microseconds": 2342.969,
+          "samples": [
+            2296.625,
+            2339.901,
+            2341.919,
+            2343.196,
+            2351.636,
+            2342.969,
+            2344.455,
+            2346.848,
+            2303.66
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 22,
+          "microseconds": 2348.378,
+          "samples": [
+            2295.402,
+            2349.071,
+            2347.639,
+            2355.612,
+            2356.003,
+            2348.984,
+            2340.454,
+            2348.378,
+            2301.652
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 10,
+          "microseconds": 5201.959,
+          "samples": [
+            5316.681,
+            5198.337,
+            5201.959,
+            5197.484,
+            5219.833,
+            5216.85,
+            5198.072,
+            5235.887,
+            5100.73
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 20,
+          "microseconds": 2602.868,
+          "samples": [
+            2574.694,
+            2606.664,
+            2623.443,
+            2599.599,
+            2604.259,
+            2596.094,
+            2602.868,
+            2608.24,
+            2586.983
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 9,
+          "microseconds": 5830.26,
+          "samples": [
+            5729.4,
+            5842.654,
+            5830.26,
+            5826.869,
+            5850.471,
+            5841.817,
+            5863.603,
+            5817.545,
+            5684.891
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 16,
+          "microseconds": 3316.212,
+          "samples": [
+            3477.014,
+            3311.184,
+            3326.165,
+            3314.231,
+            3311.355,
+            3319.753,
+            3313.531,
+            3316.212,
+            3316.656
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 12,
+          "microseconds": 4230.516,
+          "samples": [
+            4224.568,
+            4230.516,
+            4218.524,
+            4229.923,
+            4238.031,
+            4236.261,
+            4239.746,
+            4220.978,
+            4239.54
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 12,
+          "microseconds": 4226.145,
+          "samples": [
+            4250.812,
+            4217.133,
+            4224.563,
+            4218.085,
+            4224.279,
+            4226.145,
+            4230.908,
+            4232.1,
+            4249.462
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 7,
+          "microseconds": 7295.696,
+          "samples": [
+            7610.079,
+            7295.696,
+            7313.777,
+            7276.469,
+            7290.779,
+            7281.773,
+            7312.97,
+            7281.168,
+            7640.626
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 12,
+          "microseconds": 4422.099,
+          "samples": [
+            4476.27,
+            4421.338,
+            4422.099,
+            4449.43,
+            4417.616,
+            4450.255,
+            4419.384,
+            4415.776,
+            4426.29
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 7,
+          "microseconds": 7797.055,
+          "samples": [
+            7788.416,
+            7768.174,
+            7862.155,
+            7792.988,
+            7797.055,
+            8062.376,
+            7819.56,
+            7770.43,
+            7832.91
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 18008,
+          "microseconds": 2.705,
+          "samples": [
+            2.758,
+            2.762,
+            2.729,
+            2.724,
+            2.702,
+            2.692,
+            2.701,
+            2.697,
+            2.705
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 11215,
+          "microseconds": 4.185,
+          "samples": [
+            4.25,
+            4.269,
+            4.226,
+            4.185,
+            4.158,
+            4.169,
+            4.176,
+            4.17,
+            4.36
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 12074,
+          "microseconds": 4.192,
+          "samples": [
+            4.371,
+            4.27,
+            4.199,
+            4.158,
+            4.192,
+            4.173,
+            4.178,
+            4.166,
+            4.205
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 6745,
+          "microseconds": 7.524,
+          "samples": [
+            7.697,
+            7.699,
+            7.612,
+            7.524,
+            7.585,
+            7.502,
+            7.51,
+            7.501,
+            7.504
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 10433,
+          "microseconds": 4.795,
+          "samples": [
+            4.907,
+            4.903,
+            4.828,
+            4.787,
+            4.795,
+            4.775,
+            4.807,
+            4.781,
+            4.788
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 5938,
+          "microseconds": 8.636,
+          "samples": [
+            9.047,
+            8.85,
+            8.782,
+            8.65,
+            8.636,
+            8.618,
+            8.608,
+            8.611,
+            8.6
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 7,
+          "microseconds": 6592.706,
+          "samples": [
+            6717.524,
+            6716.882,
+            6478.655,
+            6477.758,
+            6503.543,
+            6988.834,
+            6688.162,
+            6592.706,
+            6577.042
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 6,
+          "microseconds": 8698.381,
+          "samples": [
+            8844.524,
+            8665.443,
+            8748.86,
+            8698.381,
+            8629.02,
+            8893.003,
+            8688.636,
+            8729.473,
+            8669.121
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 3,
+          "microseconds": 21810.319,
+          "samples": [
+            22410.182,
+            21676.82,
+            21810.319,
+            21727.828,
+            21781.44,
+            21798.345,
+            22019.728,
+            21871.34,
+            21977.717
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 4,
+          "microseconds": 13403.494,
+          "samples": [
+            13915.341,
+            13339.536,
+            13403.494,
+            13491.074,
+            13475.013,
+            14204.86,
+            13395.387,
+            13381.964,
+            13398.111
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 6,
+          "microseconds": 9022.724,
+          "samples": [
+            9368.959,
+            9268.302,
+            8928.261,
+            9093.185,
+            8994.544,
+            9458.539,
+            9007.269,
+            8952.506,
+            9022.724
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 2,
+          "microseconds": 30024.613,
+          "samples": [
+            30832.871,
+            30735.129,
+            30082.143,
+            29663.558,
+            30024.613,
+            30938.029,
+            29953.274,
+            29835.794,
+            29986.919
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 95,
+          "microseconds": 539.193,
+          "samples": [
+            534.554,
+            536.224,
+            538.501,
+            539.368,
+            540.622,
+            542.966,
+            538.842,
+            539.37,
+            539.193
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 57,
+          "microseconds": 886.651,
+          "samples": [
+            863.053,
+            883.852,
+            885.078,
+            888.167,
+            886.546,
+            886.651,
+            888.933,
+            888.778,
+            888.46
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 57,
+          "microseconds": 887.709,
+          "samples": [
+            865.743,
+            884.51,
+            887.143,
+            888.034,
+            887.709,
+            890.256,
+            887.023,
+            890.394,
+            889.672
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 20,
+          "microseconds": 2606.456,
+          "samples": [
+            2520.139,
+            2577.893,
+            2604.835,
+            2698.604,
+            2606.456,
+            2612.046,
+            2601.998,
+            2608.849,
+            2614.105
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 49,
+          "microseconds": 1047.942,
+          "samples": [
+            1021.349,
+            1045.016,
+            1045.002,
+            1047.942,
+            1050.363,
+            1049.306,
+            1047.701,
+            1050.585,
+            1051.108
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 18,
+          "microseconds": 2989.005,
+          "samples": [
+            2918.323,
+            2985.241,
+            2989.005,
+            2988.343,
+            2979.112,
+            3020.07,
+            2994.882,
+            3000.686,
+            3015.476
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 26,
+          "microseconds": 1956.204,
+          "samples": [
+            1986.538,
+            1981.915,
+            1994.415,
+            1985.499,
+            1955.804,
+            1954.668,
+            1951.011,
+            1950.18,
+            1956.204
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 18,
+          "microseconds": 2588.762,
+          "samples": [
+            2592.781,
+            2619.094,
+            2588.762,
+            2600.011,
+            2617.483,
+            2571.102,
+            2531.373,
+            2524.397,
+            2538.741
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 18,
+          "microseconds": 2567.425,
+          "samples": [
+            2632.617,
+            2641.356,
+            2610.272,
+            2570.98,
+            2567.425,
+            2530.356,
+            2549.519,
+            2557.63,
+            2546.9
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 11,
+          "microseconds": 4484.413,
+          "samples": [
+            4576.431,
+            4560.079,
+            4539.624,
+            4516.997,
+            4484.413,
+            4429.631,
+            4443.044,
+            4455.327,
+            4424.37
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 18,
+          "microseconds": 2763.898,
+          "samples": [
+            2804.406,
+            2851.655,
+            2793.088,
+            2756.497,
+            2719.736,
+            2763.898,
+            2787.798,
+            2747.114,
+            2748.227
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 10,
+          "microseconds": 4937.021,
+          "samples": [
+            4955.228,
+            4937.021,
+            4948.557,
+            4966.367,
+            4947.616,
+            4851.528,
+            4830.442,
+            4870.688,
+            4833.867
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 39734,
+          "microseconds": 1.219,
+          "samples": [
+            1.212,
+            1.219,
+            1.218,
+            1.221,
+            1.221,
+            1.223,
+            1.221,
+            1.213,
+            1.215
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 21499,
+          "microseconds": 2.374,
+          "samples": [
+            2.352,
+            2.363,
+            2.415,
+            2.433,
+            2.387,
+            2.374,
+            2.369,
+            2.372,
+            2.376
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 21297,
+          "microseconds": 2.397,
+          "samples": [
+            2.394,
+            2.4,
+            2.374,
+            2.38,
+            2.553,
+            2.397,
+            2.402,
+            2.357,
+            2.398
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 7722,
+          "microseconds": 4.551,
+          "samples": [
+            4.548,
+            4.647,
+            4.552,
+            4.576,
+            4.544,
+            4.551,
+            4.556,
+            4.54,
+            4.534
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 17209,
+          "microseconds": 2.975,
+          "samples": [
+            2.969,
+            3.009,
+            3.011,
+            2.98,
+            2.979,
+            2.971,
+            2.975,
+            2.958,
+            2.954
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 9395,
+          "microseconds": 5.402,
+          "samples": [
+            5.402,
+            5.366,
+            5.414,
+            5.416,
+            5.475,
+            5.43,
+            5.385,
+            5.4,
+            5.391
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 10,
+          "microseconds": 5398.904,
+          "samples": [
+            5385.422,
+            5864.192,
+            5463.448,
+            5571.843,
+            5329.895,
+            5463.25,
+            5378.686,
+            5382.675,
+            5398.904
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 7,
+          "microseconds": 7441.467,
+          "samples": [
+            7383.4,
+            7273.415,
+            7567.902,
+            7545.935,
+            7554.249,
+            7425.335,
+            7441.467,
+            7463.268,
+            7390.281
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 3,
+          "microseconds": 21276.177,
+          "samples": [
+            21053.897,
+            21276.177,
+            21912.194,
+            21764.94,
+            21747.865,
+            21099.873,
+            21086.567,
+            21457.946,
+            21144.601
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 5,
+          "microseconds": 11203.099,
+          "samples": [
+            11203.099,
+            11354.155,
+            11374.919,
+            11501.713,
+            11297.442,
+            10956.616,
+            11109.954,
+            11047.853,
+            11011.714
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 7,
+          "microseconds": 7705.622,
+          "samples": [
+            7705.083,
+            7651.542,
+            7872.957,
+            8059.665,
+            7705.622,
+            7826.191,
+            7753.148,
+            7678.956,
+            7701.689
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 2,
+          "microseconds": 28300.571,
+          "samples": [
+            28300.571,
+            27460.513,
+            28763.655,
+            28604.952,
+            28630.992,
+            27969.166,
+            28386.811,
+            28112.931,
+            27945.081
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 2635,
+          "microseconds": 19.852,
+          "samples": [
+            19.852,
+            19.823,
+            19.525,
+            19.572,
+            19.669,
+            19.856,
+            19.92,
+            19.933,
+            19.955
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 2385,
+          "microseconds": 20.904,
+          "samples": [
+            20.69,
+            21.243,
+            20.455,
+            20.522,
+            20.565,
+            20.909,
+            20.931,
+            20.904,
+            20.956
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 2540,
+          "microseconds": 20.73,
+          "samples": [
+            20.808,
+            20.488,
+            20.482,
+            20.525,
+            20.561,
+            20.73,
+            21.063,
+            20.933,
+            20.967
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 980,
+          "microseconds": 53.344,
+          "samples": [
+            53.558,
+            52.403,
+            52.533,
+            52.47,
+            52.345,
+            53.405,
+            53.344,
+            53.475,
+            53.665
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 1797,
+          "microseconds": 23.622,
+          "samples": [
+            23.426,
+            23.681,
+            23.173,
+            23.157,
+            23.267,
+            23.711,
+            23.645,
+            23.622,
+            23.691
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 855,
+          "microseconds": 58.407,
+          "samples": [
+            58.407,
+            57.592,
+            57.559,
+            58.027,
+            57.882,
+            59.197,
+            59.039,
+            58.919,
+            59.097
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 395,
+          "microseconds": 118.08,
+          "samples": [
+            119.624,
+            118.565,
+            118.695,
+            118.578,
+            118.08,
+            116.626,
+            116.827,
+            117.9,
+            116.928
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 416,
+          "microseconds": 120.139,
+          "samples": [
+            121.926,
+            120.139,
+            120.819,
+            120.586,
+            120.145,
+            118.835,
+            119.21,
+            118.935,
+            118.997
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 402,
+          "microseconds": 119.872,
+          "samples": [
+            122.017,
+            119.872,
+            120.26,
+            120.056,
+            120.231,
+            118.612,
+            118.851,
+            119.145,
+            118.905
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 311,
+          "microseconds": 156.511,
+          "samples": [
+            159.159,
+            156.511,
+            156.715,
+            156.568,
+            156.832,
+            154.559,
+            155.002,
+            154.806,
+            154.773
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 386,
+          "microseconds": 125.597,
+          "samples": [
+            127.231,
+            126.166,
+            125.776,
+            125.597,
+            126.161,
+            124.481,
+            124.515,
+            124.413,
+            125.578
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 296,
+          "microseconds": 166.706,
+          "samples": [
+            168.885,
+            166.706,
+            168.116,
+            167.126,
+            166.716,
+            164.971,
+            165.043,
+            165.234,
+            165.14
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 100000,
+          "microseconds": 0.327,
+          "samples": [
+            0.327,
+            0.327,
+            0.327,
+            0.328,
+            0.327,
+            0.327,
+            0.327,
+            0.33,
+            0.331
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 40190,
+          "microseconds": 1.18,
+          "samples": [
+            1.175,
+            1.174,
+            1.181,
+            1.18,
+            1.174,
+            1.175,
+            1.306,
+            1.22,
+            1.19
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 38271,
+          "microseconds": 1.195,
+          "samples": [
+            1.223,
+            1.195,
+            1.187,
+            1.205,
+            1.19,
+            1.19,
+            1.19,
+            1.204,
+            1.2
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 8646,
+          "microseconds": 5.755,
+          "samples": [
+            5.738,
+            5.736,
+            5.76,
+            5.739,
+            5.753,
+            5.758,
+            5.755,
+            5.867,
+            5.825
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 32510,
+          "microseconds": 1.596,
+          "samples": [
+            1.596,
+            1.587,
+            1.588,
+            1.588,
+            1.596,
+            1.596,
+            1.594,
+            1.636,
+            1.625
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 7229,
+          "microseconds": 6.801,
+          "samples": [
+            6.801,
+            6.806,
+            6.792,
+            6.764,
+            6.828,
+            6.767,
+            6.746,
+            6.858,
+            6.827
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 26,
+          "microseconds": 1925.523,
+          "samples": [
+            2149.765,
+            1945.556,
+            1949.791,
+            1929.108,
+            1888.733,
+            1904.575,
+            1896.332,
+            1925.523,
+            1893.295
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 22,
+          "microseconds": 2323.831,
+          "samples": [
+            2335.956,
+            2320.968,
+            2361.228,
+            2360.597,
+            2322.073,
+            2323.831,
+            2312.867,
+            2388.423,
+            2319.138
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 4,
+          "microseconds": 15459.228,
+          "samples": [
+            15338.94,
+            15889.33,
+            15600.233,
+            15515.008,
+            15839.721,
+            15256.402,
+            15390.115,
+            15459.228,
+            15370.188
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 18,
+          "microseconds": 2786.358,
+          "samples": [
+            2786.358,
+            2854.374,
+            2830.202,
+            2830.742,
+            2753.451,
+            2767.277,
+            2767.637,
+            2768.336,
+            2900.834
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 21,
+          "microseconds": 2410.995,
+          "samples": [
+            2413.811,
+            2457.198,
+            2461.31,
+            2430.25,
+            2375.863,
+            2410.995,
+            2379.078,
+            2381.602,
+            2394.242
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 3,
+          "microseconds": 18092.165,
+          "samples": [
+            18267.268,
+            17993.472,
+            18365.691,
+            18601.077,
+            18085.656,
+            18092.165,
+            17996.253,
+            18222.338,
+            18073.497
+          ]
+        }
+      ]
+    },
+    {
+      "metadata": {
+        "ruby": "ruby 4.0.6 (2026-07-14 revision 03b6d3f889) +PRISM [x86_64-linux]",
+        "yjit": false,
+        "baseline": false,
+        "rounds": 9,
+        "batch_seconds": 0.05
+      },
+      "measurements": [
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 32,
+          "microseconds": 1604.079,
+          "samples": [
+            1605.961,
+            1603.555,
+            1609.59,
+            1604.079,
+            1592.67,
+            1591.854,
+            1598.81,
+            1604.17,
+            1607.014
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 23,
+          "microseconds": 2273.532,
+          "samples": [
+            2274.461,
+            2273.532,
+            2275.214,
+            2273.981,
+            2253.044,
+            2260.423,
+            2273.109,
+            2273.469,
+            2274.231
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 23,
+          "microseconds": 2273.586,
+          "samples": [
+            2284.828,
+            2273.586,
+            2284.318,
+            2245.224,
+            2249.724,
+            2253.061,
+            2316.954,
+            2273.132,
+            2279.303
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 10,
+          "microseconds": 5098.798,
+          "samples": [
+            5084.205,
+            5124.488,
+            5104.131,
+            5016.942,
+            5030.37,
+            5062.525,
+            5164.103,
+            5098.798,
+            5106.793
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 20,
+          "microseconds": 2529.395,
+          "samples": [
+            2526.905,
+            2529.395,
+            2552.225,
+            2507.063,
+            2510.919,
+            2509.24,
+            2530.953,
+            2532.888,
+            2539.036
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 9,
+          "microseconds": 5678.125,
+          "samples": [
+            5707.68,
+            5708.32,
+            5674.599,
+            5684.383,
+            5623.149,
+            5621.885,
+            5646.212,
+            5678.125,
+            5679.798
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 15,
+          "microseconds": 3412.027,
+          "samples": [
+            3368.109,
+            3368.414,
+            3373.256,
+            3392.767,
+            3429.303,
+            3471.841,
+            3412.027,
+            3456.165,
+            3427.361
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 12,
+          "microseconds": 4356.166,
+          "samples": [
+            4301.17,
+            4331.329,
+            4307.866,
+            4289.846,
+            4367.992,
+            4377.457,
+            4373.468,
+            4356.166,
+            4374.318
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 12,
+          "microseconds": 4369.233,
+          "samples": [
+            4317.286,
+            4321.993,
+            4296.237,
+            4354.838,
+            4369.233,
+            4371.046,
+            4387.292,
+            4379.868,
+            4380.468
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 7,
+          "microseconds": 7553.645,
+          "samples": [
+            7414.423,
+            7423.722,
+            7466.969,
+            7427.466,
+            7563.375,
+            7754.912,
+            7570.259,
+            7571.724,
+            7553.645
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 12,
+          "microseconds": 4557.005,
+          "samples": [
+            4494.898,
+            4496.614,
+            4480.422,
+            4557.005,
+            4556.875,
+            4566.024,
+            4562.085,
+            4562.991,
+            4569.967
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 7,
+          "microseconds": 8055.382,
+          "samples": [
+            7883.767,
+            7918.143,
+            7964.374,
+            7903.579,
+            8065.075,
+            8056.578,
+            8097.491,
+            8148.531,
+            8055.382
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 18576,
+          "microseconds": 2.732,
+          "samples": [
+            2.732,
+            2.74,
+            2.734,
+            2.756,
+            2.748,
+            2.685,
+            2.693,
+            2.677,
+            2.677
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 12439,
+          "microseconds": 4.201,
+          "samples": [
+            4.25,
+            4.208,
+            4.201,
+            4.224,
+            4.202,
+            4.197,
+            4.108,
+            4.108,
+            4.122
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 12349,
+          "microseconds": 4.214,
+          "samples": [
+            4.281,
+            4.214,
+            4.255,
+            4.213,
+            4.239,
+            4.254,
+            4.149,
+            4.123,
+            4.138
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 5176,
+          "microseconds": 7.579,
+          "samples": [
+            7.638,
+            7.641,
+            7.586,
+            7.601,
+            7.579,
+            7.495,
+            7.471,
+            7.424,
+            7.454
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 6172,
+          "microseconds": 4.832,
+          "samples": [
+            4.841,
+            4.848,
+            4.854,
+            4.832,
+            4.844,
+            4.735,
+            4.717,
+            4.752,
+            4.789
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 6212,
+          "microseconds": 8.675,
+          "samples": [
+            8.745,
+            8.686,
+            8.678,
+            8.708,
+            8.675,
+            8.566,
+            8.486,
+            8.597,
+            8.487
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 7,
+          "microseconds": 6728.645,
+          "samples": [
+            6783.494,
+            6781.413,
+            6844.428,
+            7043.277,
+            6718.268,
+            6638.85,
+            6646.499,
+            6728.645,
+            6718.514
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 6,
+          "microseconds": 8983.842,
+          "samples": [
+            9061.109,
+            9350.414,
+            8800.173,
+            9064.762,
+            8999.439,
+            8683.585,
+            8708.962,
+            8611.202,
+            8983.842
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 3,
+          "microseconds": 22942.962,
+          "samples": [
+            22942.962,
+            22994.894,
+            23088.413,
+            22733.15,
+            23092.239,
+            23000.448,
+            22356.74,
+            22504.378,
+            22630.269
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 4,
+          "microseconds": 13749.894,
+          "samples": [
+            13749.894,
+            13866.004,
+            13869.634,
+            13904.737,
+            13760.892,
+            13376.005,
+            13544.605,
+            13615.172,
+            13564.707
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 6,
+          "microseconds": 9153.168,
+          "samples": [
+            9461.83,
+            9377.809,
+            9176.706,
+            9189.076,
+            9153.168,
+            9032.761,
+            8997.611,
+            8941.278,
+            8921.078
+          ]
+        },
+        {
+          "backend": "ruby",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 2,
+          "microseconds": 31004.944,
+          "samples": [
+            31004.944,
+            31322.16,
+            31053.005,
+            31313.4,
+            31126.797,
+            30557.094,
+            30163.073,
+            30512.737,
+            30292.992
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 95,
+          "microseconds": 528.233,
+          "samples": [
+            529.214,
+            528.233,
+            531.244,
+            526.595,
+            528.206,
+            527.401,
+            527.631,
+            533.182,
+            534.381
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 58,
+          "microseconds": 850.194,
+          "samples": [
+            850.917,
+            853.681,
+            858.475,
+            848.556,
+            847.268,
+            849.032,
+            850.194,
+            849.978,
+            858.521
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 58,
+          "microseconds": 850.445,
+          "samples": [
+            850.445,
+            850.724,
+            852.16,
+            844.781,
+            843.814,
+            847.268,
+            849.486,
+            886.804,
+            858.592
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 20,
+          "microseconds": 2468.445,
+          "samples": [
+            2468.445,
+            2486.839,
+            2456.882,
+            2455.349,
+            2465.466,
+            2468.574,
+            2470.743,
+            2464.377,
+            2516.888
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 50,
+          "microseconds": 1001.883,
+          "samples": [
+            1003.344,
+            1001.883,
+            1006.958,
+            995.732,
+            997.727,
+            1005.893,
+            1001.427,
+            1000.586,
+            1011.003
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 16,
+          "microseconds": 2848.91,
+          "samples": [
+            2833.739,
+            2851.935,
+            2821.972,
+            2838.787,
+            2832.372,
+            2857.145,
+            2848.91,
+            2886.811,
+            2880.827
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 27,
+          "microseconds": 1903.982,
+          "samples": [
+            1921.765,
+            1880.369,
+            1908.356,
+            1890.914,
+            1903.982,
+            1917.667,
+            1903.256,
+            1894.675,
+            1912.135
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 20,
+          "microseconds": 2517.48,
+          "samples": [
+            2516.601,
+            2517.48,
+            2522.438,
+            2520.458,
+            2511.728,
+            2521.702,
+            2509.476,
+            2517.267,
+            2550.335
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 21,
+          "microseconds": 2526.232,
+          "samples": [
+            2519.245,
+            2533.692,
+            2530.507,
+            2526.232,
+            2518.26,
+            2510.398,
+            2518.328,
+            2548.524,
+            2545.455
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 11,
+          "microseconds": 4447.298,
+          "samples": [
+            4438.253,
+            4473.39,
+            4452.33,
+            4446.285,
+            4441.777,
+            4447.298,
+            4448.001,
+            4459.87,
+            4411.941
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 18,
+          "microseconds": 2731.801,
+          "samples": [
+            2757.322,
+            2732.016,
+            2738.377,
+            2695.284,
+            2708.172,
+            2745.427,
+            2712.111,
+            2731.801,
+            2717.61
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 11,
+          "microseconds": 4841.411,
+          "samples": [
+            4844.175,
+            4827.687,
+            4830.017,
+            4829.126,
+            4841.411,
+            4963.038,
+            4852.869,
+            4821.649,
+            4855.713
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 39611,
+          "microseconds": 1.233,
+          "samples": [
+            1.229,
+            1.229,
+            1.228,
+            1.23,
+            1.236,
+            1.234,
+            1.238,
+            1.248,
+            1.233
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 20800,
+          "microseconds": 2.356,
+          "samples": [
+            2.333,
+            2.383,
+            2.355,
+            2.399,
+            2.373,
+            2.356,
+            2.339,
+            2.345,
+            2.367
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 21598,
+          "microseconds": 2.366,
+          "samples": [
+            2.398,
+            2.361,
+            2.363,
+            2.411,
+            2.366,
+            2.378,
+            2.36,
+            2.355,
+            2.38
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 11309,
+          "microseconds": 4.523,
+          "samples": [
+            4.541,
+            4.54,
+            4.523,
+            4.497,
+            4.517,
+            4.517,
+            4.543,
+            4.489,
+            4.568
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 17055,
+          "microseconds": 2.948,
+          "samples": [
+            2.936,
+            2.976,
+            2.937,
+            2.934,
+            2.948,
+            3.003,
+            2.935,
+            2.959,
+            3.125
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 9552,
+          "microseconds": 5.34,
+          "samples": [
+            5.254,
+            5.324,
+            5.346,
+            5.26,
+            5.386,
+            5.38,
+            5.34,
+            5.338,
+            5.364
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 9,
+          "microseconds": 5313.711,
+          "samples": [
+            5283.625,
+            5239.066,
+            5397.599,
+            5447.026,
+            5644.653,
+            5379.022,
+            5313.711,
+            5205.641,
+            5239.52
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 7,
+          "microseconds": 7337.774,
+          "samples": [
+            7250.778,
+            7230.385,
+            7512.701,
+            7466.289,
+            7493.007,
+            7423.636,
+            7337.774,
+            7221.888,
+            7246.959
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 3,
+          "microseconds": 20860.958,
+          "samples": [
+            20810.13,
+            20618.707,
+            21483.404,
+            21947.58,
+            21763.016,
+            21152.915,
+            20799.165,
+            20860.958,
+            20782.91
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 5,
+          "microseconds": 10915.532,
+          "samples": [
+            10915.532,
+            11652.373,
+            11198.06,
+            11324.067,
+            11186.706,
+            10890.944,
+            10819.493,
+            10764.481,
+            10789.512
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 7,
+          "microseconds": 7638.426,
+          "samples": [
+            7535.091,
+            7575.139,
+            8031.552,
+            7905.595,
+            8115.882,
+            7638.426,
+            7791.874,
+            7519.457,
+            7561.876
+          ]
+        },
+        {
+          "backend": "vm",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 2,
+          "microseconds": 27618.157,
+          "samples": [
+            27618.157,
+            27393.364,
+            28245.397,
+            28434.352,
+            28381.646,
+            27838.323,
+            27482.876,
+            27390.377,
+            27373.433
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 2598,
+          "microseconds": 19.633,
+          "samples": [
+            19.633,
+            19.592,
+            19.511,
+            19.507,
+            19.775,
+            19.748,
+            19.761,
+            19.73,
+            19.463
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 2557,
+          "microseconds": 20.703,
+          "samples": [
+            20.621,
+            20.526,
+            20.547,
+            20.582,
+            20.813,
+            20.82,
+            20.813,
+            20.973,
+            20.703
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 2476,
+          "microseconds": 20.819,
+          "samples": [
+            20.783,
+            20.52,
+            20.512,
+            20.819,
+            20.867,
+            20.923,
+            20.778,
+            20.92,
+            20.843
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 968,
+          "microseconds": 53.797,
+          "samples": [
+            53.273,
+            53.211,
+            53.235,
+            55.034,
+            53.797,
+            53.904,
+            53.983,
+            53.812,
+            53.287
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 1814,
+          "microseconds": 23.51,
+          "samples": [
+            23.217,
+            23.242,
+            23.186,
+            23.605,
+            23.51,
+            23.476,
+            23.523,
+            23.524,
+            23.711
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 805,
+          "microseconds": 60.159,
+          "samples": [
+            59.919,
+            59.607,
+            59.399,
+            59.555,
+            60.199,
+            60.159,
+            60.214,
+            60.39,
+            60.515
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 431,
+          "microseconds": 119.014,
+          "samples": [
+            117.307,
+            117.029,
+            116.777,
+            119.242,
+            119.845,
+            119.725,
+            119.014,
+            118.963,
+            119.159
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 423,
+          "microseconds": 120.947,
+          "samples": [
+            118.372,
+            118.401,
+            118.584,
+            121.605,
+            120.947,
+            122.236,
+            121.72,
+            120.903,
+            120.983
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 408,
+          "microseconds": 121.144,
+          "samples": [
+            117.902,
+            118.298,
+            118.525,
+            120.691,
+            121.144,
+            121.607,
+            121.156,
+            121.221,
+            121.677
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 328,
+          "microseconds": 158.146,
+          "samples": [
+            154.427,
+            154.446,
+            154.887,
+            158.236,
+            159.139,
+            158.146,
+            158.577,
+            157.998,
+            158.553
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 402,
+          "microseconds": 126.866,
+          "samples": [
+            124.194,
+            124.366,
+            124.136,
+            127.033,
+            127.214,
+            126.759,
+            126.866,
+            126.877,
+            127.491
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "successful",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 309,
+          "microseconds": 168.594,
+          "samples": [
+            165.114,
+            164.839,
+            164.735,
+            169.186,
+            168.631,
+            168.182,
+            168.682,
+            169.298,
+            168.594
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "unlimited",
+          "iterations": 100000,
+          "microseconds": 0.333,
+          "samples": [
+            0.335,
+            0.336,
+            0.336,
+            0.336,
+            0.33,
+            0.328,
+            0.329,
+            0.333,
+            0.332
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_errors",
+          "iterations": 33124,
+          "microseconds": 1.243,
+          "samples": [
+            1.259,
+            1.258,
+            1.276,
+            1.256,
+            1.208,
+            1.227,
+            1.229,
+            1.215,
+            1.243
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_output_bytes",
+          "iterations": 38133,
+          "microseconds": 1.25,
+          "samples": [
+            1.296,
+            1.267,
+            1.268,
+            1.252,
+            1.222,
+            1.224,
+            1.235,
+            1.232,
+            1.25
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_evaluations",
+          "iterations": 8073,
+          "microseconds": 5.919,
+          "samples": [
+            5.937,
+            5.94,
+            6.0,
+            5.919,
+            5.81,
+            5.84,
+            5.825,
+            5.823,
+            5.927
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "max_duration",
+          "iterations": 28556,
+          "microseconds": 1.67,
+          "samples": [
+            1.682,
+            1.697,
+            1.688,
+            1.675,
+            1.638,
+            1.663,
+            1.656,
+            1.649,
+            1.67
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "valid?",
+          "limits": "all",
+          "iterations": 5208,
+          "microseconds": 6.855,
+          "samples": [
+            6.924,
+            6.963,
+            6.951,
+            6.917,
+            6.737,
+            6.776,
+            6.827,
+            6.812,
+            6.855
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "unlimited",
+          "iterations": 26,
+          "microseconds": 1945.713,
+          "samples": [
+            1945.713,
+            1937.521,
+            1941.973,
+            1950.432,
+            1950.679,
+            1943.624,
+            1962.555,
+            1943.638,
+            1960.696
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_errors",
+          "iterations": 21,
+          "microseconds": 2402.123,
+          "samples": [
+            2414.971,
+            2384.081,
+            2401.003,
+            2413.615,
+            2436.687,
+            2401.159,
+            2394.494,
+            2421.518,
+            2402.123
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_output_bytes",
+          "iterations": 4,
+          "microseconds": 15675.292,
+          "samples": [
+            15793.64,
+            15413.005,
+            15620.188,
+            15675.292,
+            15711.907,
+            15751.427,
+            15683.908,
+            15660.877,
+            15652.189
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_evaluations",
+          "iterations": 18,
+          "microseconds": 2859.613,
+          "samples": [
+            2879.421,
+            2838.694,
+            2890.81,
+            2859.613,
+            2876.491,
+            2857.042,
+            2877.77,
+            2853.559,
+            2851.22
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "max_duration",
+          "iterations": 20,
+          "microseconds": 2477.901,
+          "samples": [
+            2469.259,
+            2520.035,
+            2433.983,
+            2480.179,
+            2468.375,
+            2488.649,
+            2477.901,
+            2473.381,
+            2488.778
+          ]
+        },
+        {
+          "backend": "native",
+          "workload": "failing",
+          "method": "validate",
+          "limits": "all",
+          "iterations": 3,
+          "microseconds": 18609.802,
+          "samples": [
+            18718.407,
+            18773.444,
+            18689.3,
+            18606.241,
+            18947.997,
+            18609.802,
+            18566.166,
+            18511.496,
+            18530.197
+          ]
+        }
+      ]
+    }
+  ],
+  "latency": {
+    "metadata": {
+      "ruby": "ruby 4.0.6 (2026-07-14 revision 03b6d3f889) +PRISM [x86_64-linux]",
+      "yjit": false,
+      "max_duration": 0.001,
+      "rounds": 9
+    },
+    "measurements": [
+      {
+        "backend": "ruby",
+        "workload": "successful",
+        "method": "valid?",
+        "microseconds": 1045.654,
+        "max_microseconds": 1132.734,
+        "samples": [
+          1132.734,
+          1060.266,
+          1034.428,
+          1037.514,
+          1098.636,
+          1045.654,
+          1092.848,
+          1031.664,
+          1043.453
+        ]
+      },
+      {
+        "backend": "ruby",
+        "workload": "successful",
+        "method": "validate",
+        "microseconds": 1049.362,
+        "max_microseconds": 1227.644,
+        "samples": [
+          1082.135,
+          1227.644,
+          1023.937,
+          1215.876,
+          1049.362,
+          1045.262,
+          1204.671,
+          1015.042,
+          1016.65
+        ]
+      },
+      {
+        "backend": "ruby",
+        "workload": "diagnostics",
+        "method": "validate",
+        "microseconds": 1947.335,
+        "max_microseconds": 2050.637,
+        "samples": [
+          1591.454,
+          2050.637,
+          1993.976,
+          2001.805,
+          1926.11,
+          1923.689,
+          1947.335,
+          2021.251,
+          1904.292
+        ]
+      },
+      {
+        "backend": "vm",
+        "workload": "successful",
+        "method": "valid?",
+        "microseconds": 1021.062,
+        "max_microseconds": 1040.358,
+        "samples": [
+          1035.805,
+          1040.358,
+          1018.52,
+          1021.062,
+          1015.083,
+          1018.61,
+          1017.394,
+          1034.86,
+          1028.851
+        ]
+      },
+      {
+        "backend": "vm",
+        "workload": "successful",
+        "method": "validate",
+        "microseconds": 1033.414,
+        "max_microseconds": 1055.683,
+        "samples": [
+          1055.683,
+          1033.414,
+          1020.057,
+          1023.846,
+          1035.524,
+          1044.739,
+          1027.102,
+          1034.65,
+          1018.479
+        ]
+      },
+      {
+        "backend": "vm",
+        "workload": "diagnostics",
+        "method": "validate",
+        "microseconds": 1144.724,
+        "max_microseconds": 1168.964,
+        "samples": [
+          1144.724,
+          1168.964,
+          1126.604,
+          1167.547,
+          1164.13,
+          1124.112,
+          1134.584,
+          1148.352,
+          1122.464
+        ]
+      },
+      {
+        "backend": "native",
+        "workload": "successful",
+        "method": "valid?",
+        "microseconds": 1018.661,
+        "max_microseconds": 1026.178,
+        "samples": [
+          1026.178,
+          1019.604,
+          1020.428,
+          1018.661,
+          1017.716,
+          1017.404,
+          1017.203,
+          1017.042,
+          1021.173
+        ]
+      },
+      {
+        "backend": "native",
+        "workload": "successful",
+        "method": "validate",
+        "microseconds": 1017.927,
+        "max_microseconds": 1025.464,
+        "samples": [
+          1025.464,
+          1017.584,
+          1017.615,
+          1018.399,
+          1017.997,
+          1017.927,
+          1020.559,
+          1017.534,
+          1017.273
+        ]
+      },
+      {
+        "backend": "native",
+        "workload": "diagnostics",
+        "method": "validate",
+        "microseconds": 1094.837,
+        "max_microseconds": 1105.048,
+        "samples": [
+          1091.551,
+          1105.048,
+          1094.837,
+          1091.179,
+          1094.295,
+          1101.932,
+          1097.169,
+          1096.907,
+          1092.234
+        ]
+      }
+    ]
+  }
+}

@@ -224,14 +224,17 @@ validator is retained.
 ### Validation limits (draft API)
 
 Applications can set independent limits on emitted diagnostic count, compact
-JSON diagnostic bytes and evaluation work. All limits default to `nil`
-(unlimited); values must be nonnegative integers. Limits apply per invocation.
+JSON diagnostic bytes, evaluation work and elapsed duration. All limits default
+to `nil` (unlimited). Count/byte/work caps must be nonnegative integers;
+`max_duration` accepts finite nonnegative Integer or Float seconds. Limits apply
+per invocation.
 
 ```ruby
 limits = Schemurai::Limits.new(
   max_errors: 100,
   max_output_bytes: 64 * 1024,
-  max_evaluations: 100_000
+  max_evaluations: 100_000,
+  max_duration: 0.1
 )
 validator = Schemurai.compile(schema, backend: :native, limits: limits)
 
@@ -242,7 +245,7 @@ rescue Schemurai::LimitExceeded => error
   warn "Validation stopped at #{error.limit}"
 end
 
-validator.valid?(order) # evaluation-work limit also applies to Boolean checks
+validator.valid?(order) # work and duration limits also apply to Boolean checks
 validator.validate(order, limits: {max_errors: 10, max_evaluations: 10_000})
 ```
 
@@ -270,8 +273,38 @@ wall-clock time or a portable instruction count. A single regexp search,
 Big Integer operation or custom Ruby callback cannot be preempted by this
 counter. Compilation, schema registration and automatic `validate_schema: true`
 checks are outside the instance-validation budget; explicit `validate_schema`
-accepts its own limits. Set all three caps when their independent protections
+accepts its own limits. Set the caps when their independent protections
 are required.
+
+`max_duration` sets a cooperative elapsed-time deadline, including diagnostic
+rendering. The validator checks a monotonic clock at entry and before returning,
+and samples it every 256 checkpoints during evaluation, container/required scans,
+structural traversal and diagnostics. Ruby string/content processing also checks
+before and after potentially expensive operations. A zero duration stops even
+an otherwise trivial call. Native uses its own monotonic timer with the remaining
+duration; the original Ruby deadline is retained through native execution,
+diagnostic conversion and VM fallback. Timeout exhaustion is terminal. Like the
+other limits, it raises `LimitExceeded` without a partial result; `maximum` and
+`attempted` are configured and elapsed seconds for `:max_duration`.
+
+This does not use Ruby `Timeout`, a timer thread, signals or asynchronous
+exception injection. Native returns an exhaustion status and releases Rust
+resources before Ruby raises the exception. Duration-only calls skip detailed
+evaluation-work accounting. Timed native pattern/format/content array scans use
+per-item evaluation so successful items do not bypass checkpoints. Timed Fixnum
+`contains` scans also use the polling evaluator; other native
+fast paths and memoization are preserved where they can poll safely.
+
+The duration is a cooperative deadline, not a guaranteed return time: a single
+regexp search, large scalar operation, JSON decode, allocation or custom format
+callback may continue beyond the deadline until the next checkpoint. The
+checkpoint interval bounds the number of polls skipped, not elapsed overrun.
+GC and time spent descheduled count toward the elapsed duration. Compilation,
+registration and automatic compile-time meta-schema checks remain outside it.
+If stopping such individual operations is required, use operation-specific
+timeouts or a separately supervised worker process. Input size and depth limits
+belong at the parsing boundary; error count caps remain useful alongside duration
+because a deadline does not independently bound diagnostic output size.
 
 Each selected backend keeps its own execution path: Ruby instruments its
 schema interpreter, VM instruments compiled instructions, and native uses Rust

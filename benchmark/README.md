@@ -10,30 +10,80 @@ the updated PR. Other labels do not run benchmarks.
 
 ## Configurable validation limits (draft)
 
-`validation_limits.rb` compares unlimited and bounded calls on each selected
-backend, excluding compilation. It checks successful validation of 1,000 object
-records before timing. Limits include error count, compact JSON output bytes
-and evaluation work. Each backend retains its execution engine; native includes
-Rust counters and keeps native memoization and regex matching. Unsupported
-native evaluation delegates to the bounded VM with its remaining work budget.
+`validation_limits.rb` compares ordinary unlimited calls, each cap separately,
+and all enabled caps together, excluding compilation. Two workloads validate
+1,000 object records: successful integer IDs and failing string IDs that produce
+exactly 1,000 type errors. `valid?` stops on the first failure. Each bounded call
+is checked against the unlimited result before timing; limits are preconstructed
+and high enough that no timed call hits a cap.
 
 ```sh
 ruby -Ilib -Iext/schemurai_native benchmark/validation_limits.rb
 ```
 
-Local medians on Ruby 4.0.6, x86_64-linux, without YJIT (seven batches of five
-calls; caps of 100 errors, 65,536 output bytes and 1,000,000 work units):
+The runner warms each setting, calibrates batch sizes toward 50 ms (up to
+100,000 calls), then measures nine batches per setting. It shuffles setting order
+with a fixed seed in each round and runs GC before each batch; GC remains enabled
+during timing. `ROUNDS` and `BATCH_SECONDS` override the defaults. Output includes
+individual batch timings and iteration counts. Unlimited calls omit `limits:`;
+explicit `limits: nil` constructs a fresh unlimited configuration in this draft
+and would measure an additional override cost.
 
-| Backend | Unlimited valid? (µs) | Limited valid? (µs) | Unlimited validate (µs) | Limited validate (µs) |
-| --- | ---: | ---: | ---: | ---: |
-| Ruby | 1,759.484 | 4,698.848 | 3,680.089 | 6,975.555 |
-| VM | 590.936 | 2,138.273 | 2,097.889 | 4,395.286 |
-| Native | 19.220 | 52.893 | 123.581 | 169.690 |
+### Comparison with the version before limits
 
-These compare opt-in accounting with unlimited calls in the same build on this
-successful workload; they do not establish overhead for other schemas or a
-comparison against a previous release. Backend-specific counters keep native
-execution fast enough that bounded calls do not need Ruby interpreter execution.
+Measured with Ruby 4.0.6, x86_64-linux, YJIT disabled, on AMD Ryzen 9 7900X.
+Native extensions were built in release mode for both revisions. The code before
+limits is `1bc9ef2`; the PR implementation is `448efb1`. Each revision was run
+twice in separate processes without concurrent benchmark runs. The values below
+are medians of the combined 18 batch samples per setting, in microseconds per
+call. Caps were 2,000 errors, 1,000,000 output bytes and 10,000,000 evaluation
+units. Raw samples are in [`validation_limits_results.json`](validation_limits_results.json).
+
+To reproduce the earlier revision, create a worktree at `1bc9ef2`, copy the
+current runner into its `benchmark` directory, and build its native extension
+with `ruby extconf.rb` followed by `make` in `ext/schemurai_native`. From that
+worktree's root run:
+
+```sh
+BASELINE=1 ruby -Ilib -Iext/schemurai_native benchmark/validation_limits.rb
+```
+
+`BASELINE=1` avoids the Limits API and measures only ordinary calls, so the same
+runner works with the earlier version. Rebuild the current native extension
+before measuring the PR as well.
+
+### Successful input
+
+| Backend | Method | Before | PR unlimited | Errors only | Bytes only | Evaluations only | All |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ruby | `valid?` | 1,760.184 | 1,770.607 | 4,448.068 | 4,427.929 | 4,511.845 | 4,512.345 |
+| Ruby | `validate` | 3,674.693 | 3,647.781 | 6,616.203 | 6,567.228 | 6,656.616 | 6,650.749 |
+| Vm | `valid?` | 554.204 | 540.113 | 1,938.320 | 1,934.831 | 1,989.110 | 1,982.548 |
+| Vm | `validate` | 2,026.626 | 2,058.471 | 3,949.643 | 3,941.415 | 3,990.466 | 3,983.774 |
+| Native | `valid?` | 17.334 | 18.506 | 19.456 | 19.534 | 53.737 | 53.937 |
+| Native | `validate` | 121.452 | 122.768 | 124.623 | 124.594 | 165.268 | 165.600 |
+
+### Failing input
+
+| Backend | Method | Before | PR unlimited | Errors only | Bytes only | Evaluations only | All |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Ruby | `valid?` | 2.796 | 3.012 | 6.781 | 6.804 | 6.912 | 6.892 |
+| Ruby | `validate` | 7,372.214 | 7,288.320 | 12,699.614 | 25,299.652 | 12,768.744 | 25,556.565 |
+| Vm | `valid?` | 1.113 | 1.278 | 3.893 | 3.923 | 3.963 | 3.938 |
+| Vm | `validate` | 5,604.244 | 5,702.433 | 10,284.159 | 22,802.586 | 10,256.274 | 22,925.051 |
+| Native | `valid?` | 0.193 | 0.327 | 1.198 | 1.218 | 5.236 | 5.271 |
+| Native | `validate` | 1,993.267 | 2,032.622 | 2,666.136 | 15,370.051 | 2,787.332 | 15,421.444 |
+
+These measure overhead while validation completes, not the savings from stopping
+a pathological workload. This small workload set does not establish costs for
+all schemas; small percentage differences may reflect measurement variation.
+
+At `448efb1`, Ruby and VM use the same instrumented evaluator for any enabled limit, including
+diagnostic-only limits passed to `valid?`. Work-accounting hooks still run with
+`max_evaluations` disabled, so errors-only and evaluations-only costs are similar.
+Native skips most work accounting when the evaluation cap is disabled. On failing
+`validate`, exact byte accounting scans the rendered diagnostic fields in Ruby
+and costs substantially more than error counting in every backend.
 
 Work units are backend-dependent and do not interrupt a single regexp,
 arbitrary-precision arithmetic operation or Ruby callback. The draft does not
@@ -41,6 +91,76 @@ establish a hard CPU or memory sandbox. Native collection bounds known output
 fields before materializing Ruby rows; the Ruby message renderer checks exact
 complete JSON size. An oversized individual message may already be constructed
 when its limit is detected. Compiler and registry work remain outside the budget.
+
+### Cooperative duration prototype
+
+The runner now includes `max_duration` alone and all four limits together. The
+historical tables above remain the measurements at `448efb1`, before the duration
+prototype and its disabled-work-accounting optimization. In the prototype, count,
+byte and work caps remain as above; the duration cap is 10 seconds so timed calls
+complete without exhaustion. Ruby/VM skip detailed work accounting when the work
+cap is disabled, while polling actual loops for duration deadlines.
+
+Two runs with the same interpreter, host, warmup, shuffled settings and batch
+procedure produce the following combined 18-sample medians (microseconds per
+call). Raw samples, including the other individual caps, are in
+[`validation_deadline_results.json`](validation_deadline_results.json).
+
+| Input | Backend | Method | Unlimited | Evaluations only | Duration only | Duration / unlimited | All four |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| successful | Ruby | `valid?` | 1,608.302 | 5,144.296 | 2,563.459 | 1.59x | 5,708.000 |
+| successful | Ruby | `validate` | 3,368.262 | 7,425.594 | 4,478.346 | 1.33x | 7,893.673 |
+| failing | Ruby | `valid?` | 2.715 | 7.551 | 4.801 | 1.77x | 8.643 |
+| failing | Ruby | `validate` | 6,717.203 | 13,554.656 | 9,062.973 | 1.35x | 30,534.916 |
+| successful | Vm | `valid?` | 534.467 | 2,518.514 | 1,016.176 | 1.90x | 2,902.567 |
+| successful | Vm | `validate` | 1,935.973 | 4,450.166 | 2,746.271 | 1.42x | 4,852.199 |
+| failing | Vm | `valid?` | 1.226 | 4.542 | 2.970 | 2.42x | 5.383 |
+| failing | Vm | `validate` | 5,384.048 | 11,148.330 | 7,705.352 | 1.43x | 28,041.049 |
+| successful | Native | `valid?` | 19.739 | 53.374 | 23.517 | 1.19x | 59.298 |
+| successful | Native | `validate` | 118.572 | 156.642 | 125.969 | 1.06x | 166.921 |
+| failing | Native | `valid?` | 0.330 | 5.824 | 1.637 | 4.96x | 6.819 |
+| failing | Native | `validate` | 1,943.631 | 2,852.390 | 2,459.254 | 1.27x | 18,520.846 |
+
+The duration-only path is cheaper than detailed evaluation accounting on these
+workloads. This does not establish costs for regexp-heavy schemas or every
+native fast path; timed pattern/format/content array scans and the Fixnum
+`contains` specialization use paths that can poll between items. Native remains
+native and retains memoization. No-limit costs are not assumed unchanged: Ruby/VM
+loops now include a nil-budget guard and native loops include a disabled-timer
+branch, so future tuning must also measure ordinary calls.
+
+`validation_deadlines.rb` measures total time to raise on workloads longer than
+the deadline: two million successful integer items (`valid?` and `validate`),
+and a doubled reference chain producing exponential diagnostics (`validate`).
+Compilation and input construction happen outside timing; GC runs before each
+sample and remains enabled. Nine samples per case use a 1 ms deadline by default.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/validation_deadlines.rb
+```
+
+`MAX_DURATION` (seconds) and `ROUNDS` override the defaults. Increase workload size
+or lower the duration if a workload finishes before exhaustion. Observed total
+elapsed microseconds until the exception reaches the caller:
+
+| Backend | Workload | Method | Median | Maximum |
+| --- | --- | --- | ---: | ---: |
+| Ruby | successful | `valid?` | 1,045.654 | 1,132.734 |
+| Ruby | successful | `validate` | 1,049.362 | 1,227.644 |
+| Ruby | diagnostics | `validate` | 1,947.335 | 2,050.637 |
+| Vm | successful | `valid?` | 1,021.062 | 1,040.358 |
+| Vm | successful | `validate` | 1,033.414 | 1,055.683 |
+| Vm | diagnostics | `validate` | 1,144.724 | 1,168.964 |
+| Native | successful | `valid?` | 1,018.661 | 1,026.178 |
+| Native | successful | `validate` | 1,017.927 | 1,025.464 |
+| Native | diagnostics | `validate` | 1,094.837 | 1,105.048 |
+
+These are observations, not maximum-overrun guarantees. Polls are sampled every
+256 checkpoints, and exception propagation also takes time. A single regexp,
+JSON decoder, big-number operation, allocation or format callback is not
+preempted. Duration covers native evaluation, diagnostic conversion/rendering
+and VM fallback under the original call's deadline; no Ruby `Timeout`, timer
+thread, signals or asynchronous exception injection are used.
 
 ## Shared native reference annotations
 
