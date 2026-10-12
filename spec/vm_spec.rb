@@ -92,6 +92,25 @@ RSpec.describe "the VM backend" do
       .to eq([["/extra", "/unevaluatedProperties"]])
   end
 
+  it "preserves shared operand graphs in frozen independent snapshots", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
+    leaf = [+"fixed"]
+    value = leaf
+    32.times { value = {"left" => value, "right" => value} }
+    validator = Schemurai.compile({"const" => value}, backend: :vm)
+    program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@root)
+    copy = program.code.fetch(2)
+    32.times do
+      expect(copy).to be_frozen
+      expect(copy.fetch("left")).to equal(copy.fetch("right"))
+      copy = copy.fetch("left")
+    end
+    expect(copy).to be_frozen
+    expect(copy).not_to equal(leaf)
+    leaf.first.replace("changed")
+    expect(copy).to eq(["fixed"])
+    expect(leaf).not_to be_frozen
+  end
+
   it "snapshots nested mutable operands without freezing the source schema", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
     schema = {
       "$schema" => "https://json-schema.org/draft/2020-12/schema",

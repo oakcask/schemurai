@@ -8,7 +8,7 @@ module Schemurai
           invalid!(label, "must be a boolean or an object")
         end
 
-        validate_value!(schema, label, [], {})
+        validate_value!(schema, label, [], {}, {})
         schema
       end
 
@@ -23,7 +23,7 @@ module Schemurai
         schemas
       end
 
-      module_function def validate_value!(value, label, path, ancestors)
+      module_function def validate_value!(value, label, path, ancestors, completed)
         case value
         when nil, true, false
           nil
@@ -34,21 +34,21 @@ module Schemurai
           invalid_at!(label, path, "uses a Float subclass") unless value.instance_of?(Float)
         when Array
           invalid_at!(label, path, "uses an Array subclass") unless value.instance_of?(Array)
-          descend!(value, label, path, ancestors) do
+          descend!(value, label, path, ancestors, completed) do
             value.each_with_index do |item, index|
               path << index
-              validate_value!(item, label, path, ancestors)
+              validate_value!(item, label, path, ancestors, completed)
               path.pop
             end
           end
         when Hash
           invalid_at!(label, path, "uses a Hash subclass") unless value.instance_of?(Hash)
-          descend!(value, label, path, ancestors) do
+          descend!(value, label, path, ancestors, completed) do
             value.each do |key, item|
               invalid_at!(label, path, "contains a non-string object key") unless key.instance_of?(String)
 
               path << key
-              validate_value!(item, label, path, ancestors)
+              validate_value!(item, label, path, ancestors, completed)
               path.pop
             end
           end
@@ -63,11 +63,16 @@ module Schemurai
       end
       private_class_method :supported_exact_scalar?
 
-      module_function def descend!(value, label, path, ancestors)
+      module_function def descend!(value, label, path, ancestors, completed)
+        # A completed subtree cannot contain a cycle back to this path. Only
+        # publish after the entire subtree passes, preserving first-error paths.
+        return if completed.key?(value.object_id)
+
         invalid_at!(label, path, "contains a recursive container") if ancestors.key?(value.object_id)
 
         ancestors[value.object_id] = true
         yield
+        completed[value.object_id] = true
       ensure
         ancestors.delete(value.object_id)
       end

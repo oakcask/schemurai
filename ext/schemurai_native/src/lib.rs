@@ -2253,15 +2253,6 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     }
     mix(result ^ TYPE_STRING as u64)
 }
-fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -> Option<u64> {
-    fingerprint_budgeted(
-        value,
-        depth,
-        fixnum_flag,
-        big_hint,
-        &budget::Budget::default(),
-    )
-}
 fn fingerprint_budgeted(
     value: Value,
     depth: usize,
