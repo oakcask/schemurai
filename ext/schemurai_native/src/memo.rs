@@ -973,6 +973,25 @@ impl Engine {
             cyclic
         }
         let cyclic = cycle_nodes(&edges, &parents);
+        // A root schema has no entry reference. Count references originating
+        // inside cycles separately so two recursive property edges still
+        // establish amplification without requiring a third, external edge.
+        let mut cyclic_incoming = vec![0_usize; count];
+        for (source, ops) in self.nodes.iter().enumerate() {
+            if cyclic[source] {
+                for op in ops {
+                    if let Op::Ref(reference) = op {
+                        let target = reference
+                            .static_target()
+                            .or_else(|| reference.dynamic_target().map(|(_, target)| target))
+                            .or_else(|| reference.recursive_target());
+                        if let Some(target) = target {
+                            cyclic_incoming[target] += 1;
+                        }
+                    }
+                }
+            }
+        }
         let mut same_edges = vec![vec![]; edges.len()];
         same_edges[count..].clone_from_slice(&edges[count..]);
         let mut scalar_refs = vec![false; edges.len()];
@@ -1054,15 +1073,16 @@ impl Engine {
         self.memo_guard_sources = cyclic[..count].to_vec();
         self.memo_guarded = vec![false; count];
         for node in 0..count {
+            let amplified_cycle = incoming[node] > 2 || cyclic_incoming[node] > 1;
             if !self.memoizable[node] && !unsupported[node]
                 && (incoming[node] > 1 || repeated_position[node] && repeated_subtree[node])
                 // A linear recursive property chain has no amplification.
                 // Avoid signatures unless a cycle has repeated input positions
-                // or more than one recursive edge in addition to its entry.
-                && (!cyclic[node] || repeated_subtree[node] || incoming[node] > 2)
+                // or multiple recursive edges, with or without an entry ref.
+                && (!cyclic[node] || repeated_subtree[node] || amplified_cycle)
                 // Position loops already admit their child instruction. Do not
                 // duplicate caching at its singly referenced recursive target.
-                && (!cyclic[node] || repeated_position[node] || incoming[node] > 2 || scalar_amplification[node])
+                && (!cyclic[node] || repeated_position[node] || amplified_cycle || scalar_amplification[node])
             {
                 self.memoizable[node] = true;
                 self.memo_guarded[node] = true;

@@ -27,6 +27,7 @@ schemas = {
   "object" => {"$defs" => {"n" => {"anyOf" => [{"type" => "integer"},
     {"type" => "object", "properties" => {"a" => {"$ref" => "#/$defs/n"}, "b" => {"$ref" => "#/$defs/n"}}}]}},
                "$ref" => "#/$defs/n"},
+  "root-object" => {"properties" => {"a" => {"$ref" => "#"}, "b" => {"$ref" => "#"}}},
   "dynamic" => {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$dynamicAnchor" => "n",
                 "anyOf" => [{"type" => "integer"}, {"type" => "array", "items" => {"$dynamicRef" => "#n"}}]},
   "recursive" => {"$schema" => "https://json-schema.org/draft/2019-09/schema", "$recursiveAnchor" => true,
@@ -35,7 +36,7 @@ schemas = {
 schemas.each do |mode, schema|
   [8, 12, 16, 20].each do |depth|
     value = 8
-    depth.times { value = (mode == "object") ? {"a" => value, "b" => value} : [value, value] }
+    depth.times { value = mode.end_with?("object") ? {"a" => value, "b" => value} : [value, value] }
     measure.call(mode, depth, schema, value)
   end
 end
