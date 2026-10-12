@@ -118,6 +118,10 @@ fn date_exact(bytes: &[u8]) -> bool {
 fn date_time(bytes: &[u8]) -> bool {
     bytes.len() >= 20 && date(bytes) && matches!(bytes[10], b'T' | b't') && time(&bytes[11..])
 }
+// Keep the SIMD body out of the shared format dispatchers. Local x64 benchmarks
+// and disassembly showed that inlining it shifted the unchanged JSON Pointer
+// loop into a slower instruction layout; outlining retains the UUID SIMD gain.
+#[inline(never)]
 fn uuid(bytes: &[u8]) -> bool {
     if bytes.len() != 36 || [8, 13, 18, 23].iter().any(|&at| bytes[at] != b'-') {
         return false;
@@ -152,7 +156,6 @@ fn uuid(bytes: &[u8]) -> bool {
 }
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-#[inline(always)]
 fn hex_block(bytes: &[u8], separators: u16) -> bool {
     use core::arch::x86_64::{
         _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
@@ -182,7 +185,6 @@ fn hex_block(bytes: &[u8], separators: u16) -> bool {
     target_feature = "neon",
     target_endian = "little"
 ))]
-#[inline(always)]
 fn hex_block(bytes: &[u8], separators: u16) -> bool {
     use core::arch::aarch64::{
         vcleq_u8, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8, vreinterpret_u64_u8,
