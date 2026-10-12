@@ -2319,9 +2319,12 @@ fn fingerprint_cached(
         return Some(mix(n.to_bits() ^ TYPE_NUMBER as u64));
     }
     let container = kind == TYPE_ARRAY || kind == TYPE_OBJECT;
+    // Batch reuse pays for wide shared containers immediately. Small shallow
+    // records keep the original cheap traversal, expanding at most four levels
+    // before the depth-based cache handles deeper shared graphs.
+    let cacheable = container && memo.eligible_container(depth, unsafe { len.assume_init() });
     let key = (value, depth);
-    if container
-        && memo.eligible(depth)
+    if cacheable
         && let Some(result) = memo.get(key)
     {
         return result;
@@ -2374,7 +2377,7 @@ fn fingerprint_cached(
         }
         _ => None,
     };
-    if container && memo.eligible(depth) {
+    if cacheable {
         memo.record(key, result);
     }
     result
