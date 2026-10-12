@@ -158,23 +158,24 @@ impl Content {
 #[inline(never)]
 fn decode_json_medium(bytes: &[u8], length: usize) -> Verdict {
     let mut scratch = [0; STACK_BYTES + 2];
-    decode_json_turbo(bytes, length, &mut scratch)
+    decode_json_buffer(bytes, length, &mut scratch)
 }
 
 #[inline(never)]
 fn decode_json_direct(bytes: &[u8], length: usize) -> Verdict {
     let mut scratch = [0; DIRECT_BYTES + 2];
-    decode_json_turbo(bytes, length, &mut scratch)
+    decode_json_buffer(bytes, length, &mut scratch)
 }
 
-fn decode_json_turbo(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict {
+fn decode_json_buffer(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict {
     // The slice API requires an initialized upper-bound buffer, including
     // up to two padding bytes beyond the exact decoded length. Only the
     // successful written prefix is parsed. This is a derived content operand.
     let capacity = base64_turbo::STANDARD.decoded_len_estimate(bytes.len());
-    match base64_turbo::STANDARD.decode_slice(bytes, &mut scratch[..capacity]) {
-        Ok(decoded) if decoded == length => json(&scratch[..decoded]),
-        _ => Invalid,
+    if decode_groups(bytes, &mut scratch[..capacity], length) {
+        json(&scratch[..length])
+    } else {
+        Invalid
     }
 }
 
@@ -196,6 +197,18 @@ fn decode_json_stream(bytes: &[u8], length: usize) -> Verdict {
 // Decode borrowed bytes into the caller's fixed stack scratch. The STANDARD
 // variant also checks each chunk's alphabet, padding and unused trailing bits.
 fn decode_groups(bytes: &[u8], output: &mut [u8], expected: usize) -> bool {
+    // The NEON-native decoder uses table lookups and shifts to pack bytes,
+    // avoiding the multiply-add emulation in turbo's ARM kernel. Keep turbo's
+    // wider x86 kernels and the same strict alphabet/padding checks.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use base64_simd::AsOut;
+        matches!(
+            base64_simd::STANDARD.decode(bytes, output.as_out()),
+            Ok(decoded) if decoded.len() == expected
+        )
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     matches!(
         base64_turbo::STANDARD.decode_slice(bytes, output),
         Ok(decoded) if decoded == expected
