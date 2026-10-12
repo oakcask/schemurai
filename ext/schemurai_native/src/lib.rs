@@ -13,6 +13,7 @@ mod evaluation;
 mod format;
 mod instance_graph;
 mod memo;
+mod memo_scope;
 mod number;
 mod pattern;
 // Some shared constants are consumed only by C or Ruby.
@@ -579,6 +580,7 @@ pub struct Engine {
     memo_guard_same_sources: Vec<bool>,
     memo_guard_scalar_sources: Vec<bool>,
     memo_guard_scalar_amplification: Vec<bool>,
+    memo_scope_projection: memo_scope::Projection,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), usize>,
@@ -2998,7 +3000,9 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
     let scalar = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_sources) };
     let amplification = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_amplification) };
+    let projection = unsafe { &*std::ptr::addr_of!((*engine).memo_scope_projection) };
     std::mem::size_of::<Engine>()
+        + projection.memory_usage()
         + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()
