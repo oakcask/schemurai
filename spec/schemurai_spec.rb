@@ -74,7 +74,7 @@ RSpec.describe Schemurai do
 
   it "keeps implementation constants private" do
     expected = %i[
-      Error InvalidSchemaError ResolutionError Result SchemaRegistry UnsupportedFormatError VERSION ValidationError Validator
+      Error InvalidSchemaError LimitExceeded Limits ResolutionError Result SchemaRegistry UnsupportedFormatError VERSION ValidationError Validator
     ]
     expect(described_class.constants(false)).to match_array(expected)
   end

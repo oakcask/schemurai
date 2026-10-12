@@ -128,6 +128,7 @@ impl Memo {
         value: Value,
         depth: usize,
         context: scope::Context<'_>,
+        budget: &budget::Budget,
     ) -> Option<Key> {
         if !engine.memoizable[node] {
             return None;
@@ -149,7 +150,11 @@ impl Memo {
             value,
             depth,
             context,
-            (object, |value| self.instances.borrow_mut().acyclic(value)),
+            (
+                object,
+                |value| self.instances.borrow_mut().acyclic(value, budget),
+                budget,
+            ),
         )
     }
     fn admit_guard_key(&self, key: Key) -> bool {
@@ -166,7 +171,14 @@ impl Memo {
         depth: usize,
         context: scope::Context<'_>,
     ) -> Option<Key> {
-        self.key_with_instance_proof(engine, node, value, depth, context, (false, |_| false))
+        self.key_with_instance_proof(
+            engine,
+            node,
+            value,
+            depth,
+            context,
+            (false, |_| false, &budget::Budget::default()),
+        )
     }
     fn key_with_instance_proof(
         &self,
@@ -175,8 +187,9 @@ impl Memo {
         value: Value,
         depth: usize,
         context: scope::Context<'_>,
-        analysis: (bool, impl FnOnce(Value) -> bool),
+        analysis: (bool, impl FnOnce(Value) -> bool, &budget::Budget),
     ) -> Option<Key> {
+        let (object, prove_acyclic, budget) = analysis;
         if !engine.memoizable[node] {
             return None;
         }
@@ -185,9 +198,15 @@ impl Memo {
             if names > MAX_SCOPE_SLOTS - 2 {
                 return None;
             }
+            if !budget.charge(names + 2) {
+                return None;
+            }
             let mut pairs = vec![];
             let mut current = context.active;
             while let Some(frame) = current {
+                if !budget.charge(1) {
+                    return None;
+                }
                 // A source outside every schema cycle cannot be revisited from
                 // its own descendant evaluation, even under dynamic dispatch.
                 if engine.memo_guard_sources[frame.source] {
@@ -198,7 +217,6 @@ impl Memo {
                 }
                 current = frame.parent;
             }
-            let (object, prove_acyclic) = analysis;
             if !pairs.is_empty() && prove_acyclic(value) {
                 // An acyclic input cannot revisit ancestors through position
                 // changes. Only same-instance schema cycles retain guards.
@@ -210,6 +228,13 @@ impl Memo {
                 pairs.retain(|&(source, ancestor)| ancestor == value && same[source]);
             }
             // RefFrame::contains tests membership, independently of order.
+            if !budget.charge(
+                pairs
+                    .len()
+                    .saturating_mul(pairs.len().checked_ilog2().unwrap_or(0) as usize + 1),
+            ) {
+                return None;
+            }
             pairs.sort_unstable();
             pairs.dedup();
             let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names + 1);
@@ -221,6 +246,9 @@ impl Memo {
             signature.resize(first_binding + names + 1, None);
             let mut current = context.scope;
             while let Some(frame) = current {
+                if !budget.charge(names + 1) {
+                    return None;
+                }
                 for name in 0..names {
                     if let Some(&target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
                         signature[first_binding + name] = Some(target);
@@ -232,6 +260,9 @@ impl Memo {
                     signature[first_binding + names] = Some(root);
                 }
                 current = frame.parent;
+            }
+            if !budget.charge(signature.len()) {
+                return None;
             }
             let id = self.scopes.borrow_mut().intern(signature)?;
             let node = id.checked_mul(engine.nodes.len())?.checked_add(node)?;
@@ -252,9 +283,15 @@ impl Memo {
             if names > MAX_SCOPE_SLOTS {
                 return None;
             }
+            if !budget.charge(names) {
+                return None;
+            }
             let mut bindings = vec![None; names];
             let mut current = context.scope;
             while let Some(frame) = current {
+                if !budget.charge(names + 1) {
+                    return None;
+                }
                 for (name, binding) in bindings.iter_mut().enumerate() {
                     if let Some(target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
                         *binding = Some(*target);
@@ -277,6 +314,13 @@ impl Memo {
         self.verdicts
             .borrow_mut()
             .record(key, &status, 0, MAX_ENTRIES);
+    }
+    pub(super) fn coverage_cost(&self, key: Key, annotations: Option<bool>) -> usize {
+        self.coverage
+            .borrow()
+            .results
+            .get(&(key, annotations))
+            .map_or(0, |(_, slots)| *slots)
     }
     pub(super) fn tracked(&self, key: Key) -> Option<Tracked> {
         self.coverage.borrow().get((key, None))
@@ -451,12 +495,40 @@ mod tests {
         let empty = scope::Context::default();
         let other = context(&other_value);
         assert_eq!(
-            memo.key_with_instance_proof(&engine, 0, 42, 8, other, (false, |_| true)),
-            memo.key_with_instance_proof(&engine, 0, 42, 8, empty, (false, |_| true)),
+            memo.key_with_instance_proof(
+                &engine,
+                0,
+                42,
+                8,
+                other,
+                (false, |_| true, &budget::Budget::default())
+            ),
+            memo.key_with_instance_proof(
+                &engine,
+                0,
+                42,
+                8,
+                empty,
+                (false, |_| true, &budget::Budget::default())
+            ),
         );
         assert_ne!(
-            memo.key_with_instance_proof(&engine, 0, 42, 8, other, (false, |_| false)),
-            memo.key_with_instance_proof(&engine, 0, 42, 8, empty, (false, |_| false)),
+            memo.key_with_instance_proof(
+                &engine,
+                0,
+                42,
+                8,
+                other,
+                (false, |_| false, &budget::Budget::default())
+            ),
+            memo.key_with_instance_proof(
+                &engine,
+                0,
+                42,
+                8,
+                empty,
+                (false, |_| false, &budget::Budget::default())
+            ),
         );
         let a = RefFrame {
             source: 1,

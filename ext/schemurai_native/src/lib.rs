@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+mod budget;
 mod content;
 mod diagnostics;
 mod enumeration;
@@ -29,6 +30,7 @@ unsafe extern "C" {
     fn sn_nil() -> Value;
     fn sn_undefined() -> Value;
     fn sn_kind(value: Value) -> i32;
+    fn sn_scalar_bytes(value: Value) -> usize;
     fn sn_shallow_kind(value: Value) -> i32;
     fn sn_fingerprint_view(
         value: Value,
@@ -1105,6 +1107,7 @@ struct Execution<'a> {
     engine: &'a Engine,
     caches: &'a pattern::Caches,
     memo: memo::Memo,
+    budget: std::rc::Rc<budget::Budget>,
 }
 impl std::ops::Deref for Execution<'_> {
     type Target = Engine;
@@ -1126,9 +1129,21 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         known_kind: Option<i32>,
     ) -> Verdict {
-        let Some(key) = self.memo.key(self, node, value, depth, active) else {
+        if !self.budget.node(&self.nodes[node], value) || !self.budget.context(active) {
+            return Unsupported;
+        }
+        let Some(key) = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget)
+        else {
+            if self.budget.hit.get().0 != 0 {
+                return Unsupported;
+            }
             return self.eval_uncached(node, value, depth, active, known_kind);
         };
+        if self.budget.hit.get().0 != 0 {
+            return Unsupported;
+        }
         if let Some(status) = self.memo.verdict(key) {
             return status;
         }
@@ -1275,8 +1290,8 @@ impl Execution<'_> {
             Op::Unsupported => Unsupported,
             Op::Boolean(v) => verdict(*v),
             Op::Type(mask) => verdict(kind & mask != 0),
-            Op::Const(v) => equal(*v, value, depth),
-            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag),
+            Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
+            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag, &self.budget),
             Op::Number(required, rules) => {
                 if *required != 0 && kind & required == 0 {
                     Invalid
@@ -1299,12 +1314,15 @@ impl Execution<'_> {
         }
     }
     fn array(&self, r: &Array, value: Value, depth: usize, active: scope::Context<'_>) -> Verdict {
+        if !self.budget.array(value) {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag);
+            let result = unique(value, depth, self.fixnum_flag, &self.budget);
             if result != Valid {
                 return result;
             }
@@ -1597,6 +1615,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        if !self.budget.object(value, r) {
+            return Unsupported;
+        }
         if let Some(record) = &r.record {
             // C initializes only the written key/value pairs. The untouched
             // tail is never read, including empty and unsupported records.
@@ -1733,6 +1754,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        if !self.budget.node(&self.nodes[node], value) {
+            return Unsupported;
+        }
         match self.nodes[node].as_slice() {
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.length_only() =>
@@ -1891,15 +1915,19 @@ fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<u
 fn immediate_integer(value: Value) -> i64 {
     (value as isize >> 1) as i64
 }
-fn equal(a: Value, b: Value, depth: usize) -> Verdict {
-    equal_cached(a, b, depth, &mut structural::Cache::new(depth))
+fn equal_budgeted(a: Value, b: Value, depth: usize, budget: &budget::Budget) -> Verdict {
+    equal_cached(a, b, depth, &mut structural::Cache::new(depth), budget)
 }
 fn equal_cached(
     a: Value,
     b: Value,
     depth: usize,
     memo: &mut structural::Cache<(Value, Value, usize), Verdict>,
+    budget: &budget::Budget,
 ) -> Verdict {
+    if !budget.charge(1) || !budget.scalar(a) || !budget.scalar(b) {
+        return Unsupported;
+    }
     if depth > MAX_EVALUATION_DEPTH {
         return Unsupported;
     }
@@ -1983,6 +2011,7 @@ fn equal_cached(
                     unsafe { sn_entry(b, i) },
                     depth + 1,
                     memo,
+                    budget,
                 );
                 if result != Valid {
                     return result;
@@ -1998,6 +2027,7 @@ fn equal_cached(
                 other: b,
                 depth: depth + 1,
                 memo,
+                budget,
             };
             decode(unsafe {
                 sn_hash_each(
@@ -2026,6 +2056,7 @@ struct EqualityContext<'a> {
     other: Value,
     depth: usize,
     memo: &'a mut structural::Cache<(Value, Value, usize), Verdict>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -2033,11 +2064,14 @@ unsafe extern "C" fn equal_entry(context: *mut c_void, key: Value, value: Value)
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
+        if !c.budget.scalar(key) {
+            return Unsupported as i32;
+        }
         let other = unsafe { sn_lookup(c.other, key) };
         if unsafe { sn_missing(other) } != 0 {
             Invalid as i32
         } else {
-            equal_cached(value, other, c.depth, c.memo) as i32
+            equal_cached(value, other, c.depth, c.memo, c.budget) as i32
         }
     }))
     .unwrap_or(Unsupported as i32)
@@ -2117,12 +2151,28 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     mix(result ^ TYPE_STRING as u64)
 }
 fn fingerprint(value: Value, depth: usize, fixnum_flag: Value, big_hint: bool) -> Option<u64> {
+    fingerprint_budgeted(
+        value,
+        depth,
+        fixnum_flag,
+        big_hint,
+        &budget::Budget::default(),
+    )
+}
+fn fingerprint_budgeted(
+    value: Value,
+    depth: usize,
+    fixnum_flag: Value,
+    big_hint: bool,
+    budget: &budget::Budget,
+) -> Option<u64> {
     fingerprint_cached(
         value,
         depth,
         fixnum_flag,
         big_hint,
         &mut structural::Cache::new(depth),
+        budget,
     )
 }
 fn fingerprint_cached(
@@ -2131,7 +2181,11 @@ fn fingerprint_cached(
     fixnum_flag: Value,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
+    budget: &budget::Budget,
 ) -> Option<u64> {
+    if !budget.charge(1) || !budget.scalar(value) {
+        return None;
+    }
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
@@ -2191,7 +2245,9 @@ fn fingerprint_cached(
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
-                hash = mix(hash ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo)?);
+                hash =
+                    mix(hash
+                        ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo, budget)?);
             }
             Some(hash)
         }
@@ -2202,6 +2258,7 @@ fn fingerprint_cached(
                 depth: depth + 1,
                 fixnum_flag,
                 memo,
+                budget,
             };
             let status = unsafe {
                 sn_hash_each_key_view(
@@ -2224,6 +2281,7 @@ struct FingerprintContext<'a> {
     depth: usize,
     fixnum_flag: Value,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
+    budget: &'a budget::Budget,
 }
 unsafe extern "C" fn fingerprint_entry(
     context: *mut c_void,
@@ -2233,7 +2291,11 @@ unsafe extern "C" fn fingerprint_entry(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<FingerprintContext<'_>>() };
-        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo) else {
+        if !c.budget.charge(len) {
+            return Unsupported as i32;
+        }
+        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo, c.budget)
+        else {
             return Unsupported as i32;
         };
         c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));
@@ -2258,15 +2320,19 @@ impl Hasher for BucketHasher {
         }
     }
 }
-fn unique(value: Value, depth: usize, fixnum_flag: Value) -> Verdict {
+fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budget) -> Verdict {
     let len = unsafe { sn_len(value) };
+    if !budget.charge(len) {
+        return Unsupported;
+    }
     if len <= 16 {
         for i in 0..len {
             for previous in 0..i {
-                match equal(
+                match equal_budgeted(
                     unsafe { sn_entry(value, previous) },
                     unsafe { sn_entry(value, i) },
                     depth,
+                    budget,
                 ) {
                     Valid => return Invalid,
                     Unsupported => return Unsupported,
@@ -2286,24 +2352,27 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value) -> Verdict {
         return result;
     }
     if big_hint && depth <= MAX_EVALUATION_DEPTH {
-        let result = unordered_big_unique(values);
+        let result = unordered_big_unique(values, budget);
         if result != Unsupported {
             return result;
         }
     }
     indexed_unique(
         values,
-        |item| fingerprint(item, depth, fixnum_flag, big_hint),
-        |a, b| equal(a, b, depth),
+        |item| fingerprint_budgeted(item, depth, fixnum_flag, big_hint, budget),
+        |a, b| equal_budgeted(a, b, depth, budget),
     )
 }
 // Keep Big-only sampling and retry state out of the common scalar path.
 #[inline(never)]
-fn unordered_big_unique(values: &[Value]) -> Verdict {
+fn unordered_big_unique(values: &[Value], budget: &budget::Budget) -> Verdict {
     let mut all_big = true;
     let result = indexed_unique_short(
         values,
         |item| {
+            if !budget.charge(1) || !budget.scalar(item) {
+                return None;
+            }
             let hash = number::big_low_fingerprint(item);
             if hash.is_none() {
                 all_big = false;
@@ -2311,6 +2380,9 @@ fn unordered_big_unique(values: &[Value]) -> Verdict {
             hash
         },
         |a, b| {
+            if !budget.charge(1) || !budget.scalar(a) || !budget.scalar(b) {
+                return Unsupported;
+            }
             // Distinct integers sharing the short sample need the wider pass.
             if unsafe { sn_big_equal(a, b) } != 0 {
                 Valid
@@ -2323,15 +2395,41 @@ fn unordered_big_unique(values: &[Value]) -> Verdict {
         return result;
     }
     if all_big {
-        let result = indexed_unique_impl::<true>(values, number::big_low64_fingerprint, |a, b| {
-            verdict(unsafe { sn_big_equal(a, b) } != 0)
-        });
+        let result = indexed_unique_impl::<true>(
+            values,
+            |item| {
+                if !budget.charge(1) || !budget.scalar(item) {
+                    None
+                } else {
+                    number::big_low64_fingerprint(item)
+                }
+            },
+            |a, b| {
+                if !budget.charge(1) || !budget.scalar(a) || !budget.scalar(b) {
+                    return Unsupported;
+                }
+                verdict(unsafe { sn_big_equal(a, b) } != 0)
+            },
+        );
         if result != Unsupported {
             return result;
         }
-        let result = indexed_unique(values, number::big_only_fingerprint, |a, b| {
-            verdict(unsafe { sn_big_equal(a, b) } != 0)
-        });
+        let result = indexed_unique(
+            values,
+            |item| {
+                if !budget.charge(1) || !budget.scalar(item) {
+                    None
+                } else {
+                    number::big_only_fingerprint(item)
+                }
+            },
+            |a, b| {
+                if !budget.charge(1) || !budget.scalar(a) || !budget.scalar(b) {
+                    return Unsupported;
+                }
+                verdict(unsafe { sn_big_equal(a, b) } != 0)
+            },
+        );
         if result != Unsupported {
             return result;
         }
@@ -2670,10 +2768,41 @@ pub unsafe extern "C" fn sn_valid(
             engine: e,
             caches,
             memo: memo::Memo::default(),
+            budget: std::rc::Rc::default(),
         }
         .eval(root, value, 0, scope::Context::default()) as i32
     }))
     .unwrap_or(STATUS_PANIC)
+}
+/// # Safety
+/// Same requirements as sn_valid; all limit/output pointers must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_valid_with_limits(
+    engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
+    value: Value,
+    limits: *const budget::Limits,
+    outcome: *mut budget::Outcome,
+) -> i32 {
+    let work = budget::Budget::new(unsafe { *limits });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let execution = Execution {
+            engine: unsafe { &*engine },
+            caches,
+            memo: memo::Memo::default(),
+            budget: std::rc::Rc::new(work),
+        };
+        let result = execution.eval(root, value, 0, scope::Context::default());
+        unsafe {
+            (*outcome).spent = execution.budget.spent.get();
+            ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();
+        }
+        result as i32
+    }));
+    result.unwrap_or(STATUS_PANIC)
 }
 /// # Safety
 /// Engine must be an owned pointer returned by sn_new, freed exactly once.

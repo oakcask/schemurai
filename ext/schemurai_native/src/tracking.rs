@@ -253,6 +253,9 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH {
             return Tracked::new(Unsupported);
         }
+        if !self.budget.scalar(value) {
+            return Tracked::new(Unsupported);
+        }
         let kind = if value & self.fixnum_flag != 0 {
             TYPE_INTEGRAL_NUMBER
         } else {
@@ -271,9 +274,21 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Tracked {
-        let Some(key) = self.memo.key(self, node, value, depth, active) else {
+        if !self.budget.node(&self.nodes[node], value) || !self.budget.context(active) {
+            return Tracked::new(Unsupported);
+        }
+        let Some(key) = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget)
+        else {
+            if self.budget.hit.get().0 != 0 {
+                return Tracked::new(Unsupported);
+            }
             return self.eval_tracked_uncached(node, value, depth, active, kind);
         };
+        if self.budget.hit.get().0 != 0 || !self.budget.charge(self.memo.coverage_cost(key, None)) {
+            return Tracked::new(Unsupported);
+        }
         if let Some(result) = self.memo.tracked(key) {
             return result;
         }
@@ -425,12 +440,15 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         evaluation: &mut Tracked,
     ) -> Verdict {
+        if !self.budget.array(value) {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag);
+            let result = unique(value, depth, self.fixnum_flag, &self.budget);
             if result != Valid {
                 return result;
             }
@@ -496,6 +514,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         evaluation: &mut Tracked,
     ) -> Verdict {
+        if !self.budget.object(value, r) {
+            return Unsupported;
+        }
         let len = unsafe { sn_len(value) };
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;

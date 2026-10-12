@@ -20,15 +20,57 @@ pub struct Report {
     // Explicit failure signal for the current evaluation, independent of the
     // number or rendering of diagnostic records. Child evaluations isolate it.
     failed: bool,
+    limits: budget::Limits,
+    output_bytes: usize,
+    limit_hit: (u32, usize),
+    work: Option<std::rc::Rc<budget::Budget>>,
 }
 impl Report {
-    fn add(&mut self, keyword: &'static str, source: (i32, Value), instance: Value, detail: usize) {
+    fn add(
+        &mut self,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        detail: usize,
+    ) -> Result<(), Verdict> {
+        if self.limits.enabled & 1 != 0 && self.errors.len() >= self.limits.max_errors {
+            self.limit_hit = (1, self.errors.len().saturating_add(1));
+            return Err(Unsupported);
+        }
         self.failed = true;
         let schema_path = if keyword == "falseSchema" {
             self.schema_path.clone()
         } else {
             format!("{}/{keyword}", self.schema_path)
         };
+        let account_work = self
+            .work
+            .as_ref()
+            .is_some_and(|work| work.limits.enabled & 4 != 0);
+        if self.limits.enabled & 2 != 0 || account_work {
+            // Known JSON fields plus an empty message. The Ruby renderer checks
+            // the complete message before returning any diagnostic output.
+            let bytes = self
+                .output_bytes
+                .saturating_add(63 + usize::from(!self.errors.is_empty()))
+                .saturating_add(budget::json_bytes(keyword.as_bytes()))
+                .saturating_add(budget::json_bytes(self.instance_path.as_bytes()))
+                .saturating_add(budget::json_bytes(schema_path.as_bytes()));
+            if account_work
+                && !self
+                    .work
+                    .as_ref()
+                    .unwrap()
+                    .charge(bytes - self.output_bytes)
+            {
+                return Err(Unsupported);
+            }
+            if self.limits.enabled & 2 != 0 && bytes > self.limits.max_output_bytes {
+                self.limit_hit = (2, bytes);
+                return Err(Unsupported);
+            }
+            self.output_bytes = bytes;
+        }
         self.errors.push(Error {
             keyword,
             instance_path: self.instance_path.clone(),
@@ -38,6 +80,7 @@ impl Report {
             instance,
             detail,
         });
+        Ok(())
     }
     fn scoped<T>(
         &mut self,
@@ -107,6 +150,9 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
+        if !self.budget.scalar(value) {
+            return Err(Unsupported);
+        }
         let kind = unsafe { sn_kind(value) };
         if kind == TYPE_UNSUPPORTED {
             return Err(Unsupported);
@@ -125,7 +171,22 @@ impl Execution<'_> {
         // A diagnostic success is established by complete traversal, never by
         // a short-circuit validity result. Keep exported annotations and the
         // collection policy separate; failures retain their path-specific errors.
-        let key = self.memo.key(self, node, value, depth, active);
+        if !self.budget.node(&self.nodes[node], value) || !self.budget.context(active) {
+            return Err(Unsupported);
+        }
+        let key = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget);
+        if self.budget.hit.get().0 != 0 {
+            return Err(Unsupported);
+        }
+        if let Some(key) = key
+            && !self
+                .budget
+                .charge(self.memo.coverage_cost(key, Some(ANNOTATIONS)))
+        {
+            return Err(Unsupported);
+        }
         if let Some(key) = key
             && let Some(result) = self.memo.diagnostic_success(key, ANNOTATIONS)
         {
@@ -169,13 +230,13 @@ impl Execution<'_> {
             match op {
                 Op::Unsupported => return Err(Unsupported),
                 Op::Boolean(false) => {
-                    report.add("falseSchema", source, value, 0);
+                    report.add("falseSchema", source, value, 0)?;
                     prior = Tracked::new(Invalid);
                 }
                 Op::Boolean(true) => {}
                 Op::Type(mask) => {
                     if kind & mask == 0 {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                 }
                 Op::Const(..) | Op::Enum(..) => match self.leaf(op, kind, value, depth) {
@@ -189,12 +250,12 @@ impl Execution<'_> {
                         source,
                         value,
                         0,
-                    ),
+                    )?,
                     Valid => {}
                 },
                 Op::Number(required, rules) => {
                     if *required != 0 && kind & required == 0 {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind & TYPE_NUMBER != 0 {
                         let bits = rules.failures(value)?;
@@ -206,14 +267,14 @@ impl Execution<'_> {
                             (MULTIPLE_OF, "multipleOf"),
                         ] {
                             if bits & bit != 0 {
-                                report.add(keyword, source, value, 0);
+                                report.add(keyword, source, value, 0)?;
                             }
                         }
                     }
                 }
                 Op::String(required, rules) => {
                     if *required != 0 && kind != TYPE_STRING {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind == TYPE_STRING {
                         let len = if rules.min.is_some() || rules.max.is_some() {
@@ -222,22 +283,22 @@ impl Execution<'_> {
                             0
                         };
                         if rules.max.is_some_and(|max| len > max) {
-                            report.add("maxLength", source, value, len);
+                            report.add("maxLength", source, value, len)?;
                         }
                         if rules.min.is_some_and(|min| len < min) {
-                            report.add("minLength", source, value, len);
+                            report.add("minLength", source, value, len)?;
                         }
                         if let Some(pattern) = &rules.pattern {
                             match pattern.eval(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("pattern", source, value, 0),
+                                Invalid => report.add("pattern", source, value, 0)?,
                                 Valid => {}
                             }
                         }
                         if let Some(format) = &rules.format {
                             match format.eval(value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("format", source, value, 0),
+                                Invalid => report.add("format", source, value, 0)?,
                                 Valid => {}
                             }
                         }
@@ -253,15 +314,18 @@ impl Execution<'_> {
                                     source,
                                     value,
                                     0,
-                                ),
+                                )?,
                                 Valid => {}
                             }
                         }
                     }
                 }
                 Op::Array(required, rules) => {
+                    if kind == TYPE_ARRAY && !self.budget.array(value) {
+                        return Err(Unsupported);
+                    }
                     if *required != 0 && kind != TYPE_ARRAY {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind != TYPE_ARRAY {
                         continue;
@@ -269,15 +333,15 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxItems", source, value, len);
+                        report.add("maxItems", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minItems", source, value, len);
+                        report.add("minItems", source, value, len)?;
                     }
                     if rules.unique {
-                        match unique(value, depth, self.fixnum_flag) {
+                        match unique(value, depth, self.fixnum_flag, &self.budget) {
                             Unsupported => return Err(Unsupported),
-                            Invalid => report.add("uniqueItems", source, value, 0),
+                            Invalid => report.add("uniqueItems", source, value, 0)?,
                             Valid => {}
                         }
                     }
@@ -495,7 +559,7 @@ impl Execution<'_> {
                         )?;
                         if bounds(matches, Some(rules.min_contains), rules.max_contains) == Invalid
                         {
-                            report.add("contains", source, value, matches);
+                            report.add("contains", source, value, matches)?;
                         }
                     }
                     if let Some(child) = rules
@@ -523,8 +587,11 @@ impl Execution<'_> {
                     }
                 }
                 Op::Object(required, rules) => {
+                    if kind == TYPE_OBJECT && !self.budget.object(value, rules) {
+                        return Err(Unsupported);
+                    }
                     if *required != 0 && kind != TYPE_OBJECT {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind != TYPE_OBJECT {
                         continue;
@@ -532,14 +599,14 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxProperties", source, value, len);
+                        report.add("maxProperties", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minProperties", source, value, len);
+                        report.add("minProperties", source, value, len)?;
                     }
                     for &name in &rules.required_order {
                         if missing(value, name, self.undefined) {
-                            report.add("required", source, name, 0);
+                            report.add("required", source, name, 0)?;
                         }
                     }
                     let mut context = ObjectDiagnostics {
@@ -588,7 +655,7 @@ impl Execution<'_> {
                                 }
                                 for &required in names {
                                     if missing(value, required, self.undefined) {
-                                        report.add(keyword, (source.0, *name), required, 0);
+                                        report.add(keyword, (source.0, *name), required, 0)?;
                                     }
                                 }
                             }
@@ -713,7 +780,7 @@ impl Execution<'_> {
                         }
                     };
                     if !branch_kind.accepts(result.matches) {
-                        report.add(branch_kind.keyword(), source, value, result.matches);
+                        report.add(branch_kind.keyword(), source, value, result.matches)?;
                     } else if tracked {
                         prior.merge_diagnostics(result.coverage)?;
                     }
@@ -721,7 +788,7 @@ impl Execution<'_> {
                 Op::Not(child) => {
                     match self.eval_with_kind(*child, value, depth + 1, active, Some(kind)) {
                         Unsupported => return Err(Unsupported),
-                        Valid => report.add("not", source, value, 0),
+                        Valid => report.add("not", source, value, 0)?,
                         Invalid => {}
                     }
                 }
@@ -817,6 +884,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Result<bool, Verdict> {
+        if !self.budget.node(&self.nodes[node], value) {
+            return Err(Unsupported);
+        }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
                 rules.eval_guarded(*required, value)
@@ -942,10 +1012,69 @@ pub unsafe extern "C" fn sn_diagnose(
             engine,
             caches,
             memo: memo::Memo::default(),
+            budget: std::rc::Rc::default(),
         };
         let mut report = Report::default();
         execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())?;
         Ok::<_, Verdict>(Box::into_raw(Box::new(report)))
+    }));
+    match result {
+        Ok(Ok(report)) => {
+            unsafe { *status = VERDICT_VALID };
+            report
+        }
+        other => {
+            unsafe {
+                *status = if other.is_err() {
+                    STATUS_PANIC
+                } else {
+                    VERDICT_UNSUPPORTED
+                }
+            };
+            std::ptr::null_mut()
+        }
+    }
+}
+/// # Safety
+/// Same requirements as sn_diagnose; all limit/output pointers must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_diagnose_with_limits(
+    engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
+    instance: Value,
+    status: *mut i32,
+    limits: *const budget::Limits,
+    outcome: *mut budget::Outcome,
+) -> *mut Report {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let limits = unsafe { *limits };
+        let execution = Execution {
+            engine: unsafe { &*engine },
+            caches,
+            memo: memo::Memo::default(),
+            budget: std::rc::Rc::new(budget::Budget::new(limits)),
+        };
+        let mut report = Report {
+            limits,
+            output_bytes: 2,
+            work: Some(execution.budget.clone()),
+            ..Report::default()
+        };
+        let result =
+            execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default());
+        let hit = if report.limit_hit.0 != 0 {
+            report.limit_hit
+        } else {
+            execution.budget.hit.get()
+        };
+        unsafe {
+            (*outcome).spent = execution.budget.spent.get();
+            ((*outcome).kind, (*outcome).attempted) = hit;
+        }
+        result.map(|_| Box::into_raw(Box::new(report)))
     }));
     match result {
         Ok(Ok(report)) => {

@@ -8,6 +8,40 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Configurable validation limits (draft)
+
+`validation_limits.rb` compares unlimited and bounded calls on each selected
+backend, excluding compilation. It checks successful validation of 1,000 object
+records before timing. Limits include error count, compact JSON output bytes
+and evaluation work. Each backend retains its execution engine; native includes
+Rust counters and keeps native memoization and regex matching. Unsupported
+native evaluation delegates to the bounded VM with its remaining work budget.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/validation_limits.rb
+```
+
+Local medians on Ruby 4.0.6, x86_64-linux, without YJIT (seven batches of five
+calls; caps of 100 errors, 65,536 output bytes and 1,000,000 work units):
+
+| Backend | Unlimited valid? (µs) | Limited valid? (µs) | Unlimited validate (µs) | Limited validate (µs) |
+| --- | ---: | ---: | ---: | ---: |
+| Ruby | 1,759.484 | 4,698.848 | 3,680.089 | 6,975.555 |
+| VM | 590.936 | 2,138.273 | 2,097.889 | 4,395.286 |
+| Native | 19.220 | 52.893 | 123.581 | 169.690 |
+
+These compare opt-in accounting with unlimited calls in the same build on this
+successful workload; they do not establish overhead for other schemas or a
+comparison against a previous release. Backend-specific counters keep native
+execution fast enough that bounded calls do not need Ruby interpreter execution.
+
+Work units are backend-dependent and do not interrupt a single regexp,
+arbitrary-precision arithmetic operation or Ruby callback. The draft does not
+establish a hard CPU or memory sandbox. Native collection bounds known output
+fields before materializing Ruby rows; the Ruby message renderer checks exact
+complete JSON size. An oversized individual message may already be constructed
+when its limit is detected. Compiler and registry work remain outside the budget.
+
 ## Shared native reference annotations
 
 `native_algorithms.rb` includes chains with two references to the preceding

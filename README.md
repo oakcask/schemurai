@@ -221,10 +221,76 @@ regardless of the registry option and reuse meta-schema graph data within that
 registry. The stateful validator used for a check is temporary; no global
 validator is retained.
 
+### Validation limits (draft API)
+
+Applications can set independent limits on emitted diagnostic count, compact
+JSON diagnostic bytes and evaluation work. All limits default to `nil`
+(unlimited); values must be nonnegative integers. Limits apply per invocation.
+
+```ruby
+limits = Schemurai::Limits.new(
+  max_errors: 100,
+  max_output_bytes: 64 * 1024,
+  max_evaluations: 100_000
+)
+validator = Schemurai.compile(schema, backend: :native, limits: limits)
+
+begin
+  result = validator.validate(order)
+rescue Schemurai::LimitExceeded => error
+  # Evaluation is incomplete: do not interpret this as a validation result.
+  warn "Validation stopped at #{error.limit}"
+end
+
+validator.valid?(order) # evaluation-work limit also applies to Boolean checks
+validator.validate(order, limits: {max_errors: 10, max_evaluations: 10_000})
+```
+
+`SchemaRegistry#compile`, `#validator_for`, the convenience `validate` / `valid?`
+methods and explicit meta-schema validation also accept `limits:`. A per-call
+value replaces the compiled defaults; explicitly passing `limits: nil` disables
+them for that call. Immutable `Limits` objects can be shared between Ractors;
+each invocation owns its counters.
+
+`max_errors` checks before constructing the next emitted error. Errors from
+suppressed applicator trials do not consume this count. `max_output_bytes`
+measures the default compact `JSON.generate(result.errors.map(&:to_h))`
+representation, including escaped strings, commas and the array brackets. Even
+an empty error array uses two bytes. JSON bytes are counted without allocating
+another serialized diagnostic. An oversized individual message may already
+have been constructed when its byte limit is detected; this is an output limit,
+not a hard peak-memory limit. Boolean checks ignore diagnostic count/byte caps.
+
+`max_evaluations` uses a conservative work model: schema visits and keyword
+slots, container scan slots, structural comparison/fingerprint visits, dynamic
+scope scans, and scalar byte processing. Shared paths and discarded branch
+trials consume work too. Bulk scans are charged before traversal, so a call can
+stop earlier than its actual short-circuit work would require. The count is not
+wall-clock time or a portable instruction count. A single regexp search,
+Big Integer operation or custom Ruby callback cannot be preempted by this
+counter. Compilation, schema registration and automatic `validate_schema: true`
+checks are outside the instance-validation budget; explicit `validate_schema`
+accepts its own limits. Set all three caps when their independent protections
+are required.
+
+Each selected backend keeps its own execution path: Ruby instruments its
+schema interpreter, VM instruments compiled instructions, and native uses Rust
+counters while preserving native memoization and regex engines. Native checks
+error count and the known JSON fields while collecting diagnostics; the Ruby
+message renderer checks the complete JSON byte size before returning errors.
+A limit hit is terminal and never triggers VM delegation. For unsupported native
+operations, the VM fallback inherits the already consumed evaluation work.
+The work count depends on the backend and its optimizations, including cache
+hits and annotation copying; the same numerical limit need not stop each backend
+at the same location. These counters do not establish a hard CPU/heap sandbox
+or interrupt a single regexp operation. Unsupported native regex operations
+still use the VM's Ruby regex implementation, so applications need a separate
+regexp timeout or execution isolation where that risk matters.
+
 ### Backend selection
 
 `Schemurai.backend`, `SchemaRegistry#backend`, and `Validator#backend` expose
-the actual backend. Pass `backend: :ruby` to force the Ruby oracle or
+the selected backend. Pass `backend: :ruby` to force the Ruby oracle or
 `backend: :vm` to ahead-of-time compile schemas for the validator virtual machine.
 Pass `backend: :native` to use the experimental Rust VM extension. Building the
 native extension requires a C toolchain, Ruby development headers, and Rust

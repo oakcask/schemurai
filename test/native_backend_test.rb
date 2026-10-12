@@ -8,6 +8,72 @@ require "rbconfig"
 require_relative "../oracle/lib/case_catalog"
 
 RSpec.describe "native VALUE execution" do
+  it "enforces native limits without routing bounded calls through the Ruby evaluator" do # rubocop:disable RSpec/ExampleLength
+    ruby_limited = Schemurai.const_get(:Internal).const_get(:LimitedEvaluator)
+    allow(ruby_limited).to receive(:new).and_raise("Ruby execution fallback")
+    validator = Schemurai.compile({"items" => false}, backend: :native, limits: {max_errors: 1})
+    allow(Schemurai.const_get(:VM).const_get(:LimitedEvaluator)).to receive(:new).and_raise("VM execution fallback")
+    program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    allow(program).to receive(:diagnostics).and_raise("unbounded diagnostics")
+    allow(program).to receive(:valid?).and_raise("unbounded validity")
+    expect { validator.validate([1, 2]) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:max_errors)
+    }
+    expect { validator.validate([1], limits: {max_output_bytes: 1}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:max_output_bytes)
+    }
+    expect { validator.valid?([1], limits: {max_evaluations: 0}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:max_evaluations)
+    }
+    expect(validator.validate([1]).errors.length).to eq(1)
+    expect(validator.valid?([1])).to be(false)
+    expect(validator.backend).to eq(:native)
+  end
+
+  it "carries consumed native work into VM fallback" do
+    validator = Schemurai.compile({"type" => "array"}, backend: :native)
+    value = Class.new(Array).new
+    expect { validator.valid?(value, limits: {max_evaluations: 4}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+      expect(error.limit).to eq(:max_evaluations)
+    }
+    expect(validator.valid?(value, limits: {max_evaluations: 100})).to be(true)
+  end
+
+  it "counts complete rendered native output and keeps shared-reference memoization" do # rubocop:disable RSpec/ExampleLength
+    validator = Schemurai.compile({"additionalProperties" => false}, backend: :native)
+    value = {"日本語\"\\\n\u0001/~" => 1, "second" => 2}
+    expected = validator.validate(value).errors
+    bytes = JSON.generate(expected.map(&:to_h)).bytesize
+    expect(validator.validate(value, limits: {max_output_bytes: bytes}).errors).to eq(expected)
+    expect { validator.validate(value, limits: {max_output_bytes: bytes - 1}) }.to raise_error(Schemurai::LimitExceeded)
+    definitions = {"n0" => true}
+    1.upto(32) { |i| definitions["n#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/n#{i - 1}"} }} }
+    shared = Schemurai.compile({"$defs" => definitions, "$ref" => "#/$defs/n32"}, backend: :native,
+      limits: {max_errors: 10, max_output_bytes: 1024, max_evaluations: 10_000})
+    expect(shared.valid?(nil)).to be(true)
+    expect(shared.validate(nil).valid?).to be(true)
+  end
+
+  it "charges native structural traversal against the evaluation budget" do
+    shared = 1
+    20.times { shared = [shared, shared] }
+    values = Array.new(17) { |i| [shared, i] }
+    validator = Schemurai.compile({"uniqueItems" => true}, backend: :native, limits: {max_evaluations: 100})
+    expect { validator.valid?(values) }.to raise_error(Schemurai::LimitExceeded)
+    expect { validator.validate(values) }.to raise_error(Schemurai::LimitExceeded)
+  end
+
+  it "interrupts exponentially expanding failing diagnostics during native collection" do # rubocop:disable RSpec/ExampleLength
+    definitions = {"n0" => false}
+    1.upto(32) { |i| definitions["n#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/n#{i - 1}"} }} }
+    validator = Schemurai.compile({"$defs" => definitions, "$ref" => "#/$defs/n32"}, backend: :native)
+    [:max_errors, :max_output_bytes, :max_evaluations].each do |cap|
+      expect { validator.validate(nil, limits: {cap => 100}) }.to raise_error(Schemurai::LimitExceeded) { |error|
+        expect(error.limit).to eq(cap)
+      }
+    end
+  end
+
   it "keeps native type, numeric and scope masks compatible with the Ruby compiler", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
     Schemurai.compile(true, backend: :native)
     native = Schemurai.const_get(:Native)::Protocol

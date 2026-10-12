@@ -140,6 +140,37 @@ static VALUE runner(VALUE self, VALUE root) {
     RB_GC_GUARD(self);
     return object;
 }
+typedef struct { size_t max_errors, max_output_bytes, max_evaluations; uint32_t enabled; } native_limits;
+typedef struct { size_t spent; uint32_t kind; size_t attempted; } native_outcome;
+extern int sn_valid_with_limits(const void *, const void *, size_t, VALUE, const native_limits *, native_outcome *);
+static native_limits read_limits(VALUE budget) {
+    VALUE caps = rb_funcall(budget, rb_intern("native_caps"), 0);
+    native_limits limits = {0};
+    size_t *targets[] = {&limits.max_errors, &limits.max_output_bytes, &limits.max_evaluations};
+    for (size_t i = 0; i < 3; i++) {
+        VALUE cap = rb_ary_entry(caps, i);
+        if (!NIL_P(cap)) { *targets[i] = NUM2SIZET(cap); limits.enabled |= 1u << i; }
+    }
+    RB_GC_GUARD(caps);
+    return limits;
+}
+static void finish_budget(VALUE budget, const native_outcome *outcome) {
+    rb_funcall(budget, rb_intern("evaluations"), 1, SIZET2NUM(outcome->spent));
+    if (outcome->kind) rb_funcall(budget, rb_intern("raise_native_limit"), 2, UINT2NUM(outcome->kind), SIZET2NUM(outcome->attempted));
+}
+static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) {
+    runner_holder *r;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
+    holder *h = ready_program(r->owner);
+    native_limits limits = read_limits(budget);
+    native_outcome outcome = {0};
+    int status = sn_valid_with_limits(h->engine, r->caches, r->root, instance, &limits, &outcome);
+    if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
+    finish_budget(budget, &outcome);
+    RB_GC_GUARD(instance);
+    RB_GC_GUARD(self);
+    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
+}
 static VALUE runner_valid(VALUE self, VALUE instance) {
     runner_holder *r;
     TypedData_Get_Struct(self, runner_holder, &runner_type, r);
@@ -176,6 +207,12 @@ int sn_shallow_kind(VALUE value) {
     }
     if (RB_TYPE_P(value, T_STRING)) return CLASS_OF(value) == rb_cString ? SN_TYPE_STRING : SN_TYPE_UNSUPPORTED;
     return SN_TYPE_UNSUPPORTED; /* Out-of-domain objects are handled by the Ruby VM. */
+}
+size_t sn_scalar_bytes(VALUE value) {
+    if (RB_TYPE_P(value, T_STRING)) return RSTRING_LEN(value);
+    if (RB_TYPE_P(value, T_HASH)) return RHASH_SIZE(value);
+    if (RB_INTEGER_TYPE_P(value)) return rb_absint_size(value, NULL);
+    return 1;
 }
 int sn_kind(VALUE value) {
     int kind = sn_shallow_kind(value);
@@ -454,6 +491,7 @@ typedef struct {
 } diagnostic_record;
 typedef struct { void *report; } report_holder;
 extern void *sn_diagnose(const void *, const void *, size_t, VALUE, int *);
+extern void *sn_diagnose_with_limits(const void *, const void *, size_t, VALUE, int *, const native_limits *, native_outcome *);
 extern size_t sn_report_len(const void *);
 extern size_t sn_report_size(const void *);
 extern void sn_report_record(const void *, size_t, diagnostic_record *);
@@ -476,13 +514,20 @@ static const rb_data_type_t report_type = {
     "Schemurai::Native::Diagnostics", {report_mark, report_release, report_size, NULL, {NULL}},
     NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
 };
-static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, const void *caches, size_t root) {
+static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, const void *caches, size_t root, VALUE budget) {
     report_holder *h;
     VALUE owner = TypedData_Make_Struct(rb_cObject, report_holder, &report_type, h);
     h->report = NULL;
     int status = 0;
-    h->report = sn_diagnose(engine->engine, caches, root, instance, &status);
+    native_outcome outcome = {0};
+    if (NIL_P(budget)) {
+        h->report = sn_diagnose(engine->engine, caches, root, instance, &status);
+    } else {
+        native_limits limits = read_limits(budget);
+        h->report = sn_diagnose_with_limits(engine->engine, caches, root, instance, &status, &limits, &outcome);
+    }
     if (status < 0) rb_raise(rb_eRuntimeError, "native diagnostics panicked");
+    if (!NIL_P(budget)) finish_budget(budget, &outcome);
     if (status == SN_VERDICT_UNSUPPORTED) return Qnil;
     size_t count = sn_report_len(h->report);
     VALUE output = rb_ary_new_capa(count);
@@ -506,13 +551,19 @@ static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, con
 }
 static VALUE diagnostics(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
-    return collect_diagnostics(self, instance, h, NULL, sn_root_index(h->engine));
+    return collect_diagnostics(self, instance, h, NULL, sn_root_index(h->engine), Qnil);
 }
 static VALUE runner_diagnostics(VALUE self, VALUE instance) {
     runner_holder *r;
     TypedData_Get_Struct(self, runner_holder, &runner_type, r);
     holder *h = ready_program(r->owner);
-    return collect_diagnostics(self, instance, h, r->caches, r->root);
+    return collect_diagnostics(self, instance, h, r->caches, r->root, Qnil);
+}
+static VALUE runner_diagnostics_with_budget(VALUE self, VALUE instance, VALUE budget) {
+    runner_holder *r;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
+    holder *h = ready_program(r->owner);
+    return collect_diagnostics(self, instance, h, r->caches, r->root, budget);
 }
 void Init_schemurai_native(void) {
     /* Cache fixed IDs explicitly, independent of compiler-specific macros. */
@@ -549,7 +600,9 @@ void Init_schemurai_native(void) {
     VALUE runner_class = rb_define_class_under(klass, "Runner", rb_cObject);
     rb_undef_alloc_func(runner_class);
     rb_define_method(runner_class, "valid?", runner_valid, 1);
+    rb_define_method(runner_class, "valid_with_budget", runner_valid_with_budget, 2);
     rb_define_method(runner_class, "diagnostics", runner_diagnostics, 1);
+    rb_define_method(runner_class, "diagnostics_with_budget", runner_diagnostics_with_budget, 2);
 }
 
 extern int sn_object_entry(const void *, VALUE, VALUE);

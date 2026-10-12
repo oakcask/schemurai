@@ -14,9 +14,30 @@ module Schemurai
   # A backend accepted when configuring a validator.
   type backend_selection = backend | :default
 
+  # Validation limits accepted by compile and individual calls.
+  type limits = Limits | Hash[Symbol, Integer?] | nil
+
   VERSION: String
 
   class Error < StandardError
+  end
+
+  class LimitExceeded < Error
+    attr_reader limit: Symbol
+    attr_reader maximum: Integer
+    attr_reader attempted: Integer
+
+    def initialize: (Symbol limit, Integer maximum, Integer attempted) -> void
+  end
+
+  class Limits
+    attr_reader max_errors: Integer?
+    attr_reader max_output_bytes: Integer?
+    attr_reader max_evaluations: Integer?
+
+    def initialize: (?max_errors: Integer?, ?max_output_bytes: Integer?, ?max_evaluations: Integer?) -> void
+    def enabled?: () -> bool
+    def self.coerce: (limits value) -> Limits
   end
 
   class ResolutionError < Error
@@ -63,10 +84,10 @@ module Schemurai
   end
 
   class Validator
-    def initialize: (_Evaluator evaluator) -> void
+    def initialize: (_Evaluator evaluator, ?limits: limits, ?bounded_evaluator: (^() -> untyped)?) -> void
     def backend: () -> backend
-    def validate: (json_value instance) -> Result
-    def valid?: (json_value instance) -> bool
+    def validate: (json_value instance, ?limits: limits) -> Result
+    def valid?: (json_value instance, ?limits: limits) -> bool
   end
 
   class SchemaRegistry
@@ -76,25 +97,25 @@ module Schemurai
 
     def validate_schema?: () -> bool
 
-    def compile: (schema schema, ?base_uri: String?, ?content: bool, ?format: bool) -> Validator
+    def compile: (schema schema, ?base_uri: String?, ?content: bool, ?format: bool, ?limits: limits) -> Validator
 
-    def validate_schema: (schema schema) -> Result
-    def valid_schema?: (schema schema) -> bool
+    def validate_schema: (schema schema, ?limits: limits) -> Result
+    def valid_schema?: (schema schema, ?limits: limits) -> bool
     def make_shareable: () -> self
     def shareable?: () -> bool
 
-    def validator_for: (String uri, ?content: bool, ?format: bool) -> Validator
+    def validator_for: (String uri, ?content: bool, ?format: bool, ?limits: limits) -> Validator
   end
 
   def self.backend: () -> backend
 
-  def self.compile: (schema schema, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> Validator
+  def self.compile: (schema schema, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?limits: limits) -> Validator
 
-  def self.validate_schema: (schema schema, ?schemas: schemas, ?backend: backend_selection) -> Result
+  def self.validate_schema: (schema schema, ?schemas: schemas, ?backend: backend_selection, ?limits: limits) -> Result
 
-  def self.valid_schema?: (schema schema, ?schemas: schemas, ?backend: backend_selection) -> bool
+  def self.valid_schema?: (schema schema, ?schemas: schemas, ?backend: backend_selection, ?limits: limits) -> bool
 
-  def self.validate: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> Result
+  def self.validate: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?limits: limits) -> Result
 
-  def self.valid?: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection) -> bool
+  def self.valid?: (schema schema, json_value instance, ?schemas: schemas, ?base_uri: String?, ?content: bool, ?format: bool, ?validate_schema: bool, ?backend: backend_selection, ?limits: limits) -> bool
 end

@@ -11,6 +11,8 @@ module Schemurai
   # Base class for errors raised by Schemurai.
   class Error < StandardError; end
 
+  require_relative "schemurai/limited_evaluator"
+
   # Raised when a schema or URI cannot be resolved from a registry.
   class ResolutionError < Error; end
 
@@ -96,27 +98,31 @@ module Schemurai
     # Compiles +schema+ and returns a Validator.
     #
     # +base_uri+ supplies the schema's base URI. Pass +content: true+ or
-    # +format: true+ to enable the corresponding optional assertions.
-    def compile(schema, base_uri: nil, content: false, format: false)
+    # +format: true+ to enable the corresponding optional assertions. +limits:+
+    # configures per-call validation caps; schema compilation is not bounded.
+    def compile(schema, base_uri: nil, content: false, format: false, limits: nil)
       raise Error, "cannot compile schemas after the registry is made shareable" if shareable?
 
       validate_schema!(schema) if validate_schema?
       root = @graph.compile(schema, base_uri: base_uri)
-      build_validator(root, content: content, format: format)
+      build_validator(root, content: content, format: format, limits: limits)
     end
 
     # Validates +schema+ against its declared meta-schema and returns a Result.
     # Schemas without +$schema+ are validated as Draft 7.
-    def validate_schema(schema)
+    def validate_schema(schema, limits: nil)
       raise Error, "cannot validate schemas after the registry is made shareable" if shareable?
 
       root = @graph.meta_schema_root(schema)
-      build_validator(root, content: false, format: false).validate(schema)
+      build_validator(root, content: false, format: false, limits: limits).validate(schema)
     end
 
     # Returns whether +schema+ conforms to its declared meta-schema.
-    def valid_schema?(schema)
-      validate_schema(schema).valid?
+    def valid_schema?(schema, limits: nil)
+      raise Error, "cannot validate schemas after the registry is made shareable" if shareable?
+
+      root = @graph.meta_schema_root(schema)
+      build_validator(root, content: false, format: false, limits: limits).valid?(schema)
     end
 
     # Resolves and freezes registered schemas, then makes the registry Ractor-shareable.
@@ -145,16 +151,16 @@ module Schemurai
     # Returns a Validator for the registered resource at +uri+.
     #
     # The registry must first be made shareable with #make_shareable.
-    def validator_for(uri, content: false, format: false)
+    def validator_for(uri, content: false, format: false, limits: nil)
       raise Error, "make_shareable must be called before retrieving validators by URI" unless shareable?
 
       root = @graph.node_at(uri)
       raise ResolutionError, "unregistered schema URI #{uri.inspect}" unless root
 
-      build_validator(root, content: content, format: format)
+      build_validator(root, content: content, format: format, limits: limits)
     end
 
-    private def build_validator(root, content:, format:)
+    private def build_validator(root, content:, format:, limits: nil)
       evaluator = if @compiler
         program = @compiler.compile(root)
         evaluator_class = (@backend == :native) ? Native::Evaluator : VM::Evaluator
@@ -167,7 +173,14 @@ module Schemurai
       else
         Internal::Evaluator.new(@graph, root, content: content, format: format)
       end
-      Validator.new(evaluator)
+      bounded_evaluator = lambda do
+        case @backend
+        when :native then evaluator
+        when :vm then VM::LimitedEvaluator.new(@graph, @compiler, program, content: content, format: format)
+        else Internal::LimitedEvaluator.new(@graph, root, content: content, format: format)
+        end
+      end
+      Validator.new(evaluator, limits: limits, bounded_evaluator: bounded_evaluator)
     end
 
     private def validate_schema!(schema)
@@ -186,8 +199,10 @@ module Schemurai
     #
     # Applications should normally create validators through Schemurai.compile
     # or SchemaRegistry#compile.
-    def initialize(evaluator)
+    def initialize(evaluator, limits: nil, bounded_evaluator: nil)
       @evaluator = evaluator
+      @limits = Limits.coerce(limits)
+      @bounded_evaluator = bounded_evaluator
     end
 
     # The backend reported by the evaluator, +:ruby+, +:vm+, or +:native+.
@@ -196,13 +211,28 @@ module Schemurai
     end
 
     # Validates +instance+ and returns a Result containing all reported errors.
-    def validate(instance)
-      @evaluator.validate(instance)
+    # +limits:+ overrides compiled defaults. Raises LimitExceeded when evaluation
+    # cannot complete; no partial Result is returned.
+    def validate(instance, limits: @limits)
+      selected = Limits.coerce(limits)
+      return @evaluator.validate(instance) unless selected.enabled?
+
+      limited_evaluator.validate(instance, limits: selected)
     end
 
     # Returns whether +instance+ is valid without building a detailed error list.
-    def valid?(instance)
-      @evaluator.valid?(instance)
+    # +max_evaluations+ applies; diagnostic count/byte limits are ignored.
+    def valid?(instance, limits: @limits)
+      selected = Limits.coerce(limits)
+      return @evaluator.valid?(instance) unless selected.enabled?
+
+      limited_evaluator.valid?(instance, limits: selected)
+    end
+
+    private def limited_evaluator
+      raise ArgumentError, "this manually constructed Validator has no bounded evaluator" unless @bounded_evaluator
+
+      @bounded_evaluator.call
     end
   end
 
@@ -216,31 +246,32 @@ module Schemurai
   # +schemas+ maps external URI strings to schemas. +base_uri+ supplies the
   # schema's base URI. Optional content and format assertions are disabled by
   # default. +backend+ accepts +:ruby+, +:vm+, +:native+, or +:default+.
-  module_function def compile(schema, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested)
+  module_function def compile(schema, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested, limits: nil)
     SchemaRegistry.new(schemas: schemas, validate_schema: validate_schema, backend: backend).compile(
       schema,
       base_uri: base_uri,
       content: content,
-      format: format
+      format: format,
+      limits: limits
     )
   end
 
   # Validates +schema+ against its declared meta-schema and returns a Result.
   # Schemas without +$schema+ are validated as Draft 7.
-  module_function def validate_schema(schema, schemas: {}, backend: Backend.requested)
-    SchemaRegistry.new(schemas: schemas, backend: backend).validate_schema(schema)
+  module_function def validate_schema(schema, schemas: {}, backend: Backend.requested, limits: nil)
+    SchemaRegistry.new(schemas: schemas, backend: backend).validate_schema(schema, limits: limits)
   end
 
   # Returns whether +schema+ conforms to its declared meta-schema.
-  module_function def valid_schema?(schema, schemas: {}, backend: Backend.requested)
-    validate_schema(schema, schemas: schemas, backend: backend).valid?
+  module_function def valid_schema?(schema, schemas: {}, backend: Backend.requested, limits: nil)
+    SchemaRegistry.new(schemas: schemas, backend: backend).valid_schema?(schema, limits: limits)
   end
 
   # Validates +instance+ against +schema+ and returns a Result.
   #
   # This convenience method compiles the schema for each call. Use .compile
   # when validating multiple instances against the same schema.
-  module_function def validate(schema, instance, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested)
+  module_function def validate(schema, instance, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested, limits: nil)
     compile(
       schema,
       schemas: schemas,
@@ -248,7 +279,8 @@ module Schemurai
       content: content,
       format: format,
       validate_schema: validate_schema,
-      backend: backend
+      backend: backend,
+      limits: limits
     ).validate(instance)
   end
 
@@ -256,7 +288,7 @@ module Schemurai
   #
   # This convenience method compiles the schema for each call. Use .compile
   # when validating multiple instances against the same schema.
-  module_function def valid?(schema, instance, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested)
+  module_function def valid?(schema, instance, schemas: {}, base_uri: nil, content: false, format: false, validate_schema: false, backend: Backend.requested, limits: nil)
     compile(
       schema,
       schemas: schemas,
@@ -264,7 +296,8 @@ module Schemurai
       content: content,
       format: format,
       validate_schema: validate_schema,
-      backend: backend
+      backend: backend,
+      limits: limits
     ).valid?(instance)
   end
 
