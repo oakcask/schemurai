@@ -48,4 +48,17 @@ RSpec.describe "the #{backend} evaluator" do
 
     expect(result).to eq([backend, true, false, false])
   end
+
+  it "preserves complete catalog results with generous invocation limits" do # rubocop:disable RSpec/ExampleLength
+    catalog = SchemuraiOracle::CaseCatalog.new
+    caps = [{max_errors: 100_000}, {timeout: 10}, {max_errors: 100_000, timeout: 10}]
+    catalog.each_case.select { |record| record.classification == "selected" }.each do |record|
+      validator = Schemurai.compile(record.schema, schemas: catalog.remotes, backend: backend, **record.options.transform_keys(&:to_sym))
+      expected = validator.validate(record.instance)
+      caps.each do |limits|
+        expect(validator.validate(record.instance, **limits).errors).to eq(expected.errors), record.id
+        expect(validator.valid?(record.instance, **limits)).to eq(expected.valid?), record.id
+      end
+    end
+  end
 end

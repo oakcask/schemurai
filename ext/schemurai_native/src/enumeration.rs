@@ -37,6 +37,7 @@ impl Enumeration {
         kind: i32,
         depth: usize,
         fixnum_flag: Value,
+        budget: &budget::Budget,
     ) -> Verdict {
         if let Some(index) = &self.index {
             // All indexed schema values are supported. A disjoint root type
@@ -47,22 +48,23 @@ impl Enumeration {
             }
             // Keep the best-case linear lookup cheap. This also avoids hashing
             // a whole input container when the first candidate already matches.
-            let first = equal(self.values[0], value, depth);
+            let first = equal_budgeted(self.values[0], value, depth, budget);
             if first != Invalid {
                 return first;
             }
-            if let Some(hash) = fingerprint(value, depth, fixnum_flag, false) {
+            if let Some(hash) = fingerprint_budgeted(value, depth, fixnum_flag, false, budget) {
                 return self.compare(
                     index.candidates(hash).filter(|&index| index != 0),
                     value,
                     depth,
+                    budget,
                 );
             }
-            return self.compare(1..self.values.len(), value, depth);
+            return self.compare(1..self.values.len(), value, depth, budget);
         }
         // An unavailable fingerprint is not an unsupported comparison. Linear
         // equality can reject a different shape before reaching that value.
-        self.compare(0..self.values.len(), value, depth)
+        self.compare(0..self.values.len(), value, depth, budget)
     }
 
     fn compare(
@@ -70,9 +72,10 @@ impl Enumeration {
         candidates: impl Iterator<Item = usize>,
         value: Value,
         depth: usize,
+        budget: &budget::Budget,
     ) -> Verdict {
         for index in candidates {
-            let result = equal(self.values[index], value, depth);
+            let result = equal_budgeted(self.values[index], value, depth, budget);
             if result != Invalid {
                 return result;
             }

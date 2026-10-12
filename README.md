@@ -221,10 +221,70 @@ regardless of the registry option and reuse meta-schema graph data within that
 registry. The stateful validator used for a check is temporary; no global
 validator is retained.
 
+### Opt-in validation limits (experimental)
+
+`max_errors:` and `timeout:` are optional kwargs. Both default to `nil`
+(unlimited) and apply independently to each validation call. `max_errors` must
+be a nonnegative Integer; `timeout` must be finite nonnegative Integer or Float
+seconds. No settings object is needed.
+
+```ruby
+validator = Schemurai.compile(schema, max_errors: 100, timeout: 0.1)
+begin
+  result = validator.validate(order)
+rescue Schemurai::LimitExceeded => error
+  # Evaluation is incomplete; no partial result is returned.
+  warn "Validation stopped at #{error.limit}"
+end
+
+validator.validate(order, max_errors: 10) # retains the compiled timeout
+validator.validate(order, timeout: nil)  # retains the compiled error cap
+validator.validate(order, max_errors: nil, timeout: nil) # disables both
+validator.valid?(order) # applies the timeout, ignores max_errors
+```
+
+`SchemaRegistry#compile`, `#validator_for`, the convenience `validate` / `valid?`
+methods and explicit meta-schema checks also accept these kwargs. Overrides
+replace only the specified option. Settings belong to each compiled validator;
+a shareable registry retains no mutable invocation counters.
+
+The error cap checks before constructing the next emitted diagnostic. Exactly
+`max_errors` errors may be returned; attempting another raises `LimitExceeded`
+with `limit == :max_errors`, `maximum` and `attempted` counts. Suppressed
+applicator trials do not consume the cap. Boolean checks ignore the error cap
+and use the ordinary evaluator when no timeout is set.
+
+The timeout uses a monotonic elapsed-time deadline, including diagnostic
+rendering and native-to-VM fallback. It checks at entry, before returning and
+every 256 checkpoints in evaluation, container scans and structural traversal.
+Ruby string/content operations also check before and after expensive calls.
+Zero seconds stops even a trivial call. Expiry raises `LimitExceeded` with
+`limit == :timeout`; `maximum` and `attempted` are configured and elapsed seconds.
+Native returns an exhaustion status and releases Rust resources before Ruby
+raises. A limit hit is terminal and does not trigger fallback.
+
+This implementation never uses Ruby `Timeout`, timer threads, signals or
+asynchronous exception injection. It is cooperative: one regexp search, scalar
+operation, JSON decode, allocation or custom format callback may overrun until
+the next checkpoint. GC and descheduling count toward elapsed time; the polling
+interval bounds skipped checkpoints, not elapsed overrun. Compilation,
+registration and automatic compile-time meta-schema validation are outside the
+timeout. Explicit meta-schema checks can set their own timeout.
+
+Use the error cap to bound diagnostic count and the timeout to bound prolonged
+traversal. They protect different resources: a deadline does not bound the
+number of diagnostics, and an error cap cannot stop a long successful check.
+Input byte size and nesting depth belong at the parsing boundary. An error cap
+does not bound the size of an individual message. Preempting individual scalar
+operations requires operation-specific limits or a supervised worker process.
+The backends retain their respective Ruby, VM and native execution paths and
+native memoization. Timed native bulk pattern/format/content and Fixnum contains
+scans use per-item evaluation so successful scans can poll.
+
 ### Backend selection
 
 `Schemurai.backend`, `SchemaRegistry#backend`, and `Validator#backend` expose
-the actual backend. Pass `backend: :ruby` to force the Ruby oracle or
+the selected backend. Pass `backend: :ruby` to force the Ruby oracle or
 `backend: :vm` to ahead-of-time compile schemas for the validator virtual machine.
 Pass `backend: :native` to use the experimental Rust VM extension. Building the
 native extension requires a C toolchain, Ruby development headers, and Rust

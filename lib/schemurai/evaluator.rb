@@ -148,11 +148,13 @@ module Schemurai
         schema = node.schema
         if schema.key?("allOf")
           schema["allOf"].each_index do |index|
+            @budget&.checkpoint
             return false unless evaluate_valid(node.child("allOf", index), value)
           end
         end
         if schema.key?("anyOf")
           matched = schema["anyOf"].each_index.any? do |index|
+            @budget&.checkpoint
             evaluate_valid(node.child("anyOf", index), value)
           end
           return false unless matched
@@ -160,6 +162,7 @@ module Schemurai
         if schema.key?("oneOf")
           matches = 0
           schema["oneOf"].each_index do |index|
+            @budget&.checkpoint
             matches += 1 if evaluate_valid(node.child("oneOf", index), value)
             return false if matches > 1
           end
@@ -234,6 +237,7 @@ module Schemurai
         prefix_items = schema["prefixItems"]
         if prefix_items.is_a?(Array)
           prefix_items.each_index do |index|
+            @budget&.checkpoint
             break if index >= length
             return false unless evaluate_valid(node.child("prefixItems", index), value[index])
           end
@@ -242,12 +246,14 @@ module Schemurai
         items = schema["items"]
         if items.is_a?(Array)
           items.each_index do |index|
+            @budget&.checkpoint
             break if index >= length
             return false unless evaluate_valid(node.child("items", index), value[index])
           end
           if length > items.length && schema.key?("additionalItems")
             additional = node.child("additionalItems")
             (items.length...length).each do |index|
+              @budget&.checkpoint
               return false unless evaluate_valid(additional, value[index])
             end
           end
@@ -255,6 +261,7 @@ module Schemurai
           child = node.child("items")
           start = prefix_items.is_a?(Array) ? prefix_items.length : 0
           (start...length).each do |index|
+            @budget&.checkpoint
             return false unless evaluate_valid(child, value[index])
           end
         end
@@ -277,12 +284,16 @@ module Schemurai
         length = value.length
         return false if schema.key?("maxProperties") && length > schema["maxProperties"]
         return false if schema.key?("minProperties") && length < schema["minProperties"]
-        return false if schema.key?("required") && !schema["required"].all? { |name| value.key?(name) }
+        return false if schema.key?("required") && !schema["required"].all? do |name|
+          @budget&.checkpoint
+          value.key?(name)
+        end
 
         properties = schema["properties"]
         patterns = schema["patternProperties"]
         additional = node.child("additionalProperties") if schema.key?("additionalProperties")
         value.each do |name, property_value|
+          @budget&.checkpoint
           matched = false
           if properties&.key?(name)
             matched = true
@@ -290,6 +301,7 @@ module Schemurai
           end
           if patterns
             patterns.each_key do |pattern|
+              @budget&.checkpoint
               next unless ecma_regexp(pattern).match?(name)
               matched = true
               return false unless evaluate_valid(node.child("patternProperties", pattern), property_value)
@@ -305,9 +317,13 @@ module Schemurai
 
         if schema.key?("dependencies")
           schema["dependencies"].each do |name, dependency|
+            @budget&.checkpoint
             next unless value.key?(name)
             if dependency.is_a?(Array)
-              return false unless dependency.all? { |required_name| value.key?(required_name) }
+              return false unless dependency.all? do |required_name|
+                @budget&.checkpoint
+                value.key?(required_name)
+              end
             else
               return false unless evaluate_valid(node.child("dependencies", name), value)
             end
@@ -315,13 +331,18 @@ module Schemurai
         end
         if schema.key?("dependentRequired")
           schema["dependentRequired"].each do |name, required_names|
+            @budget&.checkpoint
             next unless value.key?(name)
-            return false unless required_names.all? { |required_name| value.key?(required_name) }
+            return false unless required_names.all? do |required_name|
+              @budget&.checkpoint
+              value.key?(required_name)
+            end
           end
         end
 
         if schema.key?("dependentSchemas")
           schema["dependentSchemas"].each_key do |name|
+            @budget&.checkpoint
             next unless value.key?(name)
             return false unless evaluate_valid(node.child("dependentSchemas", name), value)
           end
@@ -425,6 +446,7 @@ module Schemurai
         return target unless target.schema.is_a?(Hash) && target.schema["$dynamicAnchor"] == raw_fragment
 
         Array(@dynamic_scope).each do |resource|
+          @budget&.checkpoint
           dynamic = @graph.dynamic_anchor(resource, raw_fragment)
           return dynamic if dynamic
         end
@@ -459,6 +481,7 @@ module Schemurai
         evaluation = Evaluation.valid
         if schema.key?("allOf")
           schema["allOf"].each_index do |index|
+            @budget&.checkpoint
             evaluation = evaluation.merge(
               evaluate_at(node.child("allOf", index), value, MISSING_SEGMENT, "allOf", index)
             )
@@ -468,6 +491,7 @@ module Schemurai
         if schema.key?("anyOf")
           matches = []
           schema["anyOf"].each_index do |index|
+            @budget&.checkpoint
             result = trial_at(node.child("anyOf", index), value, MISSING_SEGMENT, "anyOf", index)
             matches << result if result.valid?
           end
@@ -481,6 +505,7 @@ module Schemurai
         if schema.key?("oneOf")
           matches = []
           schema["oneOf"].each_index do |index|
+            @budget&.checkpoint
             result = trial_at(node.child("oneOf", index), value, MISSING_SEGMENT, "oneOf", index)
             matches << result if result.valid?
           end
@@ -559,6 +584,7 @@ module Schemurai
         prefix_items = schema["prefixItems"]
         if prefix_items.is_a?(Array)
           prefix_items.each_index do |index|
+            @budget&.checkpoint
             break if index >= value.length
             evaluate_at(node.child("prefixItems", index), value[index], index, "prefixItems", index)
             evaluated << index
@@ -568,6 +594,7 @@ module Schemurai
         items = schema["items"]
         if items.is_a?(Array)
           items.each_index do |index|
+            @budget&.checkpoint
             break if index >= value.length
             evaluate_at(node.child("items", index), value[index], index, "items", index)
             evaluated << index
@@ -575,6 +602,7 @@ module Schemurai
           if value.length > items.length && schema.key?("additionalItems")
             additional = node.child("additionalItems")
             (items.length...value.length).each do |index|
+              @budget&.checkpoint
               evaluate_at(additional, value[index], index, "additionalItems")
               evaluated << index
             end
@@ -582,6 +610,7 @@ module Schemurai
         elsif !items.nil?
           start = prefix_items.is_a?(Array) ? prefix_items.length : 0
           value.each_with_index do |item, index|
+            @budget&.checkpoint
             next if index < start
             evaluate_at(node.child("items"), item, index, "items")
             evaluated << index
@@ -590,6 +619,7 @@ module Schemurai
 
         if schema.key?("contains")
           matched = value.each_index.select do |index|
+            @budget&.checkpoint
             trial_at(node.child("contains"), value[index], index, "contains").valid?
           end
           minimum = schema.fetch("minContains", 1)
@@ -604,6 +634,7 @@ module Schemurai
         if schema.key?("unevaluatedItems")
           unevaluated = (0...value.length).to_a - combined
           unevaluated.each do |index|
+            @budget&.checkpoint
             evaluate_at(node.child("unevaluatedItems"), value[index], index, "unevaluatedItems")
           end
           evaluated.concat(unevaluated)
@@ -618,12 +649,14 @@ module Schemurai
         limit(schema, "minProperties", value.length) { |actual, expected| actual >= expected }
 
         Array(schema["required"]).each do |name|
+          @budget&.checkpoint
           add_error("required") { ErrorMessage.required(name) } unless value.key?(name)
         end
 
         properties = schema.fetch("properties", {})
         patterns = schema.fetch("patternProperties", {})
         value.each do |name, property_value|
+          @budget&.checkpoint
           matched = false
           if properties.key?(name)
             matched = true
@@ -631,6 +664,7 @@ module Schemurai
             evaluated << name
           end
           patterns.each do |pattern, subschema|
+            @budget&.checkpoint
             next unless ecma_regexp(pattern).match?(name)
             matched = true
             evaluate_at(node.child("patternProperties", pattern), property_value, name, "patternProperties", pattern)
@@ -644,14 +678,17 @@ module Schemurai
 
         if schema.key?("propertyNames")
           value.each_key do |name|
+            @budget&.checkpoint
             evaluate_at(node.child("propertyNames"), name, name, "propertyNames")
           end
         end
 
         schema.fetch("dependencies", {}).each do |name, dependency|
+          @budget&.checkpoint
           next unless value.key?(name)
           if dependency.is_a?(Array)
             dependency.each do |required_name|
+              @budget&.checkpoint
               add_error("dependencies") { ErrorMessage.dependent_required(name, required_name) } unless value.key?(required_name)
             end
           else
@@ -661,8 +698,10 @@ module Schemurai
         end
 
         schema.fetch("dependentRequired", {}).each do |name, required_names|
+          @budget&.checkpoint
           next unless value.key?(name)
           required_names.each do |required_name|
+            @budget&.checkpoint
             unless value.key?(required_name)
               add_error("dependentRequired") { ErrorMessage.dependent_required(name, required_name) }
             end
@@ -670,6 +709,7 @@ module Schemurai
         end
 
         schema.fetch("dependentSchemas", {}).each_key do |name|
+          @budget&.checkpoint
           next unless value.key?(name)
           result = evaluate_at(node.child("dependentSchemas", name), value, MISSING_SEGMENT, "dependentSchemas", name)
           evaluated.concat(result.evaluated_properties) if result.valid?
@@ -679,6 +719,7 @@ module Schemurai
         if schema.key?("unevaluatedProperties")
           unevaluated = value.keys - combined
           unevaluated.each do |name|
+            @budget&.checkpoint
             evaluate_at(node.child("unevaluatedProperties"), value[name], name, "unevaluatedProperties")
           end
           evaluated.concat(unevaluated)
@@ -757,6 +798,7 @@ module Schemurai
         escaped = false
         in_class = false
         pattern.each_char do |character|
+          @budget&.checkpoint
           if escaped
             translated << case character
             when "d" then in_class ? "0-9" : "[0-9]"

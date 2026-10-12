@@ -28,7 +28,7 @@ Gem::Specification.new do |spec|
     "--main", "README.md",
     "--title", "Schemurai API Documentation",
     "--visibility", "public",
-    "--exclude", "lib/schemurai/(?!version\\.rb)"
+    "--exclude", "lib/schemurai/(?!(?:version|limit_exceeded)\\.rb)"
   ]
   spec.require_paths = ["lib"]
 

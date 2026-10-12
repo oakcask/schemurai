@@ -20,9 +20,21 @@ pub struct Report {
     // Explicit failure signal for the current evaluation, independent of the
     // number or rendering of diagnostic records. Child evaluations isolate it.
     failed: bool,
+    limits: budget::Limits,
+    limit_hit: (u32, usize),
 }
 impl Report {
-    fn add(&mut self, keyword: &'static str, source: (i32, Value), instance: Value, detail: usize) {
+    fn add(
+        &mut self,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        detail: usize,
+    ) -> Result<(), Verdict> {
+        if self.limits.enabled & 1 != 0 && self.errors.len() >= self.limits.max_errors {
+            self.limit_hit = (1, self.errors.len().saturating_add(1));
+            return Err(Unsupported);
+        }
         self.failed = true;
         let schema_path = if keyword == "falseSchema" {
             self.schema_path.clone()
@@ -38,6 +50,7 @@ impl Report {
             instance,
             detail,
         });
+        Ok(())
     }
     fn scoped<T>(
         &mut self,
@@ -107,6 +120,9 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
+        if !self.budget.checkpoint() {
+            return Err(Unsupported);
+        }
         let kind = unsafe { sn_kind(value) };
         if kind == TYPE_UNSUPPORTED {
             return Err(Unsupported);
@@ -125,7 +141,15 @@ impl Execution<'_> {
         // A diagnostic success is established by complete traversal, never by
         // a short-circuit validity result. Keep exported annotations and the
         // collection policy separate; failures retain their path-specific errors.
-        let key = self.memo.key(self, node, value, depth, active);
+        if !self.budget.checkpoint() {
+            return Err(Unsupported);
+        }
+        let key = self
+            .memo
+            .key(self, node, value, depth, active, &self.budget);
+        if self.budget.hit.get().0 != 0 {
+            return Err(Unsupported);
+        }
         if let Some(key) = key
             && let Some(result) = self.memo.diagnostic_success(key, ANNOTATIONS)
         {
@@ -166,16 +190,19 @@ impl Execution<'_> {
         let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
         for (op, &source) in self.nodes[node].iter().zip(&self.error_operands[node]) {
+            if !self.budget.checkpoint() {
+                return Err(Unsupported);
+            }
             match op {
                 Op::Unsupported => return Err(Unsupported),
                 Op::Boolean(false) => {
-                    report.add("falseSchema", source, value, 0);
+                    report.add("falseSchema", source, value, 0)?;
                     prior = Tracked::new(Invalid);
                 }
                 Op::Boolean(true) => {}
                 Op::Type(mask) => {
                     if kind & mask == 0 {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                 }
                 Op::Const(..) | Op::Enum(..) => match self.leaf(op, kind, value, depth) {
@@ -189,12 +216,12 @@ impl Execution<'_> {
                         source,
                         value,
                         0,
-                    ),
+                    )?,
                     Valid => {}
                 },
                 Op::Number(required, rules) => {
                     if *required != 0 && kind & required == 0 {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind & TYPE_NUMBER != 0 {
                         let bits = rules.failures(value)?;
@@ -205,15 +232,18 @@ impl Execution<'_> {
                             (EXCLUSIVE_MINIMUM, "exclusiveMinimum"),
                             (MULTIPLE_OF, "multipleOf"),
                         ] {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if bits & bit != 0 {
-                                report.add(keyword, source, value, 0);
+                                report.add(keyword, source, value, 0)?;
                             }
                         }
                     }
                 }
                 Op::String(required, rules) => {
                     if *required != 0 && kind != TYPE_STRING {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind == TYPE_STRING {
                         let len = if rules.min.is_some() || rules.max.is_some() {
@@ -222,22 +252,22 @@ impl Execution<'_> {
                             0
                         };
                         if rules.max.is_some_and(|max| len > max) {
-                            report.add("maxLength", source, value, len);
+                            report.add("maxLength", source, value, len)?;
                         }
                         if rules.min.is_some_and(|min| len < min) {
-                            report.add("minLength", source, value, len);
+                            report.add("minLength", source, value, len)?;
                         }
                         if let Some(pattern) = &rules.pattern {
                             match pattern.eval(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("pattern", source, value, 0),
+                                Invalid => report.add("pattern", source, value, 0)?,
                                 Valid => {}
                             }
                         }
                         if let Some(format) = &rules.format {
                             match format.eval(value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("format", source, value, 0),
+                                Invalid => report.add("format", source, value, 0)?,
                                 Valid => {}
                             }
                         }
@@ -253,15 +283,18 @@ impl Execution<'_> {
                                     source,
                                     value,
                                     0,
-                                ),
+                                )?,
                                 Valid => {}
                             }
                         }
                     }
                 }
                 Op::Array(required, rules) => {
+                    if kind == TYPE_ARRAY && !self.budget.checkpoint() {
+                        return Err(Unsupported);
+                    }
                     if *required != 0 && kind != TYPE_ARRAY {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind != TYPE_ARRAY {
                         continue;
@@ -269,19 +302,22 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxItems", source, value, len);
+                        report.add("maxItems", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minItems", source, value, len);
+                        report.add("minItems", source, value, len)?;
                     }
                     if rules.unique {
-                        match unique(value, depth, self.fixnum_flag) {
+                        match unique(value, depth, self.fixnum_flag, &self.budget) {
                             Unsupported => return Err(Unsupported),
-                            Invalid => report.add("uniqueItems", source, value, 0),
+                            Invalid => report.add("uniqueItems", source, value, 0)?,
                             Valid => {}
                         }
                     }
                     for (index, &child) in rules.prefix.iter().take(len).enumerate() {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         if tracked {
                             coverage.item(index);
                         }
@@ -297,6 +333,9 @@ impl Execution<'_> {
                     }
                     if rules.list {
                         for (index, &child) in rules.items.iter().take(len).enumerate() {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if tracked {
                                 coverage.item(index);
                             }
@@ -312,6 +351,9 @@ impl Execution<'_> {
                         }
                         if let Some(child) = rules.additional {
                             for index in rules.items.len()..len {
+                                if !self.budget.checkpoint() {
+                                    return Err(Unsupported);
+                                }
                                 if tracked {
                                     coverage.item(index);
                                 }
@@ -347,6 +389,7 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
+                        let pattern = pattern.filter(|_| !self.budget.timed());
                         let number = match self.nodes[child].as_slice() {
                             [Op::Number(required, number)] if depth < MAX_EVALUATION_DEPTH => {
                                 Some((*required, number))
@@ -359,16 +402,21 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
+                        let format = format.filter(|_| !self.budget.timed());
                         let content = match self.nodes[child].as_slice() {
                             [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.content_only().map(|content| (*required, content))
                             }
                             _ => None,
                         };
+                        let content = content.filter(|_| !self.budget.timed());
                         if let Some((required, pattern)) = pattern {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -392,6 +440,9 @@ impl Execution<'_> {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -414,6 +465,9 @@ impl Execution<'_> {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     coverage.item(index);
                                 }
                             }
@@ -435,6 +489,9 @@ impl Execution<'_> {
                         } else {
                             for (index, &item) in values.iter().enumerate().skip(rules.prefix.len())
                             {
+                                if !self.budget.checkpoint() {
+                                    return Err(Unsupported);
+                                }
                                 if tracked {
                                     coverage.item(index);
                                 }
@@ -495,7 +552,7 @@ impl Execution<'_> {
                         )?;
                         if bounds(matches, Some(rules.min_contains), rules.max_contains) == Invalid
                         {
-                            report.add("contains", source, value, matches);
+                            report.add("contains", source, value, matches)?;
                         }
                     }
                     if let Some(child) = rules
@@ -503,6 +560,9 @@ impl Execution<'_> {
                         .filter(|_| prior.item_count() < len && coverage.item_count() < len)
                     {
                         for index in 0..len {
+                            if !self.budget.checkpoint() {
+                                return Err(Unsupported);
+                            }
                             if prior.contains_item(index) || coverage.contains_item(index) {
                                 continue;
                             }
@@ -523,8 +583,11 @@ impl Execution<'_> {
                     }
                 }
                 Op::Object(required, rules) => {
+                    if kind == TYPE_OBJECT && !self.budget.checkpoint() {
+                        return Err(Unsupported);
+                    }
                     if *required != 0 && kind != TYPE_OBJECT {
-                        report.add("type", source, value, 0);
+                        report.add("type", source, value, 0)?;
                     }
                     if kind != TYPE_OBJECT {
                         continue;
@@ -532,14 +595,17 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxProperties", source, value, len);
+                        report.add("maxProperties", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minProperties", source, value, len);
+                        report.add("minProperties", source, value, len)?;
                     }
                     for &name in &rules.required_order {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         if missing(value, name, self.undefined) {
-                            report.add("required", source, name, 0);
+                            report.add("required", source, name, 0)?;
                         }
                     }
                     let mut context = ObjectDiagnostics {
@@ -581,14 +647,20 @@ impl Execution<'_> {
                         }
                     }
                     for dependency in &rules.diagnostic_dependencies {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         match dependency {
                             DiagnosticDependency::Required(name, names, keyword) => {
                                 if missing(value, *name, self.undefined) {
                                     continue;
                                 }
                                 for &required in names {
+                                    if !self.budget.checkpoint() {
+                                        return Err(Unsupported);
+                                    }
                                     if missing(value, required, self.undefined) {
-                                        report.add(keyword, (source.0, *name), required, 0);
+                                        report.add(keyword, (source.0, *name), required, 0)?;
                                     }
                                 }
                             }
@@ -670,6 +742,9 @@ impl Execution<'_> {
                 Op::All(nodes) => {
                     let mut coverage = Tracked::new(Valid);
                     for (index, &child) in nodes.iter().enumerate() {
+                        if !self.budget.checkpoint() {
+                            return Err(Unsupported);
+                        }
                         let result = report.scoped(&format!("allOf/{index}"), None, |r| {
                             if tracked {
                                 self.collect_kind::<true>(r, child, value, depth + 1, active, kind)
@@ -713,7 +788,7 @@ impl Execution<'_> {
                         }
                     };
                     if !branch_kind.accepts(result.matches) {
-                        report.add(branch_kind.keyword(), source, value, result.matches);
+                        report.add(branch_kind.keyword(), source, value, result.matches)?;
                     } else if tracked {
                         prior.merge_diagnostics(result.coverage)?;
                     }
@@ -721,7 +796,7 @@ impl Execution<'_> {
                 Op::Not(child) => {
                     match self.eval_with_kind(*child, value, depth + 1, active, Some(kind)) {
                         Unsupported => return Err(Unsupported),
-                        Valid => report.add("not", source, value, 0),
+                        Valid => report.add("not", source, value, 0)?,
                         Invalid => {}
                     }
                 }
@@ -817,6 +892,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Result<bool, Verdict> {
+        if !self.budget.checkpoint() {
+            return Err(Unsupported);
+        }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
                 rules.eval_guarded(*required, value)
@@ -860,6 +938,9 @@ struct ObjectDiagnostics<'a, 'b, 'c> {
 unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: Value) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let c = unsafe { &mut *context.cast::<ObjectDiagnostics<'_, '_, '_>>() };
+        if !c.engine.budget.checkpoint() {
+            return Unsupported as i32;
+        }
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
             if c.engine.needs_diagnostics(child, item, c.depth, c.active)? {
                 report.property(segment, key, schema_key, |r| {
@@ -893,6 +974,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
             }
             let evaluated = c.rules.visit_value_rules::<true>(
                 c.engine.caches,
+                &c.engine.budget,
                 key,
                 None,
                 |segment, name, child| visit(c.report, child, value, segment, name),
@@ -942,10 +1024,74 @@ pub unsafe extern "C" fn sn_diagnose(
             engine,
             caches,
             memo: memo::Memo::default(),
+            budget: budget::Budget::default(),
         };
         let mut report = Report::default();
         execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())?;
         Ok::<_, Verdict>(Box::into_raw(Box::new(report)))
+    }));
+    match result {
+        Ok(Ok(report)) => {
+            unsafe { *status = VERDICT_VALID };
+            report
+        }
+        other => {
+            unsafe {
+                *status = if other.is_err() {
+                    STATUS_PANIC
+                } else {
+                    VERDICT_UNSUPPORTED
+                }
+            };
+            std::ptr::null_mut()
+        }
+    }
+}
+/// # Safety
+/// Same requirements as sn_diagnose; all limit/output pointers must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_diagnose_with_limits(
+    engine: *const Engine,
+    caches: *const pattern::Caches,
+    root: usize,
+    instance: Value,
+    status: *mut i32,
+    limits: *const budget::Limits,
+    outcome: *mut budget::Outcome,
+) -> *mut Report {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let local = pattern::Caches::default();
+        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let limits = unsafe { *limits };
+        let execution = Execution {
+            engine: unsafe { &*engine },
+            caches,
+            memo: memo::Memo::default(),
+            budget: budget::Budget::new(limits),
+        };
+        let mut report = Report {
+            limits,
+            ..Report::default()
+        };
+        let result = if execution.budget.check_deadline() {
+            execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())
+        } else {
+            Err(Unsupported)
+        };
+        let result = if execution.budget.check_deadline() {
+            result
+        } else {
+            Err(Unsupported)
+        };
+        let hit = if report.limit_hit.0 != 0 {
+            report.limit_hit
+        } else {
+            execution.budget.hit.get()
+        };
+        unsafe {
+            ((*outcome).kind, (*outcome).attempted) = hit;
+        }
+        result.map(|_| Box::into_raw(Box::new(report)))
     }));
     match result {
         Ok(Ok(report)) => {

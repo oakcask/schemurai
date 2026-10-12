@@ -8,6 +8,66 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Opt-in error cap and timeout (draft)
+
+`validation_limits.rb` measures ordinary calls, `max_errors:` alone, `timeout:`
+alone and both together on 1,000 successful/failing records. It verifies full
+results, warms each configuration, calibrates batches and shuffles their order.
+GC stays enabled and runs before each batch. `BASELINE=1` measures only ordinary
+calls and works with the pre-change version. Compilation is outside timing.
+
+```sh
+ruby -Ilib -Iext/schemurai_native benchmark/validation_limits.rb
+BASELINE=1 ruby -Ilib -Iext/schemurai_native benchmark/validation_limits.rb
+ruby -Ilib -Iext/schemurai_native benchmark/validation_deadlines.rb
+```
+
+The deadline runner measures observed latency for 1 ms cooperative timeouts.
+No individual scalar operation is preempted; timings are machine/workload
+specific and do not establish a hard return-time guarantee.
+
+Measured on Ruby 4.0.6, Linux x86_64, Ryzen 9 7900X, YJIT disabled, native
+release build. The baseline is main at `1bc9ef2`. Each cell is the median of
+nine calibrated batches (target 50 ms); candidate modes run in shuffled order.
+Baseline and candidate runs are sequential. All values are microseconds per
+invocation. Raw samples and runtime metadata are in
+[`validation_limits_results.jsonl`](validation_limits_results.jsonl).
+
+| Backend / workload / method | Before change | Disabled | Errors only | Timeout only | Both |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ruby / successful / valid? | 1735.854 | 1691.042 | 1697.417 | 2007.888 | 2011.816 |
+| ruby / successful / validate | 3550.498 | 3569.701 | 3813.327 | 3951.962 | 3949.182 |
+| ruby / failing / valid? | 2.658 | 2.707 | 2.832 | 3.955 | 3.946 |
+| ruby / failing / validate | 7025.369 | 7094.050 | 8005.643 | 8195.014 | 8251.810 |
+| vm / successful / valid? | 542.981 | 523.380 | 522.263 | 849.743 | 849.672 |
+| vm / successful / validate | 1907.601 | 1991.931 | 2303.349 | 2505.602 | 2512.107 |
+| vm / failing / valid? | 1.080 | 1.175 | 1.333 | 2.599 | 2.602 |
+| vm / failing / validate | 5266.614 | 5431.795 | 6049.753 | 6267.285 | 6277.114 |
+| native / successful / valid? | 16.196 | 16.956 | 17.133 | 20.369 | 20.378 |
+| native / successful / validate | 114.605 | 114.841 | 116.431 | 119.792 | 119.850 |
+| native / failing / valid? | 0.170 | 0.260 | 0.362 | 1.141 | 1.167 |
+| native / failing / validate | 1926.314 | 1880.135 | 1973.794 | 2015.484 | 2029.537 |
+
+Disabled calls still pay keyword dispatch and lightweight polling branches;
+these measurements do not prove zero overhead. Longer workloads ranged from
+0.96x to 1.05x the baseline. Native early failure increased from 0.170 to
+0.260 us; explicit errors-only kwargs add a small validation cost even though
+`valid?` uses the ordinary evaluator. Ratios on such tiny calls exaggerate
+absolute costs. Negative differences and a few-percent changes may be noise.
+
+Compared with the candidate's disabled calls, successful `validate` costs about
+1.07x / 1.16x / 1.01x for errors only and 1.11x / 1.26x / 1.04x for timeout only
+(Ruby / VM / native). Failing `validate` costs about 1.13x / 1.11x / 1.05x for
+errors only and 1.16x / 1.15x / 1.07x for timeout only. These workloads do not
+exercise expensive regexps, custom callbacks or timed bulk fast-path changes.
+
+Observed medians with a 1 ms timeout on a 2,000,000-integer successful array
+were 1.033 / 1.025 / 1.020 ms for `valid?` and 1.102 / 1.065 / 1.022 ms for
+`validate` (Ruby / VM / native). Expanding failing shared-reference diagnostics
+stopped in 1.761 / 1.677 / 1.105 ms. Nine samples per case and their maxima are
+in the same artifact. This measures cooperative responsiveness for these
+workloads; it is not a guaranteed return time.
+
 ## Shared native reference annotations
 
 `native_algorithms.rb` includes chains with two references to the preceding
