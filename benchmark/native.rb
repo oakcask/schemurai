@@ -118,6 +118,9 @@ long_pointer = "/" + "a" * 128 + "~0/" + "b" * 128 + "~1"
 workloads["format json-pointer long"] = [{"type" => "array", "items" => {"type" => "string", "format" => "json-pointer"}},
   Array.new(width) { long_pointer.dup }]
 invalid_tails << long_pointer + "~2"
+workloads["pattern unicode strings"] = [{"type" => "array", "items" => {"type" => "string", "pattern" => "needle"}},
+  Array.new(width) { "日" * 1365 + "needle" }]
+invalid_tails << "日" * 1365 + "needl"
 workloads = workloads.each_with_index.flat_map do |(name, (schema, instance)), index|
   invalid = if instance.is_a?(Hash)
     instance.merge("extra" => nil)
