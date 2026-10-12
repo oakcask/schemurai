@@ -2,5 +2,5 @@
 
 module Schemurai
   # The installed Schemurai version.
-  VERSION = "2.3.0"
+  VERSION = "3.0.0"
 end

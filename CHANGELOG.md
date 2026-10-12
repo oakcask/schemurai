@@ -1,5 +1,49 @@
 # Changelog
 
+## [3.0.0](https://github.com/oakcask/schemurai/compare/v2.3.0...v3.0.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* Schemurai requires Ruby 4.0 or later; Ruby 3.4 is no longer supported.
+
+### Features
+
+* add opt-in error caps and cooperative timeouts ([#190](https://github.com/oakcask/schemurai/issues/190)) ([a375bbb](https://github.com/oakcask/schemurai/commit/a375bbbbc5909777830ba4e0f07b58ae92a67f29))
+
+
+### Bug Fixes
+
+* drop Ruby 3.4 support for compiler GC safety ([#178](https://github.com/oakcask/schemurai/issues/178)) ([9f69db3](https://github.com/oakcask/schemurai/commit/9f69db3f268930d0f526d708e1e14fa3c00e292d))
+
+
+### Performance Improvements
+
+* bound native property annotation storage to occupied words ([#170](https://github.com/oakcask/schemurai/issues/170)) ([3cacc23](https://github.com/oakcask/schemurai/commit/3cacc231f9e6ec125f1e70a58a6aabea59ebe615))
+* bound native unique index probing ([#192](https://github.com/oakcask/schemurai/issues/192)) ([fb351ab](https://github.com/oakcask/schemurai/commit/fb351ab89c4cbc68f7c4452b41685ba2ba11fae4))
+* hash all wide integer digits in native fingerprints ([#181](https://github.com/oakcask/schemurai/issues/181)) ([2b9a147](https://github.com/oakcask/schemurai/commit/2b9a1472ef866069c55b171b44cec8d01219922d))
+* index native dynamic binding discovery ([#187](https://github.com/oakcask/schemurai/issues/187)) ([bc7407e](https://github.com/oakcask/schemurai/commit/bc7407ef7fcd4bd6e3b17a8b2907dd1486bea087))
+* index native enum candidates ([#166](https://github.com/oakcask/schemurai/issues/166)) ([e413010](https://github.com/oakcask/schemurai/commit/e41301029b52dc8665dbf1206f1ccb13e9cc2261))
+* index native required and property joins during compilation ([#174](https://github.com/oakcask/schemurai/issues/174)) ([2439118](https://github.com/oakcask/schemurai/commit/2439118f50754a628ce49c6e090d076423d7966b))
+* keep native dynamic binding compilation sparse ([#184](https://github.com/oakcask/schemurai/issues/184)) ([439d227](https://github.com/oakcask/schemurai/commit/439d227222fbfb819a387bf5937d5d685167b514))
+* keep native memoization active after cache saturation ([#180](https://github.com/oakcask/schemurai/issues/180)) ([05d6494](https://github.com/oakcask/schemurai/commit/05d6494b72db920ccfb9cbfa52ae1b289bfbccff))
+* keep shallow native fingerprint traversal inexpensive ([#197](https://github.com/oakcask/schemurai/issues/197)) ([aaa82fa](https://github.com/oakcask/schemurai/commit/aaa82fad8cdd5ddb17b05b474f48b33de14a4fb0))
+* memoize native graphs with invariant dynamic references ([#182](https://github.com/oakcask/schemurai/issues/182)) ([7307b40](https://github.com/oakcask/schemurai/commit/7307b407466019e91418d2053b07a8d4f1968336))
+* memoize native reference cycles by guard context ([#188](https://github.com/oakcask/schemurai/issues/188)) ([1bc9ef2](https://github.com/oakcask/schemurai/commit/1bc9ef2a1083f097db50c5152ff7d9d65b38587a))
+* memoize native root property cycles ([#191](https://github.com/oakcask/schemurai/issues/191)) ([2ccd362](https://github.com/oakcask/schemurai/commit/2ccd362299d2f87555144d060fba010d7b5f4e24))
+* memoize repeated native instance positions ([#186](https://github.com/oakcask/schemurai/issues/186)) ([222d31b](https://github.com/oakcask/schemurai/commit/222d31b7cf40c81393055d08e67d84981584b39f))
+* memoize shared native graphs by effective dynamic scope ([#183](https://github.com/oakcask/schemurai/issues/183)) ([c1c9fe2](https://github.com/oakcask/schemurai/commit/c1c9fe228ddd6051949d6d078481323fc0405514))
+* memoize shared native reference annotations ([#176](https://github.com/oakcask/schemurai/issues/176)) ([22f87c9](https://github.com/oakcask/schemurai/commit/22f87c973d27090742f946b17617f440cbc8b0a2))
+* memoize shared static native reference targets per invocation ([#171](https://github.com/oakcask/schemurai/issues/171)) ([32b0dcc](https://github.com/oakcask/schemurai/commit/32b0dcca5f6079b438ce49f5033983336fa16f49))
+* preserve shared schema operand graphs during compilation ([#196](https://github.com/oakcask/schemurai/issues/196)) ([8a3f05b](https://github.com/oakcask/schemurai/commit/8a3f05b6ee44cd3b9d742e5d0e7a9a91bf72e119))
+* project native memo keys onto reachable scope bindings ([#193](https://github.com/oakcask/schemurai/issues/193)) ([6fa0d24](https://github.com/oakcask/schemurai/commit/6fa0d243d992909ffa28722f2faafe93da73edba))
+* reuse native fingerprints across unique item batches ([#195](https://github.com/oakcask/schemurai/issues/195)) ([83e8bf7](https://github.com/oakcask/schemurai/commit/83e8bf7dcd8194ccf5ecc685be82755c29b9bc66))
+* reuse shared native container traversals ([#185](https://github.com/oakcask/schemurai/issues/185)) ([c6f126f](https://github.com/oakcask/schemurai/commit/c6f126f0edfe163e16ace716332c9b1b5cfd2b73))
+* scan anchored native property patterns with a shared DFA ([#172](https://github.com/oakcask/schemurai/issues/172)) ([197bb04](https://github.com/oakcask/schemurai/commit/197bb0491b46127b880871394027b626e843bcdf))
+* share guarded instance kinds across native applicators ([#169](https://github.com/oakcask/schemurai/issues/169)) ([4550080](https://github.com/oakcask/schemurai/commit/455008026fc094a1dc26857901674fc0a7ef6bd7))
+* share native compilation across Ractors ([#167](https://github.com/oakcask/schemurai/issues/167)) ([d60fa35](https://github.com/oakcask/schemurai/commit/d60fa35412a8dc6a1b11ee1c6b133b0c6f5f8879))
+* stop proven native contains predicates when bounds are conclusive ([#173](https://github.com/oakcask/schemurai/issues/173)) ([2e2beb4](https://github.com/oakcask/schemurai/commit/2e2beb4f1a987c3179d10fb187a361258f50e36b))
+
 ## [2.3.0](https://github.com/oakcask/schemurai/compare/v2.2.3...v2.3.0) (2026-10-11)
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "schemurai-native"
-version = "2.3.0"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.93"
 publish = false
