@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -41,9 +41,34 @@ jobs:
       - name: Publish benchmark summary
         if: always()
         run: ruby script/native-benchmark-summary native-benchmark.json
+      - name: Check out comparison baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .benchmark-base
+      - name: Build comparison baseline
+        working-directory: .benchmark-base/ext/schemurai_native
+        run: |
+          ruby extconf.rb
+          make
+      - name: Compare integer kernels on the same runner
+        run: |
+          cp benchmark/native.rb .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=integer-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=integer-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=integer-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=integer-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+        env:
+          BENCHMARK_WORKLOAD: integer array
+          BENCHMARK_ITERATIONS: "31"
+          BENCHMARK_BATCH: "1000"
+      - name: Publish same-runner comparison
+        run: ruby script/native-benchmark-comparison integer
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: native-benchmark-${{ matrix.os }}
-          path: native-benchmark.json
+          path: |
+            native-benchmark.json
+            integer-*.json
           if-no-files-found: ignore

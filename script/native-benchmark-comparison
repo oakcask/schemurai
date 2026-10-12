@@ -1,0 +1,27 @@
+# frozen_string_literal: true
+
+require "json"
+
+prefix = ARGV.fetch(0)
+reports = %w[base head].to_h do |revision|
+  [revision, [1, 2].map { |pass| JSON.parse(File.read("#{prefix}-#{revision}-#{pass}.json")) }]
+end
+lines = ["## Same-runner #{prefix} comparison", "",
+  "Two passes per revision, in base/head/head/base order. Compilation excluded; each pass checks validity, native coverage and complete errors against VM.",
+  "Base / head ratios above 1 indicate improvement. Ranges show both paired passes; runner timing remains informational.", "",
+  "| Case | Base native (µs), passes 1 / 2 | Head native (µs), passes 1 / 2 | Base / head, passes 1 / 2 |",
+  "| --- | ---: | ---: | ---: |"]
+reports.fetch("head").first.fetch("results").each_key do |name|
+  times = reports.transform_values do |passes|
+    passes.map { |report| report.fetch("results").fetch(name).fetch("seconds").fetch("native") }
+  end
+  base = times.fetch("base")
+  head = times.fetch("head")
+  escape = name.gsub(/[|`\r\n]/, " ")
+  display = ->(values) { values.map { |value| format("%.2f", value) }.join(" / ") }
+  ratios = base.zip(head).map { |before, after| before / after }
+  lines << "| #{escape} | #{display.call(base.map { |time| time * 1e6 })} | #{display.call(head.map { |time| time * 1e6 })} | #{display.call(ratios)} |"
+end
+summary = lines.join("\n") + "\n"
+puts summary
+File.open(ENV.fetch("GITHUB_STEP_SUMMARY"), "a") { |file| file.write(summary) } if ENV.key?("GITHUB_STEP_SUMMARY")
