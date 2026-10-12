@@ -410,7 +410,7 @@ impl Execution<'_> {
                             _ => None,
                         };
                         let content = content.filter(|_| !self.budget.timed());
-                        if let Some((required, pattern)) = pattern {
+                        if pattern.is_some() || format.is_some() || content.is_some() {
                             let start = rules.prefix.len().min(len);
                             if tracked {
                                 for index in start..len {
@@ -420,69 +420,31 @@ impl Execution<'_> {
                                     coverage.item(index);
                                 }
                             }
-                            let status = pattern.visit_invalid_items(
-                                self.caches,
-                                required,
-                                &values[start..],
-                                |index, item| match report.scoped(
-                                    "items",
-                                    Some(start + index),
-                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
-                                ) {
-                                    Ok(_) => Valid,
-                                    Err(status) => status,
-                                },
-                            );
-                            if status != Valid {
-                                return Err(status);
-                            }
-                        } else if let Some((required, format)) = format {
-                            let start = rules.prefix.len().min(len);
-                            if tracked {
-                                for index in start..len {
-                                    if !self.budget.checkpoint() {
-                                        return Err(Unsupported);
-                                    }
-                                    coverage.item(index);
+                            // The invalid callback is shared, but each scanner retains
+                            // its statically selected parser and guarded byte views.
+                            let invalid = |index, item| match report.scoped(
+                                "items",
+                                Some(start + index),
+                                |r| self.collect::<false>(r, child, item, depth + 1, active),
+                            ) {
+                                Ok(_) => Valid,
+                                Err(status) => status,
+                            };
+                            let status = match (pattern, format, content) {
+                                (Some((required, pattern)), _, _) => pattern.visit_invalid_items(
+                                    self.caches,
+                                    required,
+                                    &values[start..],
+                                    invalid,
+                                ),
+                                (_, Some((required, format)), _) => {
+                                    format.visit_invalid_items(required, &values[start..], invalid)
                                 }
-                            }
-                            let status = format.visit_invalid_items(
-                                required,
-                                &values[start..],
-                                |index, item| match report.scoped(
-                                    "items",
-                                    Some(start + index),
-                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
-                                ) {
-                                    Ok(_) => Valid,
-                                    Err(status) => status,
-                                },
-                            );
-                            if status != Valid {
-                                return Err(status);
-                            }
-                        } else if let Some((required, content)) = content {
-                            let start = rules.prefix.len().min(len);
-                            if tracked {
-                                for index in start..len {
-                                    if !self.budget.checkpoint() {
-                                        return Err(Unsupported);
-                                    }
-                                    coverage.item(index);
+                                (_, _, Some((required, content))) => {
+                                    content.visit_invalid_items(required, &values[start..], invalid)
                                 }
-                            }
-                            let status = content.visit_invalid_items(
-                                required,
-                                &values[start..],
-                                |index, item| match report.scoped(
-                                    "items",
-                                    Some(start + index),
-                                    |r| self.collect::<false>(r, child, item, depth + 1, active),
-                                ) {
-                                    Ok(_) => Valid,
-                                    Err(status) => status,
-                                },
-                            );
+                                _ => unreachable!("a scalar item scanner was selected"),
+                            };
                             if status != Valid {
                                 return Err(status);
                             }

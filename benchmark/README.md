@@ -8,6 +8,24 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Shared native scans
+
+`native_shared_scans.rb` checks direct native coverage and exact VM verdict/error
+parity before timing native `valid?` and `validate`. It covers pattern, format and
+content arrays with a prefix offset, ordinary and tracked evaluation, valid and
+invalid inputs, and required/dependent-required objects. Compilation is excluded;
+Ruby allocation counts are reported separately. Use `native_scope_compile.rb`
+for DFS-related constructor time and reported native program memory.
+
+```sh
+BENCHMARK_JSON=shared-scans.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native_shared_scans.rb
+```
+
+Run the same settings against base and candidate release builds without other
+CPU-heavy work. Compare repeated runs before attributing small changes to the
+refactoring. Width, batch size and sample count can be set with
+`BENCHMARK_WIDTH`, `BENCHMARK_BATCH` and `BENCHMARK_ITERATIONS`.
+
 ## Opt-in error cap and timeout (draft)
 
 `validation_limits.rb` measures ordinary calls, `max_errors:` alone, `timeout:`
