@@ -310,6 +310,38 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "ignores unreachable dynamic names in shared graph keys including guarded annotation traversal" do # rubocop:disable RSpec/ExampleLength
+    build = lambda do |depth, cyclic, tracked|
+      base = {"$id" => "urn:base", "$dynamicAnchor" => "n", "properties" => {"v" => {"type" => "integer", "minimum" => 0}}}
+      base["properties"]["next"] = {"$ref" => "urn:base"} if cyclic
+      definitions = {"base" => base, "other" => {"$id" => "urn:other", "$dynamicAnchor" => "n", "minimum" => 0},
+                     "d0" => {"$id" => "urn:d0", "$dynamicRef" => "urn:base#n"}}
+      1.upto(depth) do |i|
+        %w[a b].each do |branch|
+          definitions["#{branch}#{i}"] = {"$id" => "urn:#{branch}#{i}", "$dynamicAnchor" => "x#{i}", "$ref" => "urn:d#{i - 1}"}
+        end
+        definitions["d#{i}"] = {"$id" => "urn:d#{i}", "allOf" => [{"$ref" => "urn:a#{i}"}, {"$ref" => "urn:b#{i}"}]}
+      end
+      refs = [{"$ref" => "urn:d#{depth}"}, {"$ref" => "urn:other"}] + (1..depth).map { |i| {"$dynamicRef" => "urn:a#{i}#x#{i}"} }
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions, "allOf" => refs}
+      schema["unevaluatedProperties"] = false if tracked
+      schema
+    end
+    [false, true].product([false, true]).each do |cyclic, tracked|
+      native = Schemurai.compile(build.call(24, cyclic, tracked), backend: :native)
+      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      expect(program.valid?({"v" => 8})).to be(true)
+      expect(program.diagnostics({"v" => 8})).to eq([])
+      schema = build.call(3, cyclic, tracked)
+      native = Schemurai.compile(schema, backend: :native)
+      vm = Schemurai.compile(schema, backend: :vm)
+      [{"v" => -1}, {"v" => 8}, {"v" => "bad"}, {"v" => 8, "extra" => 1}].each do |value|
+        expect(native.valid?(value)).to eq(vm.valid?(value))
+        expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+      end
+    end
+  end
+
   it "keeps shared reference annotations usable after invocation cache turnover" do # rubocop:disable RSpec/ExampleLength
     definitions = {"d0" => {"properties" => {"x" => {"type" => "integer"}}}}
     1.upto(8) { |i| definitions["d#{i}"] = {"allOf" => Array.new(2) { {"$ref" => "#/$defs/d#{i - 1}"} }} }

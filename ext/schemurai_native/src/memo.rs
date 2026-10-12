@@ -194,7 +194,14 @@ impl Memo {
             return None;
         }
         if engine.memo_guarded.get(node).copied().unwrap_or(false) {
-            let names = engine.anchor_tables.len();
+            let relevant = engine.memo_scope_projection.names(
+                node,
+                engine.nodes.len(),
+                engine.anchor_tables.len(),
+                true,
+                budget,
+            )?;
+            let names = relevant.len();
             if names > MAX_SCOPE_SLOTS - 2 {
                 return None;
             }
@@ -233,27 +240,30 @@ impl Memo {
             }
             pairs.sort_unstable();
             pairs.dedup();
-            let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names + 1);
+            let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names);
             signature.push(Some(pairs.len()));
             for (source, value) in pairs {
                 signature.extend([Some(source), Some(value)]);
             }
             let first_binding = signature.len();
-            signature.resize(first_binding + names + 1, None);
+            signature.resize(first_binding + names, None);
             let mut current = context.scope;
             while let Some(frame) = current {
                 if !budget.checkpoint() {
                     return None;
                 }
-                for name in 0..names {
-                    if let Some(&target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
-                        signature[first_binding + name] = Some(target);
+                for (slot, &name) in relevant.iter().enumerate() {
+                    if name == engine.anchor_tables.len() {
+                        if let Some(&root) = engine.resources.get(&frame.resource)
+                            && engine.metadata[root].recursive_anchor
+                        {
+                            signature[first_binding + slot] = Some(root);
+                        }
+                    } else if let Some(&target) =
+                        engine.dynamic_bindings.get(&(frame.resource, name))
+                    {
+                        signature[first_binding + slot] = Some(target);
                     }
-                }
-                if let Some(&root) = engine.resources.get(&frame.resource)
-                    && engine.metadata[root].recursive_anchor
-                {
-                    signature[first_binding + names] = Some(root);
                 }
                 current = frame.parent;
             }
@@ -275,7 +285,14 @@ impl Memo {
                 .and_then(|frame| frame.primary_binding)
                 .map_or(0, |target| target + 1)
         } else {
-            let names = engine.anchor_tables.len();
+            let relevant = engine.memo_scope_projection.names(
+                node,
+                engine.nodes.len(),
+                engine.anchor_tables.len(),
+                false,
+                budget,
+            )?;
+            let names = relevant.len();
             if names > MAX_SCOPE_SLOTS {
                 return None;
             }
@@ -288,7 +305,7 @@ impl Memo {
                 if !budget.checkpoint() {
                     return None;
                 }
-                for (name, binding) in bindings.iter_mut().enumerate() {
+                for (&name, binding) in relevant.iter().zip(&mut bindings) {
                     if let Some(target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
                         *binding = Some(*target);
                     }
@@ -576,6 +593,58 @@ mod tests {
         assert_eq!(memo.verdict(key(&equivalent_inner)), Some(Valid));
         assert_eq!(memo.verdict(key(&different)), None);
         assert_eq!(memo.scopes.borrow().bindings.len(), 2);
+    }
+
+    #[test]
+    fn projected_keys_ignore_unused_bindings_but_keep_reachable_names() {
+        let edges = vec![vec![3], vec![4], vec![], vec![], vec![], vec![]];
+        let parents = vec![vec![], vec![], vec![], vec![0], vec![1], vec![]];
+        let mut engine = Engine {
+            nodes: (0..3).map(|_| vec![Op::Boolean(true)]).collect(),
+            memoizable: vec![true; 3],
+            memo_contextual: vec![true; 3],
+            memo_guarded: vec![false, false, true],
+            memo_guard_sources: vec![false; 3],
+            memo_scope_projection: memo_scope::Projection::compile(&edges, &parents, 3),
+            anchor_tables: vec![vec![], vec![]],
+            dynamic_bindings: HashMap::from([((1, 0), 7), ((2, 0), 7), ((1, 1), 8), ((2, 1), 9)]),
+            resources: HashMap::from([(1, 0), (2, 1)]),
+            metadata: vec![
+                scope::Metadata {
+                    recursive_anchor: true,
+                    ..scope::Metadata::default()
+                };
+                3
+            ],
+            ..Engine::default()
+        };
+        let memo = Memo::default();
+        let frame = |resource| scope::ScopeFrame {
+            resource,
+            parent: None,
+            primary_binding: None,
+        };
+        let a = frame(1);
+        let b = frame(2);
+        let key = |engine: &Engine, node, frame| {
+            memo.key_without_instance_proof(
+                engine,
+                node,
+                10,
+                2,
+                scope::Context {
+                    scope: Some(frame),
+                    ..scope::Context::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(key(&engine, 0, &a), key(&engine, 0, &b));
+        assert_ne!(key(&engine, 1, &a), key(&engine, 1, &b));
+        // Neither dynamic nor recursive dispatch can affect node 2.
+        assert_eq!(key(&engine, 2, &a), key(&engine, 2, &b));
+        engine.dynamic_bindings.insert((2, 0), 8);
+        assert_ne!(key(&engine, 0, &a), key(&engine, 0, &b));
     }
 
     #[test]
@@ -1088,5 +1157,12 @@ impl Engine {
                 self.memo_guarded[node] = true;
             }
         }
+        self.memo_scope_projection = if self.memo_guarded.iter().any(|&guarded| guarded)
+            || self.anchor_tables.len() > 1 && self.memo_contextual.iter().any(|&scoped| scoped)
+        {
+            memo_scope::Projection::compile(&edges, &parents, count)
+        } else {
+            memo_scope::Projection::default()
+        };
     }
 }
