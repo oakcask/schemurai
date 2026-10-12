@@ -89,12 +89,25 @@ jobs:
           BENCHMARK_BATCH: "25"
       - name: Publish content comparison
         run: ruby script/native-benchmark-comparison content
+      - name: Compare format kernels on the same runner
+        run: |
+          BENCHMARK_JSON=format-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=format-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=format-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=format-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+        env:
+          BENCHMARK_GROUP: format
+          BENCHMARK_ITERATIONS: "15"
+          BENCHMARK_BATCH: "25"
+      - name: Publish format comparison
+        run: ruby script/native-benchmark-comparison format
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: native-benchmark-${{ matrix.os }}
           path: |
             native-benchmark.json
+            format-*.json
             pattern-*.json
             integer-*.json
             content-*.json
