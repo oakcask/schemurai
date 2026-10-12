@@ -22,3 +22,15 @@ program = unique.instance_variable_get(:@evaluator).instance_variable_get(:@prog
     end
   end
 end
+
+# Unshared small records should retain the cheap shallow traversal.
+[64, 1024].each do |count|
+  values = Array.new(count) { |i| [i, [i, i + 1]] }
+  raise "native coverage" unless program.valid?(values)
+  samples = Array.new(7) do
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    100.times { program.valid?(values) }
+    (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 10_000
+  end
+  puts JSON.generate(mode: "unshared", count: count, microseconds: samples.sort[3].round(3))
+end
