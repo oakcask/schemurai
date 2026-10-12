@@ -119,15 +119,97 @@ fn date_time(bytes: &[u8]) -> bool {
     bytes.len() >= 20 && date(bytes) && matches!(bytes[10], b'T' | b't') && time(&bytes[11..])
 }
 fn uuid(bytes: &[u8]) -> bool {
-    bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
+    if bytes.len() != 36 || [8, 13, 18, 23].iter().any(|&at| bytes[at] != b'-') {
+        return false;
+    }
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        )
+    ))]
+    {
+        // The first two vectors contain all four separators. Their exact
+        // positions were checked above; only those lanes may bypass hex checks.
+        hex_block(&bytes[..16], (1 << 8) | (1 << 13))
+            && hex_block(&bytes[16..32], (1 << 2) | (1 << 7))
+            && bytes[32..].iter().all(u8::is_ascii_hexdigit)
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_endian = "little"
+        )
+    )))]
+    bytes
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
+
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline(always)]
+fn hex_block(bytes: &[u8], separators: u16) -> bool {
+    use core::arch::x86_64::{
+        _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128, _mm_set1_epi8,
+        _mm_setzero_si128, _mm_sub_epi8, _mm_subs_epu8,
+    };
+    // The caller supplies sixteen readable bytes. SSE2 is a target baseline;
+    // unsigned wrapping subtraction rejects bytes below the ASCII ranges too.
+    let valid = unsafe {
+        let word = _mm_loadu_si128(bytes.as_ptr().cast());
+        let digits = _mm_sub_epi8(word, _mm_set1_epi8(b'0' as i8));
+        let letters = _mm_sub_epi8(
+            _mm_or_si128(word, _mm_set1_epi8(32)),
+            _mm_set1_epi8(b'a' as i8),
+        );
+        let digits = _mm_cmpeq_epi8(_mm_subs_epu8(digits, _mm_set1_epi8(9)), _mm_setzero_si128());
+        let letters = _mm_cmpeq_epi8(
+            _mm_subs_epu8(letters, _mm_set1_epi8(5)),
+            _mm_setzero_si128(),
+        );
+        _mm_movemask_epi8(_mm_or_si128(digits, letters)) as u16
+    };
+    valid | separators == u16::MAX
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_endian = "little"
+))]
+#[inline(always)]
+fn hex_block(bytes: &[u8], separators: u16) -> bool {
+    use core::arch::aarch64::{
+        vcleq_u8, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8, vreinterpret_u64_u8,
+        vreinterpretq_u16_u8, vshrn_n_u16, vsubq_u8,
+    };
+    // Each load remains within the sixteen-byte block. Narrowing packs two
+    // four-bit flags per byte in little-endian lane order.
+    let valid = unsafe {
+        let word = vld1q_u8(bytes.as_ptr());
+        let digits = vcleq_u8(vsubq_u8(word, vdupq_n_u8(b'0')), vdupq_n_u8(9));
+        let letters = vcleq_u8(
+            vsubq_u8(vorrq_u8(word, vdupq_n_u8(32)), vdupq_n_u8(b'a')),
+            vdupq_n_u8(5),
+        );
+        let flags = vorrq_u8(digits, letters);
+        let packed = vshrn_n_u16::<4>(vreinterpretq_u16_u8(flags));
+        vget_lane_u64::<0>(vreinterpret_u64_u8(packed))
+    };
+    let mut ignored = 0_u64;
+    for lane in 0..16 {
+        if separators & (1 << lane) != 0 {
+            ignored |= 0xf << (lane * 4);
+        }
+    }
+    valid | ignored == u64::MAX
+}
+
 fn relative_pointer(bytes: &[u8]) -> bool {
     let Some(end) = digits_end(bytes, 0) else {
         return false;
@@ -354,4 +436,30 @@ fn ipv6(bytes: &[u8]) -> bool {
         }
     }
     if compressed { groups < 8 } else { groups == 8 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_checks_every_byte_and_separator_without_accepting_non_ascii() {
+        let original = *b"123e4567-e89b-12d3-a456-426614174000";
+        for at in 0..36 {
+            for byte in 0..=255 {
+                let mut input = original;
+                input[at] = byte;
+                let expected = if matches!(at, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                };
+                assert_eq!(uuid(&input), expected, "position {at}, byte {byte}");
+            }
+        }
+        assert!(!uuid(&original[..35]));
+        let mut longer = original.to_vec();
+        longer.push(b'0');
+        assert!(!uuid(&longer));
+    }
 }
