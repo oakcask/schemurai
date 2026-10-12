@@ -11,6 +11,7 @@ mod diagnostics;
 mod enumeration;
 mod evaluation;
 mod format;
+mod graph;
 mod instance_graph;
 mod memo;
 mod memo_scope;
@@ -348,6 +349,49 @@ impl RecordShortIndex {
     }
 }
 impl Object {
+    // Keep these calls at their original evaluation positions: property
+    // failures and unsupported children must retain their ordering.
+    #[inline]
+    fn check_required(&self, value: Value, undefined: Value, budget: &budget::Budget) -> Verdict {
+        Self::check_keys(&self.required, value, undefined, budget)
+    }
+    #[inline]
+    fn check_keys(
+        keys: &[Value],
+        value: Value,
+        undefined: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
+        for &key in keys {
+            if !budget.checkpoint() {
+                return Unsupported;
+            }
+            if missing(value, key, undefined) {
+                return Invalid;
+            }
+        }
+        Valid
+    }
+    #[inline]
+    fn check_dependent_required(
+        &self,
+        value: Value,
+        undefined: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
+        for (name, required) in &self.dependent_required {
+            if !budget.checkpoint() {
+                return Unsupported;
+            }
+            if !missing(value, *name, undefined) {
+                let status = Self::check_keys(required, value, undefined, budget);
+                if status != Valid {
+                    return status;
+                }
+            }
+        }
+        Valid
+    }
     fn visit_properties(
         &self,
         value: Value,
@@ -1755,13 +1799,9 @@ impl Execution<'_> {
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
-        for &key in &r.required {
-            if !self.budget.checkpoint() {
-                return Unsupported;
-            }
-            if missing(value, key, self.undefined) {
-                return Invalid;
-            }
+        let status = r.check_required(value, self.undefined, &self.budget);
+        if status != Valid {
+            return status;
         }
         let found = match r.visit_properties(
             value,
@@ -1786,20 +1826,9 @@ impl Execution<'_> {
                 return if result == 0 { Invalid } else { Unsupported };
             }
         }
-        for (name, required) in &r.dependent_required {
-            if !self.budget.checkpoint() {
-                return Unsupported;
-            }
-            if !missing(value, *name, self.undefined) {
-                for &key in required {
-                    if !self.budget.checkpoint() {
-                        return Unsupported;
-                    }
-                    if missing(value, key, self.undefined) {
-                        return Invalid;
-                    }
-                }
-            }
+        let status = r.check_dependent_required(value, self.undefined, &self.budget);
+        if status != Valid {
+            return status;
         }
         for &(name, child) in &r.dependent_schemas {
             if !self.budget.checkpoint() {

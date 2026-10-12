@@ -1354,6 +1354,26 @@ RSpec.describe "native VALUE execution" do
     cases.each { |validator, value, expected| expect(validator.validate(value).errors).to eq(expected) }
   end
 
+  it "keeps required and dependency checks on either side of unsupported properties" do # rubocop:disable RSpec/ExampleLength
+    base = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+            "properties" => {"must" => true, "probe" => {"type" => "string", "pattern" => "(?=example)"}},
+            "patternProperties" => {"^flag$" => true}}
+    [false, true].each do |tracked|
+      schema = tracked ? base.merge("unevaluatedProperties" => false) : base
+      required = Schemurai.compile(schema.merge("required" => ["must"]), backend: :native)
+      dependent = Schemurai.compile(schema.merge("dependentRequired" => {"flag" => ["must"]}), backend: :native)
+      required_program = required.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      dependent_program = dependent.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      # Required failures precede properties; dependencies follow properties.
+      expect(required_program.valid?({"probe" => "example.test"})).to be(false)
+      expect(required_program.valid?({"must" => true, "probe" => "example.test"})).to be_nil
+      expect(dependent_program.valid?({"flag" => true, "probe" => "example.test"})).to be_nil
+      expect(dependent_program.valid?({"flag" => true})).to be(false)
+      expect(dependent_program.valid?({"flag" => true, "must" => true})).to be(true)
+      expect(dependent_program.valid?({})).to be(true)
+    end
+  end
+
   it "diagnoses every official dependency case without VM evaluation" do # rubocop:disable RSpec/ExampleLength
     cases = %w[draft7 draft2019-09 draft2020-12].flat_map do |draft|
       %w[dependencies dependentRequired dependentSchemas].flat_map do |keyword|

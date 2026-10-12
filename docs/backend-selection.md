@@ -90,6 +90,12 @@ Branch scans and `contains` match counting now use shared helpers in
 shared declared-property scan, and all three modes share property, pattern and
 additional-property routing. The `eval`, `eval_tracked_kind` and `collect`
 traversals retain their policy-specific control flow and scalar specializations.
+Required and dependent-required verdict checks share predicates while retaining
+their positions before and after property evaluation, respectively. Specialized
+pattern, format and content item diagnostics share coverage marking and the
+invalid-item callback; their guarded byte views and parser selection stay separate.
+Cycle detection and scope projection share iterative DFS postorder generation,
+with caller-owned visited buffers and separate component representations.
 
 The responsibilities are:
 

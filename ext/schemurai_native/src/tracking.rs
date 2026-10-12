@@ -536,13 +536,9 @@ impl Execution<'_> {
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
-        for &key in &r.required {
-            if !self.budget.checkpoint() {
-                return Unsupported;
-            }
-            if missing(value, key, self.undefined) {
-                return Invalid;
-            }
+        let status = r.check_required(value, self.undefined, &self.budget);
+        if status != Valid {
+            return status;
         }
         let found = match r.visit_properties(
             value,
@@ -566,20 +562,9 @@ impl Execution<'_> {
                 return result;
             }
         }
-        for (name, required) in &r.dependent_required {
-            if !self.budget.checkpoint() {
-                return Unsupported;
-            }
-            if !missing(value, *name, self.undefined) {
-                for &key in required {
-                    if !self.budget.checkpoint() {
-                        return Unsupported;
-                    }
-                    if missing(value, key, self.undefined) {
-                        return Invalid;
-                    }
-                }
-            }
+        let status = r.check_dependent_required(value, self.undefined, &self.budget);
+        if status != Valid {
+            return status;
         }
         for &(key, child) in &r.dependent_schemas {
             if !self.budget.checkpoint() {

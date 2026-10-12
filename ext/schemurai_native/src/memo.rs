@@ -995,26 +995,7 @@ impl Engine {
         // whose guards can affect descendants: sources lying on a schema cycle.
         fn cycle_nodes(edges: &[Vec<usize>], parents: &[Vec<usize>]) -> Vec<bool> {
             let mut seen = vec![false; edges.len()];
-            let mut order = vec![];
-            for root in 0..edges.len() {
-                if seen[root] {
-                    continue;
-                }
-                seen[root] = true;
-                let mut stack = vec![(root, 0)];
-                while let Some((node, next)) = stack.last_mut() {
-                    if let Some(&child) = edges[*node].get(*next) {
-                        *next += 1;
-                        if !seen[child] {
-                            seen[child] = true;
-                            stack.push((child, 0));
-                        }
-                    } else {
-                        order.push(*node);
-                        stack.pop();
-                    }
-                }
-            }
+            let order = graph::postorder(edges, &mut seen);
             seen.fill(false);
             let mut cyclic = vec![false; edges.len()];
             for root in order.into_iter().rev() {
