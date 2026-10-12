@@ -70,7 +70,8 @@ content_samples = {
   "json" => ['{"id":1,"flags":[true,false,null],"name":"record"}', '{"id":1,"flags":[true,false,null],"name":"record",}'],
   "base64 json" => [Base64.strict_encode64('{"id":1,"flags":[true,false,null],"name":"record"}'), Base64.strict_encode64('{"id":1,"flags":[true,false,null],"name":"record",}')],
   "base64 json long" => [Base64.strict_encode64('{"name":"' + "x" * 256 + '"}'), Base64.strict_encode64('{"name":"' + "x" * 256 + '",}')],
-  "base64 json large" => [Base64.strict_encode64('{"name":"' + "x" * content_bytes + '"}'), Base64.strict_encode64('{"name":"' + "x" * content_bytes + '",}')]
+  "base64 json large" => [Base64.strict_encode64('{"name":"' + "x" * content_bytes + '"}'), Base64.strict_encode64('{"name":"' + "x" * content_bytes + '",}')],
+  "base64 json streamed" => [Base64.strict_encode64('{"name":"' + "x" * 16384 + '"}'), Base64.strict_encode64('{"name":"' + "x" * 16384 + '",}')]
 }
 content_samples.each do |name, (valid, _invalid)|
   items = {"type" => "string"}

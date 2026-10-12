@@ -76,6 +76,19 @@ jobs:
           BENCHMARK_BATCH: "1000"
       - name: Publish integer comparison
         run: ruby script/native-benchmark-comparison integer
+      - name: Compare content kernels on the same runner
+        run: |
+          BENCHMARK_JSON=content-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=content-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=content-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+          BENCHMARK_JSON=content-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+        env:
+          BENCHMARK_GROUP: content
+          BENCHMARK_WIDTH: "100"
+          BENCHMARK_ITERATIONS: "15"
+          BENCHMARK_BATCH: "25"
+      - name: Publish content comparison
+        run: ruby script/native-benchmark-comparison content
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -84,4 +97,5 @@ jobs:
             native-benchmark.json
             pattern-*.json
             integer-*.json
+            content-*.json
           if-no-files-found: ignore

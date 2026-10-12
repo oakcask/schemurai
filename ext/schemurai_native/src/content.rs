@@ -167,6 +167,17 @@ fn decode_json_direct(bytes: &[u8], length: usize) -> Verdict {
     decode_json_turbo(bytes, length, &mut scratch)
 }
 
+#[cfg(target_arch = "aarch64")]
+fn decode_json_turbo(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict {
+    let capacity = base64_turbo::STANDARD.decoded_len_estimate(bytes.len());
+    if decode_groups(bytes, &mut scratch[..capacity], length) {
+        json(&scratch[..length])
+    } else {
+        Invalid
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 fn decode_json_turbo(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict {
     // The slice API requires an initialized upper-bound buffer, including
     // up to two padding bytes beyond the exact decoded length. Only the
@@ -195,6 +206,13 @@ fn decode_json_stream(bytes: &[u8], length: usize) -> Verdict {
 
 // Decode borrowed bytes into the caller's fixed stack scratch. The STANDARD
 // variant also checks each chunk's alphabet, padding and unused trailing bits.
+#[cfg(target_arch = "aarch64")]
+fn decode_groups(bytes: &[u8], output: &mut [u8], expected: usize) -> bool {
+    use base64_simd::AsOut;
+    matches!(base64_simd::STANDARD.decode(bytes, output.as_out()), Ok(decoded) if decoded.len() == expected)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 fn decode_groups(bytes: &[u8], output: &mut [u8], expected: usize) -> bool {
     matches!(
         base64_turbo::STANDARD.decode_slice(bytes, output),
