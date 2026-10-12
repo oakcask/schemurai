@@ -109,10 +109,7 @@ impl PatternGroup {
             return None;
         }
         let bytes = unsafe { byte_view(data, len) };
-        if encoding != ENCODING_SEVEN_BIT
-            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
-                || std::str::from_utf8(bytes).is_err())
-        {
+        if !valid_encoding(bytes, encoding) {
             return None;
         }
         let input = Input::new(bytes).anchored(Anchored::Yes);
@@ -252,10 +249,7 @@ impl Pattern {
         if encoding == ENCODING_OTHER || matches!(self, Self::Unsupported) {
             return Unsupported;
         }
-        if encoding != ENCODING_SEVEN_BIT
-            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
-                || std::str::from_utf8(bytes).is_err())
-        {
+        if !valid_encoding(bytes, encoding) {
             return Unsupported;
         }
         let matched = match self {
@@ -269,6 +263,20 @@ impl Pattern {
             Self::Unsupported => return Unsupported,
         };
         if matched { Valid } else { Invalid }
+    }
+}
+
+// Keep short checks in std and skip scanning when Ruby already proved ASCII.
+// The compatibility SIMD API retains early rejection of malformed UTF-8.
+fn valid_encoding(bytes: &[u8], encoding: i32) -> bool {
+    if encoding == ENCODING_SEVEN_BIT {
+        true
+    } else if encoding == ENCODING_ASCII {
+        bytes.is_ascii()
+    } else if bytes.len() < 64 {
+        std::str::from_utf8(bytes).is_ok()
+    } else {
+        simdutf8::compat::from_utf8(bytes).is_ok()
     }
 }
 
@@ -298,10 +306,7 @@ fn scan_items(
             return Unsupported;
         }
         let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        if encoding != ENCODING_SEVEN_BIT
-            && ((encoding == ENCODING_ASCII && !bytes.is_ascii())
-                || std::str::from_utf8(bytes).is_err())
-        {
+        if !valid_encoding(bytes, encoding) {
             return Unsupported;
         }
         let result = matches(bytes);
@@ -415,6 +420,27 @@ fn compatible(ast: &Ast) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoding_validation_matches_std_across_simd_blocks_and_tails() {
+        let original = "日𐀀é".repeat(32).into_bytes();
+        for length in [63, 64, 65, 127, 128, 129, original.len()] {
+            for at in 0..length {
+                for byte in 0..=255 {
+                    let mut input = original[..length].to_vec();
+                    input[at] = byte;
+                    assert_eq!(
+                        valid_encoding(&input, ENCODING_UTF8),
+                        std::str::from_utf8(&input).is_ok(),
+                        "length {length}, position {at}, byte {byte}"
+                    );
+                    assert_eq!(valid_encoding(&input, ENCODING_ASCII), input.is_ascii());
+                }
+            }
+        }
+        assert!(valid_encoding(&original, ENCODING_UTF8));
+        assert!(valid_encoding(b"already classified", ENCODING_SEVEN_BIT));
+    }
 
     #[test]
     fn reports_memory_when_a_search_cache_is_borrowed() {

@@ -70,7 +70,8 @@ content_samples = {
   "json" => ['{"id":1,"flags":[true,false,null],"name":"record"}', '{"id":1,"flags":[true,false,null],"name":"record",}'],
   "base64 json" => [Base64.strict_encode64('{"id":1,"flags":[true,false,null],"name":"record"}'), Base64.strict_encode64('{"id":1,"flags":[true,false,null],"name":"record",}')],
   "base64 json long" => [Base64.strict_encode64('{"name":"' + "x" * 256 + '"}'), Base64.strict_encode64('{"name":"' + "x" * 256 + '",}')],
-  "base64 json large" => [Base64.strict_encode64('{"name":"' + "x" * content_bytes + '"}'), Base64.strict_encode64('{"name":"' + "x" * content_bytes + '",}')]
+  "base64 json large" => [Base64.strict_encode64('{"name":"' + "x" * content_bytes + '"}'), Base64.strict_encode64('{"name":"' + "x" * content_bytes + '",}')],
+  "base64 json streamed" => [Base64.strict_encode64('{"name":"' + "x" * 16384 + '"}'), Base64.strict_encode64('{"name":"' + "x" * 16384 + '",}')]
 }
 content_samples.each do |name, (valid, _invalid)|
   items = {"type" => "string"}
@@ -118,6 +119,9 @@ long_pointer = "/" + "a" * 128 + "~0/" + "b" * 128 + "~1"
 workloads["format json-pointer long"] = [{"type" => "array", "items" => {"type" => "string", "format" => "json-pointer"}},
   Array.new(width) { long_pointer.dup }]
 invalid_tails << long_pointer + "~2"
+workloads["pattern unicode strings"] = [{"type" => "array", "items" => {"type" => "string", "pattern" => "needle"}},
+  Array.new(width) { "日" * 1365 + "needle" }]
+invalid_tails << "日" * 1365 + "needl"
 workloads = workloads.each_with_index.flat_map do |(name, (schema, instance)), index|
   invalid = if instance.is_a?(Hash)
     instance.merge("extra" => nil)
