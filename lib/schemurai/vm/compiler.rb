@@ -391,12 +391,16 @@ module Schemurai
         compiled.freeze unless compiled.empty?
       end
 
-      private def snapshot(value)
+      # Keep aliases inside one operand while copying away from caller-owned
+      # containers. A fresh identity table also rechecks later compilations.
+      private def snapshot(value, copies = {}.compare_by_identity)
+        return copies[value] if copies.key?(value)
+
         case value
         when Hash
-          value.to_h { |key, item| [snapshot(key), snapshot(item)] }.freeze
+          copies[value] = value.to_h { |key, item| [snapshot(key, copies), snapshot(item, copies)] }.freeze
         when Array
-          value.map { |item| snapshot(item) }.freeze
+          copies[value] = value.map { |item| snapshot(item, copies) }.freeze
         when String
           -value
         else

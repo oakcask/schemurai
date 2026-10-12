@@ -889,6 +889,21 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "compiles shared constant and enum operands without expanding their graphs" do # rubocop:disable RSpec/ExampleLength
+    leaf = [+"fixed"]
+    value = leaf
+    32.times { value = [value, value] }
+    [{"const" => value}, {"enum" => [value, *Array.new(17, "padding")]}].each do |schema|
+      validator = Schemurai.compile(schema, backend: :native)
+      program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      expect(program.valid?(value)).to be(true)
+      expect(program.diagnostics(value)).not_to be_nil
+      leaf[0].replace("changed")
+      expect(program.valid?(value)).to be(false)
+      leaf[0].replace("fixed")
+    end
+  end
+
   it "checks shared container graphs without expanding repeated descendants" do # rubocop:disable RSpec/ExampleLength
     shapes = [->(child) { [child, 1, child] }, ->(child) { {"a" => child, "b" => 1, "c" => child} }]
     native = Schemurai.compile({"uniqueItems" => true}, backend: :native)

@@ -38,6 +38,18 @@ RSpec.describe "the compatibility domain" do
       expect(graph.nodes).to be_empty
     end
 
+    it "rechecks shared containers on each call and reports the first invalid path", :aggregate_failures do # rubocop:disable RSpec/ExampleLength
+      shared = ["valid"]
+      schema = {"first" => shared, "second" => shared}
+      expect { Schemurai.compile(schema) }.not_to raise_error
+      shared << Object.new
+      expect { Schemurai.compile(schema) }
+        .to raise_error(Schemurai::Error, /schema\/first\/1: contains unsupported Object/)
+      shared[-1] = shared
+      expect { Schemurai.compile(schema) }
+        .to raise_error(Schemurai::Error, /schema\/first\/1: contains a recursive container/)
+    end
+
     it "reports escaped paths for invalid nested values" do
       schema = {"a/b" => [{"c~d" => Object.new}]}
 
