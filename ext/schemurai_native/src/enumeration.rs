@@ -14,8 +14,14 @@ pub(super) struct Enumeration {
 
 impl Enumeration {
     pub(super) fn compile(values: Vec<Value>, fixnum_flag: Value) -> Self {
+        let mut fingerprints = structural::Cache::batch(0);
+        let budget = budget::Budget::default();
         let index = (values.len() > LINEAR_LIMIT)
-            .then(|| Index::compile(&values, |value| fingerprint(value, 0, fixnum_flag, false)))
+            .then(|| {
+                Index::compile(&values, |value| {
+                    fingerprint_cached(value, 0, fixnum_flag, false, &mut fingerprints, &budget)
+                })
+            })
             .flatten();
         let kinds = if index.is_some() {
             values
