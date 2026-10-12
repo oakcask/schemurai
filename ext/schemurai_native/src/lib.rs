@@ -2657,13 +2657,16 @@ fn indexed_unique_slots<S: UniqueSlot, const BOUNDED: bool>(
                 slots[at] = S::new(hash, i);
                 break;
             };
-            if BOUNDED {
-                // Bound total bucket probing as well as equal fingerprints.
-                // A poor sampled-word distribution restarts with full hashes.
-                probes += 1;
-                if probes > values.len().saturating_mul(2) {
+            // A full fingerprint can still have adversarial low table bits.
+            // Bound probing independently of exact fingerprint collisions.
+            probes += 1;
+            if probes > values.len().saturating_mul(2) {
+                if BOUNDED {
                     return Unsupported;
                 }
+                // Release the hash table before allocating the flat index.
+                drop(slots);
+                return sorted_unique(values, fingerprint, equal);
             }
             if slot.matches(hash) {
                 match equal(values[previous], item) {
@@ -2683,6 +2686,56 @@ fn indexed_unique_slots<S: UniqueSlot, const BOUNDED: bool>(
         }
     }
     Valid
+}
+fn sorted_unique(
+    values: &[Value],
+    mut fingerprint: impl FnMut(Value) -> Option<u64>,
+    mut equal: impl FnMut(Value, Value) -> Verdict,
+) -> Verdict {
+    let Some(bytes) = values
+        .len()
+        .checked_mul(std::mem::size_of::<(u64, usize)>())
+    else {
+        return Unsupported;
+    };
+    if bytes > MAX_UNIQUE_INDEX_BYTES {
+        return Unsupported;
+    }
+    let mut entries = Vec::new();
+    if entries.try_reserve_exact(values.len()).is_err() {
+        return Unsupported;
+    }
+    for (index, &value) in values.iter().enumerate() {
+        let Some(hash) = fingerprint(value) else {
+            break;
+        };
+        entries.push((hash, index));
+    }
+    let complete = entries.len() == values.len();
+    // O(n log n) sorting replaces quadratic slot probing. Exact equality is
+    // needed only within identical full fingerprints, in original array order.
+    entries.sort_unstable();
+    let mut decisive: Option<(usize, Verdict)> = None;
+    for group in entries.chunk_by(|a, b| a.0 == b.0) {
+        for at in 1..group.len() {
+            let index = group[at].1;
+            if decisive.is_some_and(|(earlier, _)| earlier <= index) {
+                break;
+            }
+            for &(_, previous) in &group[..at] {
+                let status = equal(values[previous], values[index]);
+                if status != Invalid {
+                    decisive = Some((index, status));
+                    break;
+                }
+            }
+        }
+    }
+    // A duplicate in the successfully fingerprinted prefix must precede a
+    // later unavailable fingerprint, just as it does in the streaming index.
+    decisive.map_or(if complete { Valid } else { Unsupported }, |(_, status)| {
+        if status == Valid { Invalid } else { status }
+    })
 }
 fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
     let bytes = capacity.checked_mul(std::mem::size_of::<S>())?;
@@ -2996,6 +3049,54 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn falls_back_for_clustered_slots_without_comparing_distinct_fingerprints() {
+        let values: Vec<_> = (1..=4096).collect();
+        let mut hashes = 0;
+        assert_eq!(
+            indexed_unique(
+                &values,
+                |value| {
+                    hashes += 1;
+                    Some((value as u64) << 32)
+                },
+                |_, _| panic!("distinct full fingerprints cannot require equality"),
+            ),
+            Valid
+        );
+        assert!(hashes > values.len());
+        assert!(hashes <= values.len() * 2);
+    }
+
+    #[test]
+    fn sorted_collisions_preserve_exact_equality_and_early_results() {
+        let hash = |value| (value != 99).then_some(value as u64 % 2);
+        let equal = |a, b| verdict(a == b);
+        assert_eq!(sorted_unique(&[0, 2, 4, 1, 3, 5], hash, equal), Valid);
+        assert_eq!(sorted_unique(&[0, 2, 0, 99], hash, equal), Invalid);
+        assert_eq!(sorted_unique(&[0, 2, 99, 0], hash, equal), Unsupported);
+        assert_eq!(
+            sorted_unique(&[0, 1, 1, 2], hash, |a, b| {
+                if (a, b) == (0, 2) {
+                    Unsupported
+                } else {
+                    equal(a, b)
+                }
+            }),
+            Invalid
+        );
+        assert_eq!(
+            sorted_unique(&[0, 2, 1, 1], hash, |a, b| {
+                if (a, b) == (0, 2) {
+                    Unsupported
+                } else {
+                    equal(a, b)
+                }
+            }),
+            Unsupported
+        );
+    }
 
     #[test]
     fn bounds_unique_index_allocation() {
