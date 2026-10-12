@@ -907,6 +907,27 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "shares batch fingerprints without reusing stale or wrong-depth containers" do # rubocop:disable RSpec/ExampleLength
+    shared = Array.new(128) { |i| [i, "value#{i}"] }
+    values = Array.new(64) { |i| [i, shared] }
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?(values)).to be(true)
+    expect(program.diagnostics(values)).not_to be_nil
+    values[-1][0] = 0
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    expect(program.valid?(values)).to be(false)
+    values[-1][0] = 63
+    expect(program.valid?(values)).to be(true)
+    # The same container is reachable at a supported and an unsupported depth.
+    # A shallow cached hash must not bypass the evaluator's depth fallback.
+    deep = shared
+    520.times { deep = [deep] }
+    expect(program.valid?([*values, deep])).to be_nil
+    shared[0] = Object.new
+    expect(program.valid?(values)).to be_nil
+  end
+
   it "discards structural results between calls and after compaction" do # rubocop:disable RSpec/ExampleLength
     leaf = [0.0]
     shared = [leaf, 1, leaf]

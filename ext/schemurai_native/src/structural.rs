@@ -11,6 +11,15 @@ pub(super) struct Cache<K, T> {
     order: VecDeque<K>,
 }
 impl<K, T> Cache<K, T> {
+    // A batch can share containers immediately below distinct element roots.
+    // It owns one bounded cache until the entire GVL-held scan completes.
+    pub(super) fn batch(depth: usize) -> Self {
+        Self {
+            start_depth: depth,
+            results: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
     pub(super) fn new(depth: usize) -> Self {
         Self {
             start_depth: depth.saturating_add(4),
