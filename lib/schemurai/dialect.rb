@@ -58,18 +58,6 @@ module Schemurai
         @format_assertion
       end
 
-      def draft7?
-        name == :draft7
-      end
-
-      def draft2019?
-        name == :draft2019_09
-      end
-
-      def draft2020?
-        name == :draft2020_12
-      end
-
       def keyword_mask(schema)
         schema.each_key.reduce(0) do |mask, keyword|
           mask | (keywords[keyword]&.mask || 0)
