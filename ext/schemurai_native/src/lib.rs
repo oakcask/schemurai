@@ -352,11 +352,9 @@ impl RecordShortIndex {
 impl Object {
     // Keep these calls at their original evaluation positions: property
     // failures and unsupported children must retain their ordering.
-    #[inline]
     fn check_required(&self, value: Value, undefined: Value, budget: &budget::Budget) -> Verdict {
         Self::check_keys(&self.required, value, undefined, budget)
     }
-    #[inline]
     fn check_keys(
         keys: &[Value],
         value: Value,
@@ -373,7 +371,6 @@ impl Object {
         }
         Valid
     }
-    #[inline]
     fn check_dependent_required(
         &self,
         value: Value,
@@ -1630,7 +1627,6 @@ impl Execution<'_> {
             |index| self.leaf(op, TYPE_INTEGRAL_NUMBER, values[index], depth) == Valid,
         ))
     }
-    #[inline(never)]
     fn integer_items(
         &self,
         limits: &[(i32, i64)],
@@ -1682,7 +1678,6 @@ impl Execution<'_> {
         }
         Valid
     }
-    #[inline(never)]
     fn record_items(
         &self,
         rules: &Object,
@@ -2321,9 +2316,7 @@ fn fingerprint_cached(
     // before the depth-based cache handles deeper shared graphs.
     let cacheable = container && memo.eligible_container(depth, unsafe { len.assume_init() });
     let key = (value, depth);
-    if cacheable
-        && let Some(result) = memo.get(key)
-    {
+    if cacheable && let Some(result) = memo.get(key) {
         return result;
     }
     let result = match kind {
@@ -2464,7 +2457,16 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
     let mut fingerprints = structural::Cache::batch(depth);
     indexed_unique(
         values,
-        |item| fingerprint_cached(item, depth, fixnum_flag, big_hint, &mut fingerprints, budget),
+        |item| {
+            fingerprint_cached(
+                item,
+                depth,
+                fixnum_flag,
+                big_hint,
+                &mut fingerprints,
+                budget,
+            )
+        },
         |a, b| equal_budgeted(a, b, depth, budget),
     )
 }
