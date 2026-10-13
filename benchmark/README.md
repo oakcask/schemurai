@@ -4158,3 +4158,78 @@ to the VM. Structural uniqueness, ordinary object/pattern validity, overlapping
 annotation diagnostics, and content need further performance work. The backend
 as a whole does not yet meet the requested target. Measurements are local
 results, not portable guarantees.
+
+### Rust inline attribute audit
+
+The audit removed ten redundant attributes from the native Rust backend:
+
+- Plain `#[inline]` on `Object::check_required`, `Object::check_keys`,
+  `Object::check_dependent_required`, and `content::string_special_word`.
+- `#[inline(always)]` on `BufferedBase64::byte`, `BufferedBase64::advance`,
+  `Parser::peek`, and `Parser::advance`.
+- `#[inline(never)]` on `Execution::integer_items` and `Execution::record_items`.
+
+With Rust 1.99.0, x86-64 Linux, release LTO and one codegen unit, removing
+these attributes together left all 1,981 generated function bodies identical.
+Assembly was generated with
+`cargo rustc --manifest-path ext/schemurai_native/Cargo.toml --release --locked -- --emit=asm`.
+The remaining assembly differences were source-line numbers in panic-location
+constants. Both item helpers remained separate functions under compiler-managed
+inlining. Each of the four removed `inline(always)` attributes was also checked
+individually against the original assembly.
+
+Removing the slice input's `byte` hint, `Parser::take`, or `Parser::whitespace`
+individually changed generated parser code. Removing all three together changed
+register allocation and parser-position stores in the number/container loops.
+They remain as a measured group, with their reason documented at the call sites.
+`Parser::value` retains its previously measured dispatch specialization (see
+"Full audit after JSON value dispatch inlining"). The three bounded Base64
+helpers still isolate medium, 8 KiB and streaming scratch frames; the UUID
+helper and unordered Bignum helper retain their documented layout/frame reasons.
+
+A focused control used Ruby 4.0.6/YJIT, 128 repeated strings, 31 median samples
+of 300 direct native-program calls, and 1,000 warmup calls per method. It covered
+plain and Base64 JSON, valid and invalid inputs, and validity and diagnostics:
+40 cases per run. Every case checked native support and exact VM error parity
+before timing. The JSON fixtures were:
+
+- `{"id":1,"flags":[true,false,null],"name":"record"}`
+- ` { "id" : 1, "flags" : [ true, false, null ], "name" : "record" } `
+- `[0,-1,1.25,2e10,0.0002,-3E-2]`
+- `[true,false,null,true,false,null]`
+- `{"a":[{"b":[true,1,null]},[],{}]}`
+
+Invalid fixtures appended `!` before optional Base64 encoding. A repeat reversed
+the extension order. Selected valid plain-JSON diagnostics illustrate why the
+three hints were retained; times are microseconds for the whole 128-item array:
+
+| Fixture | Original | Three hints removed | Final, reverse-order repeat | Three hints removed, repeat |
+| --- | ---: | ---: | ---: | ---: |
+| Record | 4.41 | 4.50 | 4.44 | 4.58 |
+| Whitespace | 5.04 | 5.15 | 5.04 | 5.19 |
+| Numbers | 3.89 | 4.18 | 3.91 | 4.34 |
+| Literals | 2.32 | 2.44 | 2.32 | 2.43 |
+| Nested | 4.41 | 4.71 | 4.47 | 4.78 |
+
+Invalid diagnostic timings were mixed, and the repeat's plain-record validity
+was faster with the hints removed. This is a local tradeoff supporting the
+retained group, not a speedup claim for every input or architecture. The final
+ten-attribute deletion itself preserves generated instructions in this build.
+
+Final validation passed 35 Rust unit tests, 183 native/oracle differential
+examples, Clippy with warnings denied, formatting and whitespace checks. The
+final `native_shared_scans.rb` run passed all 36 direct-native/VM-parity cases,
+including tracked/untracked required and dependent-required assertions, using
+31 samples of 100 calls at width 1,000.
+
+`jscpd -f ruby,rust -r ai --no-tips` reported 118 clones (5.2%). Review of
+changed-code surroundings found existing interval calculations for compiled
+record fields and runtime integer arrays, and guarded rule selection in the
+general/specialized item paths. These remain in their existing phases and use
+sites: this audit changes attributes and comments, not their rules or
+responsibilities. Content/format scan wrappers serve different parser and
+encoding guards. Manual cross-language review confirmed that Ruby/VM content
+and dependent-required rules intentionally mirror native semantics as
+independent implementations checked by differential tests. No new evaluation
+logic or duplicated rule was introduced. Two existing formatting differences
+in `lib.rs` were normalized by `cargo fmt`.

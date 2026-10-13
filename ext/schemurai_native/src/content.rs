@@ -161,6 +161,7 @@ fn decode_json_medium(bytes: &[u8], length: usize) -> Verdict {
     decode_json_turbo(bytes, length, &mut scratch)
 }
 
+// Keep the 8 KiB scratch frame out of shorter decoded-content paths.
 #[inline(never)]
 fn decode_json_direct(bytes: &[u8], length: usize) -> Verdict {
     let mut scratch = [0; DIRECT_BYTES + 2];
@@ -228,6 +229,9 @@ trait Input {
     }
 }
 impl Input for &[u8] {
+    // Retain byte/take/whitespace specialization together: removing their
+    // hints changed parser register/state handling and slowed numeric/literal
+    // and nested JSON controls. See benchmark/README.md's inline audit.
     #[inline(always)]
     fn byte(&self, at: usize) -> Option<u8> {
         self.get(at).copied()
@@ -327,7 +331,6 @@ impl Input for &[u8] {
                 .count()
     }
 }
-#[inline]
 fn string_special_word(bytes: [u8; 8]) -> u64 {
     let word = u64::from_le_bytes(bytes);
     let quote = word ^ 0x2222_2222_2222_2222;
@@ -398,11 +401,9 @@ impl BufferedBase64<'_> {
     }
 }
 impl Input for BufferedBase64<'_> {
-    #[inline(always)]
     fn byte(&self, _at: usize) -> Option<u8> {
         self.decoded[..self.len].get(self.at).copied()
     }
-    #[inline(always)]
     fn advance(&mut self) {
         self.at += 1;
         if self.at == self.len {
@@ -432,15 +433,14 @@ struct Parser<I> {
     at: usize,
 }
 impl<I: Input> Parser<I> {
-    #[inline(always)]
     fn peek(&self) -> Option<u8> {
         self.input.byte(self.at)
     }
-    #[inline(always)]
     fn advance(&mut self) {
         self.at += 1;
         self.input.advance();
     }
+    // Part of the measured byte/take/whitespace specialization above.
     #[inline(always)]
     fn take(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
@@ -450,12 +450,15 @@ impl<I: Input> Parser<I> {
             false
         }
     }
+    // Keep whitespace state visible to value/container dispatch (inline audit).
     #[inline(always)]
     fn whitespace(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
             self.advance();
         }
     }
+    // Paired JSON controls improved 5–6% with dispatch in the callers; see
+    // benchmark/README.md, "Full audit after JSON value dispatch inlining".
     #[inline(always)]
     fn value(&mut self, depth: usize) -> bool {
         self.whitespace();
