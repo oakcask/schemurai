@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.0.1](https://github.com/oakcask/schemurai/compare/v3.0.0...v3.0.1) (2026-10-12)
+
+
+### Performance Improvements
+
+* use native NEON Base64 packing for ARM64 content ([#198](https://github.com/oakcask/schemurai/issues/198)) ([99c38f2](https://github.com/oakcask/schemurai/commit/99c38f2b73ec574f37c97974bf0b9d3ff31a4e19))
+* vectorize native integer array bounds ([#200](https://github.com/oakcask/schemurai/issues/200)) ([27a18b2](https://github.com/oakcask/schemurai/commit/27a18b2b48382c954b053de02a65f5368338292c))
+* vectorize native pattern UTF-8 validation ([#201](https://github.com/oakcask/schemurai/issues/201)) ([6d2200e](https://github.com/oakcask/schemurai/commit/6d2200e6e15ddbc967ba2ecfa1c1204f12ed6478))
+* vectorize native UUID format validation ([#199](https://github.com/oakcask/schemurai/issues/199)) ([9591fd3](https://github.com/oakcask/schemurai/commit/9591fd3d94665282963870667afec3b3a773ccbd))
+
 ## [3.0.0](https://github.com/oakcask/schemurai/compare/v2.3.0...v3.0.0) (2026-10-12)
 
 
