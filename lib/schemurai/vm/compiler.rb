@@ -145,10 +145,6 @@ module Schemurai
         freeze
       end
 
-      def tracks_evaluation?
-        @tracks_evaluation
-      end
-
       def recursive_anchor?
         @recursive_anchor
       end

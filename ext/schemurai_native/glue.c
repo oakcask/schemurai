@@ -695,7 +695,6 @@ static int string_utf8(VALUE value) {
     int encoding = RB_ENCODING_GET(value);
     return encoding == utf8_index ? SN_ENCODING_UTF8 : (encoding == ascii_index ? SN_ENCODING_ASCII : SN_ENCODING_OTHER);
 }
-int sn_string_utf8(VALUE value) { return string_utf8(value); }
 static int string_view(VALUE value, const unsigned char **data, size_t *length) {
     int encoding = string_utf8(value);
     string_raw_view(value, data, length);
