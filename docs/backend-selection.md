@@ -859,6 +859,23 @@ caches. Successful runtime predicates never authorize native storage access;
 mixed schemas can still encounter another unsupported storage assertion and
 transfer to the VM. Numeric runtime frames and results are rooted outside Rust,
 and separate Ractors own separate frames and caches.
+String assertions on builtin subclasses, singleton-method strings and values
+with custom string applicability now use libruby frames as well. Frames retain
+the original Ruby length result without converting it to a native size. Length
+comparisons, regexp matching, format methods and content conversion therefore
+retain their Ruby behavior. VM and native runtime validity share string checks
+and regexp compilation. Unbounded frames share the runner's regexp cache;
+bounded calls use an invocation-local cache.
+Diagnostic and trial traversal yields between reached assertions. RegexpError
+rescues retain the VM's complete string-check boundary, including exceptions
+from error messages and deferred diagnostic pointers. A failed error-rendering
+attempt still reserves an error slot; the rescue handler runs once and its own
+exceptions propagate. Ruby deadline checks stay at the original string method
+boundaries, with native limits captured once before retries. A transition from
+existing runtime operations to occurrence-based scalar frames replays before
+servicing the first frame request so earlier scalar calls cannot shift its
+identity. Ordinary strings retain borrowed native storage and scalar item
+scans; unsupported item views visit the general native scalar evaluator.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
@@ -893,8 +910,8 @@ successful annotations and do not consume diagnostic error limits.
 Container validity successes do not bypass diagnostic collection: descendants
 can still raise during complete diagnostic trials. Only proven scalar checks
 and cached complete diagnostic successes skip that traversal.
-Builtin subclasses, singleton-method objects, and Hashes with nonstandard keys
-delegate to the VM before native field evaluation. Lookup-based paths check
+Array/Hash subclasses, singleton-method containers, and Hashes with nonstandard keys
+can still delegate to the VM before native container field evaluation. Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
 outside Rust evaluation. Small records with up to eight declared keys and eight
 input entries combine this check with a single Hash walk. C passes only borrowed

@@ -10,6 +10,7 @@ require_relative "../unique_items"
 require_relative "../ecma_regexp"
 require_relative "../json_pointer"
 require_relative "compiler"
+require_relative "../string_checks"
 
 module Schemurai
   module VM
@@ -56,6 +57,8 @@ module Schemurai
     class Evaluator
       include Internal::UniqueItems
       include Internal::NumberChecks::Evaluation
+      include Internal::StringChecks::Evaluation
+      include Internal::StringChecks::Regexps
 
       MISSING_SEGMENT = Object.new.freeze
 
@@ -473,23 +476,6 @@ module Schemurai
         add_error("multipleOf") { Internal::ErrorMessage.multiple_of(divisor) } unless valid
       end
 
-      private def valid_string?(rules, value)
-        length = value.length
-        return false if rules.max_length && length > rules.max_length
-        return false if rules.min_length && length < rules.min_length
-        return false if rules.pattern && !ecma_regexp(rules.pattern).match?(value)
-        if rules.format && (@validate_format || rules.format_assertion)
-          return false unless rules.format.call(value)
-        end
-        if @validate_content && (rules.decode_base64 || rules.parse_json)
-          return valid_content?(rules, value)
-        end
-
-        true
-      rescue RegexpError, IPAddr::InvalidAddressError
-        false
-      end
-
       private def check_string(rules, value)
         length = value.length
         if rules.max_length && length > rules.max_length
@@ -507,14 +493,6 @@ module Schemurai
         check_content(rules, value) if @validate_content && (rules.decode_base64 || rules.parse_json)
       rescue RegexpError
         add_error("pattern") { Internal::ErrorMessage.invalid_pattern(rules.pattern) }
-      end
-
-      private def valid_content?(rules, value)
-        decoded = rules.decode_base64 ? Base64.strict_decode64(value) : value
-        JSON.parse(decoded) if rules.parse_json
-        true
-      rescue ArgumentError, JSON::ParserError
-        false
       end
 
       private def check_content(rules, value)
@@ -1021,13 +999,6 @@ module Schemurai
         else
           left == right
         end
-      end
-
-      private def ecma_regexp(pattern)
-        regexps = (@regexps ||= {})
-        return regexps[pattern] if regexps.key?(pattern)
-
-        regexps[pattern] = Internal::EcmaRegexp.compile(pattern, @budget)
       end
 
       private def pointer(path, final_segment = MISSING_SEGMENT)

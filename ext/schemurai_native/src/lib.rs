@@ -20,6 +20,7 @@ mod number;
 mod pattern;
 mod pointer;
 mod runtime;
+mod string;
 // Some shared constants are consumed only by C or Ruby.
 #[allow(dead_code)]
 mod protocol {
@@ -44,6 +45,7 @@ unsafe extern "C" {
     ) -> i32;
     fn sn_small_hash(value: Value, entries: *mut Value) -> i32;
     fn sn_true(value: Value) -> i32;
+    fn sn_truthy(value: Value) -> i32;
     fn sn_fixnum(value: Value) -> i32;
     fn sn_fixnum_flag() -> Value;
     fn sn_array_data(value: Value) -> *const Value;
@@ -167,6 +169,9 @@ struct Array {
 }
 #[derive(Debug)]
 struct StringRules {
+    source: Value,
+    runtime_flags: i32,
+    runtime_format: bool,
     min: Option<usize>,
     max: Option<usize>,
     pattern: Option<pattern::Pattern>,
@@ -213,15 +218,31 @@ impl StringRules {
             && self.format.is_none()
             && self.content.is_none()
     }
-    fn eval_length_guarded(&self, required: i32, value: Value) -> Verdict {
-        length_guarded(value, required, self.min, self.max)
+    fn eval_length_guarded(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+    ) -> Verdict {
+        if caches.dynamic_calls() {
+            return self.runtime_valid(caches, required, value);
+        }
+        let result = length_guarded(value, required, self.min, self.max);
+        if result == Unsupported {
+            self.runtime_valid(caches, required, value)
+        } else {
+            result
+        }
     }
     fn eval_guarded(&self, caches: &runtime::Caches, required: i32, value: Value) -> Verdict {
+        if caches.dynamic_calls() {
+            return self.runtime_valid(caches, required, value);
+        }
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
         if encoding == -TYPE_UNSUPPORTED {
-            Unsupported
+            self.runtime_valid(caches, required, value)
         } else if encoding < 0 {
             verdict(required == 0)
         } else {
@@ -923,9 +944,10 @@ impl Engine {
                             None
                         };
                         let assertion = self.field(operand, b"format_assertion\0")?;
-                        let format = if (self.validate_format || unsafe { sn_true(assertion) } != 0)
-                            && unsafe { sn_same(format, sn_nil()) } == 0
-                        {
+                        let runtime_format = (self.validate_format
+                            || unsafe { sn_true(assertion) } != 0)
+                            && unsafe { sn_same(format, sn_nil()) } == 0;
+                        let format = if runtime_format {
                             let name = self.field(format, b"name\0")?;
                             if unsafe { sn_same(name, sn_nil()) } != 0 {
                                 None
@@ -935,6 +957,10 @@ impl Engine {
                         } else {
                             None
                         };
+                        let max_length = self.field(operand, b"max_length\0")?;
+                        let min_length = self.field(operand, b"min_length\0")?;
+                        let length_flags = (unsafe { sn_truthy(max_length) } << 2)
+                            | (unsafe { sn_truthy(min_length) } << 3);
                         Op::String(
                             if opcode == OP_TYPED_STRING {
                                 TYPE_STRING
@@ -942,11 +968,16 @@ impl Engine {
                                 0
                             },
                             Box::new(StringRules {
+                                source: operand,
+                                runtime_flags: i32::from(self.validate_format)
+                                    | (i32::from(self.validate_content) << 1)
+                                    | length_flags,
+                                runtime_format,
                                 format,
                                 content,
                                 min: self.size_field(operand, b"min_length\0")?,
                                 max: self.size_field(operand, b"max_length\0")?,
-                                pattern: if unsafe { sn_same(pattern, sn_nil()) } != 0 {
+                                pattern: if unsafe { sn_truthy(pattern) } == 0 {
                                     None
                                 } else {
                                     Some(pattern::Pattern::compile(
@@ -1242,10 +1273,8 @@ impl Engine {
         self.kind_demand[index] = ops
             .iter()
             .map(|op| match op {
-                Op::Type(..) | Op::Number(..) => KindDemand::Predicate,
-                Op::Const(_) | Op::Enum(_) | Op::String(..) | Op::Array(..) | Op::Object(..) => {
-                    KindDemand::Data
-                }
+                Op::Type(..) | Op::Number(..) | Op::String(..) => KindDemand::Predicate,
+                Op::Const(_) | Op::Enum(_) | Op::Array(..) | Op::Object(..) => KindDemand::Data,
                 Op::Unsupported
                 | Op::Boolean(_)
                 | Op::UnresolvedRef(_)
@@ -1483,6 +1512,9 @@ impl Execution<'_> {
                 }
             }
             Op::String(required, rules) => {
+                if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                    return rules.runtime_valid(self.caches, *required, value);
+                }
                 if *required != 0 && kind != TYPE_STRING {
                     Invalid
                 } else if kind != TYPE_STRING {
@@ -1595,40 +1627,45 @@ impl Execution<'_> {
                 rules
                     .pattern_only()
                     .map(|pattern| (required, pattern))
-                    .filter(|_| !self.budget.timed())
+                    .filter(|_| !self.budget.timed() && !self.caches.dynamic_calls())
             });
             let format = string.and_then(|(required, rules)| {
                 rules
                     .format_only()
                     .map(|format| (required, format))
-                    .filter(|_| !self.budget.timed())
+                    .filter(|_| !self.budget.timed() && !self.caches.dynamic_calls())
             });
             let content = string.and_then(|(required, rules)| {
                 rules
                     .content_only()
                     .map(|content| (required, content))
-                    .filter(|_| !self.budget.timed())
+                    .filter(|_| !self.budget.timed() && !self.caches.dynamic_calls())
             });
             if let Some((required, pattern)) = pattern {
-                let result = pattern.eval_items(
+                let result = pattern.visit_invalid_items(
                     self.caches,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
+                    |_, item| self.eval(child, item, depth, active),
                 );
                 if result != Valid {
                     return result;
                 }
             } else if let Some((required, format)) = format {
-                let result =
-                    format.eval_items(required, values.get(r.prefix.len()..).unwrap_or(&[]));
+                let result = format.visit_invalid_items(
+                    required,
+                    values.get(r.prefix.len()..).unwrap_or(&[]),
+                    |_, item| self.eval(child, item, depth, active),
+                );
                 if result != Valid {
                     return result;
                 }
             } else if let Some((required, content)) = content {
-                let result = content.eval_items(
+                let result = content.visit_invalid_items(
                     self.caches,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
+                    |_, item| self.eval(child, item, depth, active),
                 );
                 if result != Valid {
                     return result;
@@ -1671,11 +1708,11 @@ impl Execution<'_> {
                         if rules.pattern.is_some() {
                             rules.eval_guarded(self.caches, required, item)
                         } else if rules.length_only() {
-                            rules.eval_length_guarded(required, item)
+                            rules.eval_length_guarded(self.caches, required, item)
                         } else {
                             let kind = unsafe { sn_kind(item) };
-                            if kind == TYPE_UNSUPPORTED {
-                                Unsupported
+                            if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                                rules.runtime_valid(self.caches, required, item)
                             } else if kind != TYPE_STRING {
                                 verdict(required == 0)
                             } else {
@@ -2073,7 +2110,7 @@ impl Execution<'_> {
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.length_only() =>
             {
-                rules.eval_length_guarded(*required, value)
+                rules.eval_length_guarded(self.caches, *required, value)
             }
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.pattern.is_some() =>
@@ -2174,8 +2211,15 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
                     let n = immediate_integer(value);
                     verdict(n >= min && n <= max)
                 }
-                Some(RecordCheck::StringLength(required, min, max)) => {
-                    length_guarded(value, required, min, max)
+                Some(RecordCheck::StringLength(required, min, max))
+                    if !c.engine.caches.dynamic_calls() =>
+                {
+                    let status = length_guarded(value, required, min, max);
+                    if status == Unsupported {
+                        c.engine.record_value(child, value, c.depth, c.active)
+                    } else {
+                        status
+                    }
                 }
                 _ => c.engine.record_value(child, value, c.depth, c.active),
             }

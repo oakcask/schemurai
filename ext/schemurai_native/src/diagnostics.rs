@@ -24,6 +24,7 @@ struct Error {
 #[derive(Default)]
 pub struct Report {
     errors: Vec<Error>,
+    attempts: usize,
     instance_path: pointer::Path,
     schema_path: pointer::Path,
     // Explicit failure signal for the current evaluation, independent of the
@@ -43,15 +44,61 @@ impl Report {
         instance: Value,
         detail: usize,
     ) -> Result<(), Verdict> {
+        self.add_with_frame(caches, keyword, source, instance, detail, None)
+    }
+    fn add_string(
+        &mut self,
+        caches: &runtime::Caches,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        frame: Value,
+        rescued: bool,
+    ) -> Result<(), Verdict> {
+        if !self.silent && !rescued && keyword != "type" {
+            if !caches.begin_string_error(frame, self.errors.len(), keyword) {
+                self.reserve_error()?;
+                return Err(Invalid);
+            }
+        } else {
+            caches.end_string_error();
+        }
+        let result = self.add_with_frame(
+            caches,
+            keyword,
+            source,
+            instance,
+            usize::from(rescued),
+            Some(frame),
+        );
+        if result != Err(Unsupported) {
+            caches.end_string_error();
+        }
+        result
+    }
+    fn reserve_error(&mut self) -> Result<(), Verdict> {
+        if self.limits.enabled & 1 != 0 && self.attempts >= self.limits.max_errors {
+            self.limit_hit = (1, self.attempts.saturating_add(1));
+            return Err(Unsupported);
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.failed = true;
+        Ok(())
+    }
+    fn add_with_frame(
+        &mut self,
+        caches: &runtime::Caches,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        detail: usize,
+        frame: Option<Value>,
+    ) -> Result<(), Verdict> {
         if self.silent {
             self.failed = true;
             return Ok(());
         }
-        if self.limits.enabled & 1 != 0 && self.errors.len() >= self.limits.max_errors {
-            self.limit_hit = (1, self.errors.len().saturating_add(1));
-            return Err(Unsupported);
-        }
-        self.failed = true;
+        self.reserve_error()?;
         let instance_path = self.instance_path.render(caches, None)?;
         let keyword_segment = (!matches!(
             keyword,
@@ -60,7 +107,18 @@ impl Report {
         .then_some(keyword);
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
         let message = if self.render_messages || caches.dynamic_calls() {
-            caches.error_message(keyword, source, instance, detail, self.errors.len())?
+            if let Some(frame) = frame {
+                caches.string_message(
+                    keyword,
+                    source,
+                    instance,
+                    frame,
+                    self.errors.len(),
+                    detail != 0,
+                )?
+            } else {
+                caches.error_message(keyword, source, instance, detail, self.errors.len())?
+            }
         } else {
             unsafe { sn_nil() }
         };
@@ -169,11 +227,13 @@ impl Execution<'_> {
             }
             [op @ (Op::Boolean(_) | Op::Type(..))] => Some(self.leaf(op, kind, value, depth)),
             [op @ Op::String(_, rules)]
-                if kind != TYPE_STRING
-                    || rules.length_only()
-                    || rules.pattern_only().is_some()
-                    || rules.format_only().is_some()
-                    || rules.content_only().is_some() =>
+                if kind != TYPE_UNSUPPORTED
+                    && !self.caches.dynamic_calls()
+                    && (kind != TYPE_STRING
+                        || rules.length_only()
+                        || rules.pattern_only().is_some()
+                        || rules.format_only().is_some()
+                        || rules.content_only().is_some()) =>
             {
                 Some(self.leaf(op, kind, value, depth))
             }
@@ -352,6 +412,24 @@ impl Execution<'_> {
                     }
                 }
                 Op::String(required, rules) => {
+                    if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                        rules.runtime_failures(
+                            self.caches,
+                            *required,
+                            value,
+                            |keyword, frame, rescued| {
+                                report.add_string(
+                                    self.caches,
+                                    keyword,
+                                    source,
+                                    value,
+                                    frame,
+                                    rescued,
+                                )
+                            },
+                        )?;
+                        continue;
+                    }
                     if *required != 0 && kind != TYPE_STRING {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
@@ -525,7 +603,8 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
-                        let pattern = pattern.filter(|_| !self.budget.timed());
+                        let pattern = pattern
+                            .filter(|_| !self.budget.timed() && !self.caches.dynamic_calls());
                         let number = match self.nodes[child].as_slice() {
                             [Op::Number(required, number)]
                                 if depth < MAX_EVALUATION_DEPTH && !self.caches.dynamic_calls() =>
@@ -540,14 +619,16 @@ impl Execution<'_> {
                             }
                             _ => None,
                         };
-                        let format = format.filter(|_| !self.budget.timed());
+                        let format =
+                            format.filter(|_| !self.budget.timed() && !self.caches.dynamic_calls());
                         let content = match self.nodes[child].as_slice() {
                             [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.content_only().map(|content| (*required, content))
                             }
                             _ => None,
                         };
-                        let content = content.filter(|_| !self.budget.timed());
+                        let content = content
+                            .filter(|_| !self.budget.timed() && !self.caches.dynamic_calls());
                         if pattern.is_some() || format.is_some() || content.is_some() {
                             let start = rules.prefix.len().min(len);
                             if tracked {
@@ -1044,7 +1125,9 @@ impl Execution<'_> {
                 op @ (Op::Type(..) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_)),
             ] if depth <= MAX_EVALUATION_DEPTH => {
                 let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
-                if kind == TYPE_UNSUPPORTED && matches!(op, Op::Type(..)) {
+                if (kind == TYPE_UNSUPPORTED && matches!(op, Op::Type(..) | Op::String(..)))
+                    || (self.caches.dynamic_calls() && matches!(op, Op::String(..)))
+                {
                     // Collection must execute a dynamic predicate once, rather
                     // than once here and again while recording its failure.
                     return Ok(true);

@@ -51,9 +51,6 @@ impl Format {
             Self::Unsupported => return Unsupported,
         })
     }
-    pub(super) fn eval_items(&self, required: i32, values: &[Value]) -> Verdict {
-        self.visit_invalid_items(required, values, |_, _| Invalid)
-    }
     pub(super) fn visit_invalid_items(
         &self,
         required: i32,
@@ -91,9 +88,14 @@ fn scan_items(
         let mut data = std::ptr::null();
         let mut len = 0;
         let kind = unsafe { sn_format_item_view(value, &mut data, &mut len) };
-        let result = if kind == -TYPE_UNSUPPORTED {
-            Unsupported
-        } else if kind < 0 {
+        if kind == -TYPE_UNSUPPORTED {
+            let status = invalid(index, value);
+            if status != Valid {
+                return status;
+            }
+            continue;
+        }
+        let result = if kind < 0 {
             verdict(required == 0)
         } else {
             matches(unsafe { byte_view(data, len) })

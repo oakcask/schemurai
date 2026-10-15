@@ -1783,6 +1783,228 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "evaluates special strings through libruby without VM execution" do # rubocop:disable RSpec/ExampleLength
+    subclass = Class.new(String)
+    short = +"abc"
+    short.define_singleton_method(:length) { 0 }
+    fractional = subclass.new("abc")
+    fractional.define_singleton_method(:length) { Rational(3, 2) }
+    fake = Object.new
+    fake.define_singleton_method(:is_a?) { |klass| klass == String }
+    fake.define_singleton_method(:length) { 1 }
+    fake.define_singleton_method(:to_str) { "aaa" }
+    values = [subclass.new("aaa"), subclass.new(""), subclass.new("2024-02-29"), subclass.new("W10="),
+      subclass.new("bad"), short, fractional, fake, BasicObject.new, Rational(1, 2),
+      Class.new(Array).new, Class.new(Hash).new, {Object.new => 1},
+      subclass.new("é".encode(Encoding::UTF_16LE)), subclass.new("\xff".b.force_encoding(Encoding::UTF_8))]
+    rules = [{"minLength" => "bad"}, {"maxLength" => "bad"}, {"minLength" => false}, {"pattern" => false}, {"minLength" => 4}, {"maxLength" => 0}, {"maxLength" => 1, "minLength" => 4},
+      {"pattern" => "^a+$"}, {"pattern" => "["}, {"format" => "date"},
+      {"contentEncoding" => "base64", "contentMediaType" => "application/json"},
+      {"contentMediaType" => "application/json"}, {"maxLength" => 0, "pattern" => "[", "format" => "date"}]
+    rules = rules.flat_map { |rule| [rule, rule.merge("type" => "string"), rule.merge("type" => ["string", "integer"])] }
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, ["aaa", value, value]] },
+      ->(rule, value) { [{"properties" => {"s~/v" => rule}}, {"s~/v" => value}] },
+      ->(rule, value) { [{"contains" => rule}, [value]] },
+      ->(rule, value) { [{"$defs" => {"s" => rule}, "allOf" => [{"$ref" => "#/$defs/s"}, {"$ref" => "#/$defs/s"}]}, value] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm, format: true, content: true)
+      expected = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native, format: true, content: true), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each_with_index do |(input, method, options, result), index|
+        expect(capture_validation(native, method, input, **options)).to eq(result), [schema, method, options, index].inspect
+      end
+    end
+  end
+
+  it "preserves special string method order across trials, diagnostics and repeated calls" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(String) do
+      attr_reader :calls
+      def initialize(value)
+        super
+        @calls = []
+      end
+
+      def is_a?(type)
+        @calls << [:is_a?, type]
+        super
+      end
+
+      [:length, :bytesize, :getbyte, :unpack1, :to_str].each do |method|
+        define_method(method) do |*args, **options|
+          @calls << [method, args, options]
+          super(*args, **options)
+        end
+      end
+    end
+    rules = [{"maxLength" => 1, "minLength" => 4, "pattern" => "^a+$", "format" => "date"},
+      {"type" => "string", "pattern" => "[", "format" => "date"},
+      {"format" => "date", "contentEncoding" => "base64", "contentMediaType" => "application/json"}]
+    rules.each do |rule|
+      schemas = [rule, {"items" => rule}, {"properties" => {"s" => rule}},
+        {"anyOf" => [rule, rule]}, {"oneOf" => [rule, rule]}, {"not" => rule},
+        {"if" => rule, "then" => false, "else" => rule},
+        {"$defs" => {"s" => rule}, "allOf" => [{"$ref" => "#/$defs/s"}, {"$ref" => "#/$defs/s"}]}]
+      schemas.each do |schema|
+        [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
+          vm = Schemurai.compile(schema, backend: :vm, format: true, content: true)
+          native = Schemurai.compile(schema, backend: :native, format: true, content: true)
+          evaluator = native.instance_variable_get(:@evaluator)
+          allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
+          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          values = [klass.new("aaa"), klass.new("aaa")]
+          inputs = values.map do |value|
+            if schema.key?("items")
+              ["aaa", value, value]
+            elsif schema.key?("properties")
+              {"s" => value}
+            else
+              value
+            end
+          end
+          [options, {}, options].each do |limits|
+            values.each { |value| value.calls.clear }
+            expected = capture_validation(vm, method, inputs.first, **limits)
+            expect(capture_validation(native, method, inputs.last, **limits)).to eq(expected)
+            expect(values.last.calls).to eq(values.first.calls), [schema, method, limits].inspect
+          end
+        end
+      end
+    end
+  end
+
+  it "preserves string rescue boundaries and error reservations during message rendering" do # rubocop:disable RSpec/ExampleLength
+    truthy = Object.new
+    truthy.define_singleton_method(:!) { raise "comparison negation" }
+    length_class = Class.new do
+      define_method(:>) { |_other| truthy }
+      def to_s = raise(RegexpError, "length message")
+    end
+    klass = Class.new(String) do
+      attr_accessor :length_value
+      def length = length_value
+    end
+    rules = [{"maxLength" => 1}, {"type" => "string", "maxLength" => 1, "pattern" => "a", "format" => "date"}]
+    cases = rules.map do |rule|
+      value = klass.new("abc")
+      value.length_value = length_class.new
+      vm = Schemurai.compile(rule, backend: :vm, format: true)
+      combinations = [:valid?, :validate].product([{}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}, {timeout: 10}])
+      [Schemurai.compile(rule, backend: :native, format: true), value, combinations.map do |method, options|
+        [method, options, capture_validation(vm, method, value, **options)]
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, value, expected|
+      expected.each do |method, options, result|
+        expect(capture_validation(native, method, value, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "rescues a string diagnostic path error once and preserves the handler's exceptions" do # rubocop:disable RSpec/ExampleLength
+    key = "é".encode(Encoding::ISO_8859_1)
+    schema = {"properties" => {key => {"maxLength" => 1}}}
+    value = {key => Class.new(String).new("abc")}
+    helper = Schemurai.const_get(:Internal)::JsonPointer
+    [:once, :always].product([{}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}, {timeout: 10}]).each do |mode, options|
+      outcomes = [:vm, :native].map do |backend|
+        validator = Schemurai.compile(schema, backend: backend)
+        if backend == :native
+          evaluator = validator.instance_variable_get(:@evaluator)
+          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+        end
+        calls = 0
+        allow(helper).to receive(:escape).and_wrap_original do |original, segment|
+          if segment == key
+            calls += 1
+            raise RegexpError, "diagnostic path" if mode == :always || calls == 1
+          end
+          original.call(segment)
+        end
+        capture_validation(validator, :validate, value, **options)
+      end
+      expect(outcomes.last).to eq(outcomes.first), [mode, options].inspect
+    end
+  end
+
+  it "roots special string lengths across GC and independent Ractors" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(String) do
+      def length
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        Rational(3, 2)
+      end
+    end
+    rule = {"maxLength" => 1, "minLength" => 4}
+    expect_native_policy_results([rule, {"allOf" => [rule, rule]}], [klass.new("aaa")])
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:string" => {"items" => {"minLength" => 4, "format" => "date"}}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:string")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        value = [Class.new(String).new("aaa")]
+        GC.start
+        [runner.valid?(value), runner.diagnostics(value).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, ["minLength"]]) }
+  end
+
+  it "preserves string stage exceptions and trial rescue behavior" do # rubocop:disable RSpec/ExampleLength
+    faults = [RegexpError, IPAddr::InvalidAddressError, ArgumentError]
+    cases = [:length, :bytesize, :unpack1].product(faults).flat_map do |method, fault|
+      klass = Class.new(String) { define_method(method) { |*| raise fault, "string stage" } }
+      value = klass.new("aaa")
+      rule = {"maxLength" => 1, "minLength" => 4, "pattern" => "a", "format" => "date",
+              "contentEncoding" => "base64", "contentMediaType" => "application/json"}
+      [rule, {"items" => rule}, {"contains" => rule}, {"anyOf" => [rule, true]}].map do |schema|
+        input = (schema.key?("items") || schema.key?("contains")) ? [value] : value
+        vm = Schemurai.compile(schema, backend: :vm, format: true, content: true)
+        expected = [:valid?, :validate].product([{}, {max_errors: 0}, {max_errors: 1}, {timeout: 10}]).map do |operation, options|
+          [operation, options, capture_validation(vm, operation, input, **options)]
+        end
+        [Schemurai.compile(schema, backend: :native, format: true, content: true), input, expected]
+      end
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, input, expected|
+      expected.each { |operation, options, result| expect(capture_validation(native, operation, input, **options)).to eq(result) }
+    end
+  end
+
+  it "retains string method deadline boundaries before later Ruby exceptions" do
+    length = Object.new
+    length.define_singleton_method(:>) { |_value| raise ArgumentError, "length comparison" }
+    value = Class.new(String).new("abc")
+    elapsed = -> { allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2) }
+    value.define_singleton_method(:length) do
+      elapsed.call
+      length
+    end
+    allow(Process).to receive(:clock_gettime).and_call_original
+    [:vm, :native].each do |backend|
+      validator = Schemurai.compile({"maxLength" => 1}, backend: backend)
+      [:valid?, :validate].each do |method|
+        allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+        expect { validator.public_send(method, value, timeout: 0.1) }.to raise_error(ArgumentError, "length comparison")
+      end
+    end
+  end
+
   it "preserves overridden methods on singleton objects and builtin subclasses" do # rubocop:disable RSpec/ExampleLength
     string = +"abc"
     string.define_singleton_method(:length) { 0 }
@@ -1804,8 +2026,13 @@ RSpec.describe "native VALUE execution" do
       native = Schemurai.compile(schema, backend: :native)
       vm = Schemurai.compile(schema, backend: :vm)
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      expect(program.valid?(value)).to be_nil
-      expect(program.diagnostics(value)).to be_nil
+      if schema.key?("minLength") || schema["type"] == "string" || schema.dig("items", "pattern")
+        expect(program.valid?(value)).to eq(vm.valid?(value))
+        expect(program.diagnostics(value)).not_to be_nil
+      else
+        expect(program.valid?(value)).to be_nil
+        expect(program.diagnostics(value)).to be_nil
+      end
       expect(native.valid?(value)).to eq(vm.valid?(value))
       expect(native.validate(value).errors).to eq(vm.validate(value).errors)
     end
@@ -2292,8 +2519,8 @@ RSpec.describe "native VALUE execution" do
           vm = Schemurai.compile(schema, content: true, backend: :vm)
           native = Schemurai.compile(schema, content: true, backend: :native)
           program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-          expect(program.valid?(prefix + [Class.new(String).new(valid)])).to be_nil
-          expect(program.diagnostics(prefix + [{Object.new => 1}])).to be_nil
+          expect(program.valid?(prefix + [Class.new(String).new(valid)])).to be(true)
+          expect(program.diagnostics(prefix + [{Object.new => 1}])).not_to be_nil
           if rule["contentEncoding"].nil?
             transcoded = prefix + [valid.encode(Encoding::UTF_16LE)]
             expect(program.valid?(transcoded)).to be(true)
@@ -2670,9 +2897,9 @@ RSpec.describe "native VALUE execution" do
         native = Schemurai.compile(schema, format: true, backend: :native)
         program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
         special = Class.new(String).new(valid)
-        expect(program.valid?(prefix + [special])).to be_nil
-        expect(program.diagnostics(prefix + [special])).to be_nil
-        expect(program.valid?(prefix + [{Object.new => 1}])).to be_nil
+        expect(program.valid?(prefix + [special])).to be(true)
+        expect(program.diagnostics(prefix + [special])).to eq([])
+        expect(program.valid?(prefix + [{Object.new => 1}])).to eq(vm.valid?(prefix + [{Object.new => 1}]))
         [native, values.map { |value| [value, vm.valid?(value), vm.validate(value).errors] }]
       end
     end
@@ -4538,7 +4765,8 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate(values, timeout: 10).errors).to eq(expected)
     values.first["extra"].replace("bb")
     expect(native.valid?(values)).to be(true)
-    expect(compiles).to eq(2)
+    # The bounded call has an invocation-local regexp cache, as in the VM.
+    expect(compiles).to eq(4)
   end
 
   it "retains the native duration deadline across Ruby assertion retries" do

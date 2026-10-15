@@ -15,14 +15,6 @@ pub(super) struct Content {
     pub(super) json: bool,
 }
 impl Content {
-    pub(super) fn eval_items(
-        &self,
-        caches: &runtime::Caches,
-        required: i32,
-        values: &[Value],
-    ) -> Verdict {
-        self.visit_invalid_items(caches, required, values, |_, _| Invalid)
-    }
     pub(super) fn visit_invalid_items(
         &self,
         caches: &runtime::Caches,
@@ -59,9 +51,14 @@ impl Content {
             } else {
                 unsafe { sn_format_item_view(value, data.as_mut_ptr(), len.as_mut_ptr()) }
             };
-            let result = if kind == -TYPE_UNSUPPORTED {
-                Unsupported
-            } else if JSON && !BASE64 && kind == ENCODING_OTHER {
+            if kind == -TYPE_UNSUPPORTED {
+                let status = invalid(index, value);
+                if status != Valid {
+                    return status;
+                }
+                continue;
+            }
+            let result = if JSON && !BASE64 && kind == ENCODING_OTHER {
                 caches.json(value)
             } else if kind < 0 {
                 verdict(required == 0)

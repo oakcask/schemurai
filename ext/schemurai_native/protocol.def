@@ -68,6 +68,8 @@ SN_CONSTANT(RUNTIME_NULL_NUMBER, 8)
 SN_CONSTANT(RUNTIME_TYPE, 64)
 /* Numeric frame requests add 64 times the step and the required type mask. */
 SN_CONSTANT(RUNTIME_NUMBER, 1024)
+/* String frames add 256 times the step, required type and option flags. */
+SN_CONSTANT(RUNTIME_STRING, 2048)
 SN_CONSTANT(ADAPTER_UNSUPPORTED, 3)
 SN_CONSTANT(STATUS_PANIC, -1)
 SN_CONSTANT(STATUS_EXCEPTION, -2)
