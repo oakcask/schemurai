@@ -42,6 +42,8 @@ extern int sn_caches_pending(const void *, VALUE *, VALUE *, int *);
 extern void sn_caches_mark(const void *);
 extern void sn_caches_begin(const void *);
 extern void sn_caches_observe(const void *);
+extern int sn_caches_take_reorder(const void *);
+extern int sn_caches_rescue_regexp(const void *);
 extern size_t sn_pointer_parts(const void *);
 extern void sn_pointer_part(const void *, size_t, const unsigned char **, size_t *, VALUE *);
 extern void sn_pointer_result(const void *, VALUE);
@@ -51,11 +53,12 @@ typedef struct {
     int opcode;
     VALUE operand, instance;
     size_t detail;
+    VALUE frame;
 } message_arguments;
 extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
-typedef struct { VALUE ordinal, rules, instance; } number_arguments;
-extern void sn_number_arguments(const void *, number_arguments *);
+typedef struct { VALUE ordinal, rules, instance; } scalar_arguments;
+extern void sn_scalar_arguments(const void *, scalar_arguments *);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -128,7 +131,7 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps, pointers, messages, numbers, number_state, limited_number_state; void *caches; size_t root; st_table *matches, *number_frames; } runner_holder;
+typedef struct { VALUE owner, regexps, limited_regexps, pointers, messages, frames, number_state, limited_number_state, string_state, limited_string_state; void *caches; size_t root; st_table *matches, *frame_indices; } runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -155,10 +158,13 @@ static void runner_mark(void *ptr) {
     runner_holder *r = ptr;
     rb_gc_mark(r->owner);
     rb_gc_mark(r->regexps);
+    rb_gc_mark(r->limited_regexps);
     rb_gc_mark(r->pointers);
     rb_gc_mark(r->messages);
-    rb_gc_mark(r->numbers);
+    rb_gc_mark(r->frames);
     rb_gc_mark(r->number_state);
+    rb_gc_mark(r->string_state);
+    rb_gc_mark(r->limited_string_state);
     rb_gc_mark(r->limited_number_state);
     if (r->caches) sn_caches_mark(r->caches);
     if (r->matches) st_foreach(r->matches, mark_operation, 0);
@@ -166,7 +172,7 @@ static void runner_mark(void *ptr) {
 static void runner_release(void *ptr) {
     runner_holder *h = ptr;
     if (h->caches) sn_caches_free(h->caches);
-    if (h->number_frames) st_free_table(h->number_frames);
+    if (h->frame_indices) st_free_table(h->frame_indices);
     if (h->matches) {
         st_foreach(h->matches, release_operation, 0);
         st_free_table(h->matches);
@@ -185,7 +191,7 @@ static int operation_size(st_data_t key, st_data_t value, st_data_t context) {
 static size_t runner_size(const void *ptr) {
     const runner_holder *h = ptr;
     size_t bytes = sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
-    if (h->number_frames) bytes += st_memsize(h->number_frames);
+    if (h->frame_indices) bytes += st_memsize(h->frame_indices);
     if (h->matches) {
         bytes += st_memsize(h->matches);
         st_foreach(h->matches, operation_size, (st_data_t)&bytes);
@@ -236,16 +242,19 @@ static VALUE build_runner(VALUE self, size_t index) {
     VALUE object = TypedData_Make_Struct(klass, runner_holder, &runner_type, r);
     r->owner = self;
     r->regexps = Qnil;
+    r->limited_regexps = Qnil;
     r->pointers = Qnil;
     r->messages = Qnil;
-    r->numbers = Qnil;
+    r->frames = Qnil;
     r->number_state = Qnil;
+    r->string_state = Qnil;
+    r->limited_string_state = Qnil;
     r->limited_number_state = Qnil;
     r->root = index;
     r->caches = NULL;
     r->matches = NULL;
-    r->number_frames = NULL;
-    r->number_frames = st_init_numtable();
+    r->frame_indices = NULL;
+    r->frame_indices = st_init_numtable();
     r->matches = st_init_numtable();
     r->caches = sn_caches_new();
     sn_caches_runtime(r->caches, r->matches);
@@ -388,6 +397,7 @@ int sn_small_hash(VALUE value, VALUE *entries) {
     return h.count;
 }
 int sn_true(VALUE value) { return value == Qtrue; }
+int sn_truthy(VALUE value) { return RTEST(value); }
 VALUE sn_fixnum_flag(void) {
     /* Enable direct immediate decoding only for the header encoding Rust
      * understands. Zero disables its hints and retains the public adapters. */
@@ -626,6 +636,8 @@ typedef struct {
     holder *engine;
     report_holder *report;
     int status;
+    native_limits limits;
+    int limits_read;
 } evaluation_call;
 
 static VALUE clear_runtime(VALUE context) {
@@ -634,9 +646,11 @@ static VALUE clear_runtime(VALUE context) {
     st_clear(call->runner->matches);
     call->runner->pointers = Qnil;
     call->runner->messages = Qnil;
-    call->runner->numbers = Qnil;
+    call->runner->frames = Qnil;
     call->runner->limited_number_state = Qnil;
-    st_clear(call->runner->number_frames);
+    call->runner->limited_string_state = Qnil;
+    call->runner->limited_regexps = Qnil;
+    st_clear(call->runner->frame_indices);
     sn_caches_runtime(call->runner->caches, call->runner->matches);
     sn_caches_begin(call->runner->caches);
     return Qnil;
@@ -644,8 +658,10 @@ static VALUE clear_runtime(VALUE context) {
 static void evaluate_native(evaluation_call *call) {
     runner_holder *r = call->runner;
     native_outcome outcome = {0};
-    native_limits limits = {0};
-    if (!NIL_P(call->budget)) limits = read_limits(call->budget);
+    if (!NIL_P(call->budget) && !call->limits_read) {
+        call->limits = read_limits(call->budget);
+        call->limits_read = 1;
+    }
     const void *previous_caches = active_caches;
     active_caches = r->caches;
     if (call->report) {
@@ -654,13 +670,13 @@ static void evaluate_native(evaluation_call *call) {
                 call->instance, &call->status);
         } else {
             call->report->report = sn_diagnose_with_limits(call->engine->engine, r->caches, r->root,
-                call->instance, &call->status, &limits, &outcome);
+                call->instance, &call->status, &call->limits, &outcome);
         }
     } else if (NIL_P(call->budget)) {
         call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance);
     } else {
         call->status = sn_valid_with_limits(call->engine->engine, r->caches, r->root,
-            call->instance, &limits, &outcome);
+            call->instance, &call->limits, &outcome);
     }
     active_caches = previous_caches;
     check_evaluation_status(call->status,
@@ -701,6 +717,15 @@ static VALUE build_message(runner_holder *runner) {
     message_arguments arguments;
     sn_message_arguments(runner->caches, &arguments);
     VALUE keyword = rb_utf8_str_new((const char *)arguments.keyword, arguments.keyword_len);
+    if (arguments.frame != Qundef) {
+        st_data_t index;
+        if (!st_lookup(runner->frame_indices, (st_data_t)arguments.frame, &index)) rb_raise(rb_eRuntimeError, "missing string frame");
+        VALUE frame = rb_ary_entry(runner->frames, (long)index);
+        VALUE result = rb_funcall(frame, rb_intern_const("message"), 2, keyword, arguments.detail ? Qtrue : Qfalse);
+        RB_GC_GUARD(frame);
+        RB_GC_GUARD(keyword);
+        return result;
+    }
     VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
     VALUE native = rb_const_get(schemurai, rb_intern_const("Native"));
     VALUE helper = rb_const_get(native, rb_intern_const("Diagnostics"));
@@ -710,36 +735,58 @@ static VALUE build_message(runner_holder *runner) {
     RB_GC_GUARD(helper);
     return result;
 }
-static VALUE number_step(runner_holder *runner, int operation, VALUE budget) {
-    number_arguments arguments;
-    sn_number_arguments(runner->caches, &arguments);
+static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
+    int string = operation >= SN_RUNTIME_STRING;
+    int selector = operation - (string ? SN_RUNTIME_STRING : SN_RUNTIME_NUMBER);
+    int flags = selector & (string ? 255 : 63);
+    scalar_arguments arguments;
+    sn_scalar_arguments(runner->caches, &arguments);
     st_data_t stored;
     VALUE frame;
-    if (st_lookup(runner->number_frames, (st_data_t)arguments.ordinal, &stored)) {
-        frame = rb_ary_entry(runner->numbers, (long)stored);
+    if (st_lookup(runner->frame_indices, (st_data_t)arguments.ordinal, &stored)) {
+        frame = rb_ary_entry(runner->frames, (long)stored);
     } else {
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
         VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
-        VALUE checks = rb_const_get(internal, rb_intern_const("NumberChecks"));
-        VALUE *number_state = NIL_P(budget) ? &runner->number_state : &runner->limited_number_state;
-        if (NIL_P(*number_state)) {
+        VALUE checks = rb_const_get(internal, rb_intern_const(string ? "StringChecks" : "NumberChecks"));
+        VALUE *state_slot = string
+            ? (NIL_P(budget) ? &runner->string_state : &runner->limited_string_state)
+            : (NIL_P(budget) ? &runner->number_state : &runner->limited_number_state);
+        if (NIL_P(*state_slot)) {
             VALUE state = rb_const_get(checks, rb_intern_const("State"));
-            *number_state = rb_class_new_instance(0, NULL, state);
-            if (!NIL_P(budget)) rb_funcall(*number_state, rb_intern_const("budget="), 1, budget);
+            if (string) {
+                VALUE *regexps = NIL_P(budget) ? &runner->regexps : &runner->limited_regexps;
+                if (NIL_P(*regexps)) *regexps = rb_hash_new();
+                VALUE args[] = {*regexps, budget};
+                *state_slot = rb_class_new_instance(2, args, state);
+            } else {
+                *state_slot = rb_class_new_instance(0, NULL, state);
+                if (!NIL_P(budget)) rb_funcall(*state_slot, rb_intern_const("budget="), 1, budget);
+            }
         }
         VALUE klass = rb_const_get(checks, rb_intern_const("Frame"));
-        VALUE args[] = {arguments.rules, arguments.instance, *number_state};
-        frame = rb_class_new_instance(3, args, klass);
-        if (NIL_P(runner->numbers)) runner->numbers = rb_ary_new();
-        size_t index = RARRAY_LEN(runner->numbers);
-        rb_ary_push(runner->numbers, frame);
+        VALUE args[] = {arguments.rules, arguments.instance, *state_slot, INT2FIX(flags)};
+        frame = rb_class_new_instance(string ? 4 : 3, args, klass);
+        if (NIL_P(runner->frames)) runner->frames = rb_ary_new();
+        size_t index = RARRAY_LEN(runner->frames);
+        rb_ary_push(runner->frames, frame);
         /* Array indices remain valid if compaction moves a frame. */
-        st_insert(runner->number_frames, (st_data_t)arguments.ordinal, (st_data_t)index);
+        st_insert(runner->frame_indices, (st_data_t)arguments.ordinal, (st_data_t)index);
     }
-    int selector = operation - SN_RUNTIME_NUMBER;
-    int step = selector >> 6;
+    int step = selector >> (string ? 8 : 6);
     VALUE result;
-    switch (step) {
+    if (string) {
+        switch (step) {
+            case 0: result = rb_funcall(frame, rb_intern_const("valid?"), 0); break;
+            case 1: result = rb_funcall(frame, rb_intern_const("string?"), 0); break;
+            case 2: result = rb_funcall(frame, rb_intern_const("prepare"), 0); break;
+            default:
+                result = step >= 8
+                    ? rb_funcall(frame, rb_intern_const("invalid_pattern?"), 0)
+                    : rb_funcall(frame, rb_intern_const("check"), 1, INT2FIX(step));
+                break;
+        }
+    } else switch (step) {
         case 0: result = rb_funcall(frame, rb_intern_const("valid?"), 1, INT2FIX(selector & 63)); break;
         case 1: result = rb_funcall(frame, rb_intern_const("numeric?"), 0); break;
         case 2: result = rb_funcall(frame, rb_intern_const("integral?"), 0); break;
@@ -755,10 +802,13 @@ static VALUE call_runtime(VALUE context) {
     evaluation_call *call = operation->call;
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
-    if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    /* String frames check at the VM's method boundaries. Checking after each
+     * yield would let a timeout overtake a later Ruby comparison exception. */
+    int string_stage = operation->kind >= SN_RUNTIME_STRING;
+    if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     if (operation->kind >= SN_RUNTIME_NUMBER) {
-        VALUE result = number_step(r, operation->kind, operation->call->budget);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        VALUE result = scalar_step(r, operation->kind, operation->call->budget);
+        if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
     if (operation->kind >= SN_RUNTIME_TYPE) {
@@ -802,14 +852,15 @@ static VALUE call_runtime(VALUE context) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return Qtrue;
     }
-    if (NIL_P(r->regexps)) r->regexps = rb_hash_new();
-    VALUE regexp = rb_hash_lookup2(r->regexps, source, Qundef);
+    VALUE *regexps = NIL_P(call->budget) ? &r->regexps : &r->limited_regexps;
+    if (NIL_P(*regexps)) *regexps = rb_hash_new();
+    VALUE regexp = rb_hash_lookup2(*regexps, source, Qundef);
     if (regexp == Qundef) {
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
         VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
         VALUE compiler = rb_const_get(internal, rb_intern_const("EcmaRegexp"));
         regexp = rb_funcall(compiler, id_compile, 2, source, call->budget);
-        rb_hash_aset(r->regexps, source, regexp);
+        rb_hash_aset(*regexps, source, regexp);
     }
     VALUE result = rb_funcall(regexp, rb_intern_const("match?"), 1, instance);
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
@@ -824,6 +875,11 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     int verdict;
     if (state) {
         VALUE error = rb_errinfo();
+        if (rb_obj_is_kind_of(error, rb_eRegexpError) && sn_caches_rescue_regexp(call->runner->caches)) {
+            rb_set_errinfo(previous);
+            RB_GC_GUARD(previous);
+            return;
+        }
         if (kind == SN_RUNTIME_JSON) {
             VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
             VALUE parser_error = rb_const_get(json, rb_intern_const("ParserError"));
@@ -869,7 +925,7 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     RB_GC_GUARD(instance);
 }
 /* Each retry starts after Rust has returned and dropped all borrowed views,
- * memo entries and partial reports. Only pure assertion observations are cached.
+ * memo entries and partial reports. Reached scalar methods use occurrence keys.
  * The original Ruby deadline survives every pass and runtime operation. */
 static VALUE retry_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
@@ -881,6 +937,11 @@ static VALUE retry_runtime(VALUE context) {
     evaluate_native(call);
     while (call->status == SN_VERDICT_UNSUPPORTED &&
            sn_caches_pending(call->runner->caches, &source, &instance, &operation)) {
+        if (sn_caches_take_reorder(call->runner->caches)) {
+            sn_caches_observe(call->runner->caches);
+            evaluate_native(call);
+            continue;
+        }
         evaluate_runtime(call, source, instance, operation);
         sn_caches_runtime(call->runner->caches, call->runner->matches);
         evaluate_native(call);
@@ -890,7 +951,7 @@ static VALUE retry_runtime(VALUE context) {
 static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagnostics) {
     runner_holder *r;
     TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    evaluation_call call = {self, instance, budget, r, ready_program(r->owner), NULL, 0};
+    evaluation_call call = {self, instance, budget, r, ready_program(r->owner), NULL, 0, {0}, 0};
     report_holder *h = NULL;
     VALUE owner = Qnil;
     if (diagnostics) {

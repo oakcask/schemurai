@@ -4,6 +4,7 @@ use regex_automata::{
     Input,
     meta::{Cache, Regex},
 };
+use std::collections::HashSet;
 
 // Each validator owns its search caches. Compiled regex/DFA data stays shared.
 #[derive(Default)]
@@ -14,16 +15,20 @@ pub struct Caches {
     deadline: std::cell::Cell<Option<std::time::Instant>>,
     runtime_order: std::cell::Cell<bool>,
     dynamic_calls: std::cell::Cell<bool>,
+    reorder: std::cell::Cell<bool>,
+    pending_rescue: std::cell::Cell<Option<StringError>>,
+    rescued_strings: std::cell::RefCell<HashSet<StringError>>,
     call_cursor: std::cell::Cell<usize>,
     pointers: std::cell::RefCell<Pointers>,
     pending_pointer: std::cell::Cell<Option<usize>>,
     messages: std::cell::RefCell<HashMap<Message, Option<Value>>>,
     pending_message: std::cell::Cell<Option<Message>>,
-    pending_number: std::cell::Cell<Option<NumberArguments>>,
+    pending_scalar: std::cell::Cell<Option<ScalarArguments>>,
 }
+type StringError = (Value, usize, &'static str);
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct NumberArguments {
+pub struct ScalarArguments {
     ordinal: Value,
     rules: Value,
     instance: Value,
@@ -36,6 +41,7 @@ struct Message {
     operand: Value,
     instance: Value,
     detail: usize,
+    frame: Value,
 }
 #[repr(C)]
 pub struct MessageArguments {
@@ -45,6 +51,7 @@ pub struct MessageArguments {
     operand: Value,
     instance: Value,
     detail: usize,
+    frame: Value,
 }
 #[derive(Default)]
 struct Pointers {
@@ -65,6 +72,15 @@ unsafe extern "C" {
     ) -> i32;
 }
 impl Caches {
+    fn reset_pass(&self) {
+        self.pending.set(None);
+        self.call_cursor.set(0);
+        self.pending_pointer.set(None);
+        self.pending_message.set(None);
+        self.pending_scalar.set(None);
+        self.pending_rescue.set(None);
+    }
+
     pub(super) fn runtime_order(&self) -> bool {
         self.runtime_order.get()
     }
@@ -103,7 +119,9 @@ impl Caches {
         self.dynamic_calls.get()
     }
     fn next_call(&self) -> Result<Value, Verdict> {
-        self.dynamic_calls.set(true);
+        if !self.dynamic_calls.replace(true) {
+            self.reorder.set(true);
+        }
         let ordinal = self.call_cursor.get();
         if ordinal > (isize::MAX >> 1) as usize {
             return Err(Unsupported);
@@ -122,15 +140,35 @@ impl Caches {
         rules: Value,
         instance: Value,
         required: i32,
-    ) -> Result<NumberFrame<'_>, Verdict> {
-        Ok(NumberFrame {
+    ) -> Result<ScalarFrame<'_>, Verdict> {
+        self.scalar(rules, instance, required, RUNTIME_NUMBER, 64)
+    }
+    pub(super) fn string(
+        &self,
+        rules: Value,
+        instance: Value,
+        flags: i32,
+    ) -> Result<ScalarFrame<'_>, Verdict> {
+        self.scalar(rules, instance, flags, RUNTIME_STRING, 256)
+    }
+    fn scalar(
+        &self,
+        rules: Value,
+        instance: Value,
+        required: i32,
+        base: i32,
+        stride: i32,
+    ) -> Result<ScalarFrame<'_>, Verdict> {
+        Ok(ScalarFrame {
             caches: self,
-            arguments: NumberArguments {
+            arguments: ScalarArguments {
                 ordinal: self.next_call()?,
                 rules,
                 instance,
             },
             required,
+            base,
+            stride,
         })
     }
     pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
@@ -151,7 +189,46 @@ impl Caches {
             operand: source.1,
             instance,
             detail,
+            frame: unsafe { sn_undefined() },
         };
+        self.message(message)
+    }
+    pub(super) fn string_message(
+        &self,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        frame: Value,
+        ordinal: usize,
+        rescued: bool,
+    ) -> Result<Value, Verdict> {
+        self.message(Message {
+            ordinal,
+            keyword,
+            opcode: source.0,
+            operand: source.1,
+            instance,
+            detail: usize::from(rescued),
+            frame,
+        })
+    }
+    pub(super) fn begin_string_error(
+        &self,
+        frame: Value,
+        ordinal: usize,
+        keyword: &'static str,
+    ) -> bool {
+        let key = (frame, ordinal, keyword);
+        if self.rescued_strings.borrow().contains(&key) {
+            return false;
+        }
+        self.pending_rescue.set(Some(key));
+        true
+    }
+    pub(super) fn end_string_error(&self) {
+        self.pending_rescue.set(None);
+    }
+    fn message(&self, message: Message) -> Result<Value, Verdict> {
         if let Some(value) = self.messages.borrow_mut().entry(message).or_insert(None) {
             return Ok(*value);
         }
@@ -216,20 +293,25 @@ impl Caches {
         Unsupported
     }
 }
-pub(super) struct NumberFrame<'a> {
+pub(super) struct ScalarFrame<'a> {
     caches: &'a Caches,
-    arguments: NumberArguments,
+    arguments: ScalarArguments,
     required: i32,
+    base: i32,
+    stride: i32,
 }
-impl NumberFrame<'_> {
+impl ScalarFrame<'_> {
+    pub(super) fn ordinal(&self) -> Value {
+        self.arguments.ordinal
+    }
     pub(super) fn step(&self, step: i32) -> Verdict {
         let result = self.caches.observe(
             self.arguments.ordinal,
             self.arguments.instance,
-            RUNTIME_NUMBER + step * 64 + self.required,
+            self.base + step * self.stride + self.required,
         );
         if result == Unsupported {
-            self.caches.pending_number.set(Some(self.arguments));
+            self.caches.pending_scalar.set(Some(self.arguments));
         }
         result
     }
@@ -291,7 +373,12 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         .map_or(0, |messages| {
             messages.capacity() * std::mem::size_of::<(Message, Option<Value>)>()
         });
+    let rescued = unsafe { &*caches_ptr }
+        .rescued_strings
+        .try_borrow()
+        .map_or(0, |set| set.capacity() * std::mem::size_of::<StringError>());
     std::mem::size_of::<Caches>()
+        + rescued
         + messages
         + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
@@ -308,38 +395,48 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
 pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *const c_void) {
     let caches = unsafe { &*caches };
     caches.matches.set(matches);
-    caches.pending.set(None);
-    caches.call_cursor.set(0);
-    caches.pending_pointer.set(None);
-    caches.pending_message.set(None);
-    caches.pending_number.set(None);
+    caches.reset_pass();
+}
+/// # Safety
+/// Caches must be idle under the GVL. Capture only a RegexpError raised while
+/// constructing a reached string error; its rescue handler must not catch again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_rescue_regexp(caches: *const Caches) -> i32 {
+    let caches = unsafe { &*caches };
+    if let Some(key) = caches.pending_rescue.take() {
+        caches.rescued_strings.borrow_mut().insert(key);
+        1
+    } else {
+        0
+    }
+}
+/// # Safety
+/// Caches must be live and idle under the GVL. Consume a transition to ordered
+/// scalar calls before C services a request with newly assigned ordinals.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_take_reorder(caches: *const Caches) -> i32 {
+    i32::from(unsafe { &*caches }.reorder.replace(false))
 }
 /// # Safety
 /// Caches must be live and called only between complete validation calls.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
-    caches.pending.set(None);
-    caches.call_cursor.set(0);
-    caches.pending_pointer.set(None);
+    caches.reset_pass();
     caches.deadline.set(None);
     caches.runtime_order.set(false);
     caches.dynamic_calls.set(false);
+    caches.reorder.set(false);
+    caches.rescued_strings.borrow_mut().clear();
     *caches.pointers.borrow_mut() = Pointers::default();
     *caches.messages.borrow_mut() = HashMap::new();
-    caches.pending_message.set(None);
-    caches.pending_number.set(None);
 }
 /// # Safety
 /// Caches must be live and no Rust evaluation may be active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
     let caches = unsafe { &*caches };
-    caches.pending.set(None);
-    caches.call_cursor.set(0);
-    caches.pending_pointer.set(None);
-    caches.pending_message.set(None);
-    caches.pending_number.set(None);
+    caches.reset_pass();
     caches.runtime_order.set(true);
 }
 /// # Safety
@@ -390,10 +487,10 @@ pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
             }
         }
     }
-    if let Some(number) = unsafe { &*caches }.pending_number.get() {
+    if let Some(scalar) = unsafe { &*caches }.pending_scalar.get() {
         unsafe {
-            sn_pin(number.rules);
-            sn_pin(number.instance);
+            sn_pin(scalar.rules);
+            sn_pin(scalar.instance);
         }
     }
     if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
@@ -471,6 +568,7 @@ pub unsafe extern "C" fn sn_message_arguments(
             operand: message.operand,
             instance: message.instance,
             detail: message.detail,
+            frame: message.frame,
         };
     }
 }
@@ -486,11 +584,11 @@ pub unsafe extern "C" fn sn_message_result(caches: *const Caches, result: Value)
 }
 
 /// # Safety
-/// Caches must have a pending number request and output must be writable.
+/// Caches must have a pending scalar request and output must be writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_number_arguments(caches: *const Caches, output: *mut NumberArguments) {
+pub unsafe extern "C" fn sn_scalar_arguments(caches: *const Caches, output: *mut ScalarArguments) {
     unsafe {
-        *output = (&*caches).pending_number.get().unwrap();
+        *output = (&*caches).pending_scalar.get().unwrap();
     }
 }
 

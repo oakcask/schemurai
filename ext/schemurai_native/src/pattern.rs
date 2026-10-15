@@ -102,10 +102,6 @@ impl Pattern {
     // Select the crate matcher once for a homogeneous array. The borrowed
     // Ruby slices are used synchronously; classification and encoding are
     // still checked on every element, including non-string instances.
-    pub(super) fn eval_items(&self, caches: &Caches, required: i32, values: &[Value]) -> Verdict {
-        self.visit_invalid_items(caches, required, values, |_, _| Invalid)
-    }
-
     pub(super) fn visit_invalid_items(
         &self,
         caches: &Caches,
@@ -309,7 +305,11 @@ fn scan_items(
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
         if encoding == -TYPE_UNSUPPORTED {
-            return Unsupported;
+            let result = invalid(index, value);
+            if result != Valid {
+                return result;
+            }
+            continue;
         }
         if encoding < 0 {
             if required != 0 {
