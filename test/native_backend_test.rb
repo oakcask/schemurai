@@ -127,10 +127,17 @@ RSpec.describe "native VALUE execution" do
     Schemurai.const_get(:VM)::Evaluator
   end
 
-  def expect_native_policy_results(schemas, values)
+  def capture_validation(validator, method, value, **options)
+    result = validator.public_send(method, value, **options)
+    [:result, (method == :validate) ? result.errors : result]
+  rescue => error
+    [:error, error.class, error.message]
+  end
+
+  def expect_native_policy_results(schemas, values, **options)
     cases = schemas.map do |schema|
-      vm = Schemurai.compile(schema, backend: :vm)
-      [Schemurai.compile(schema, backend: :native), values.map { |value| [vm.valid?(value), vm.validate(value).errors] }]
+      vm = Schemurai.compile(schema, backend: :vm, **options)
+      [Schemurai.compile(schema, backend: :native, **options), values.map { |value| [vm.valid?(value), vm.validate(value).errors] }]
     end
     GC.verify_compaction_references(double_heap: true, toward: :empty)
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -1661,7 +1668,10 @@ RSpec.describe "native VALUE execution" do
           expect(program.valid?(prefix + [Class.new(String).new(valid)])).to be_nil
           expect(program.diagnostics(prefix + [{Object.new => 1}])).to be_nil
           if rule["contentEncoding"].nil?
-            expect(program.valid?(prefix + [valid.encode(Encoding::UTF_16LE)])).to be_nil
+            transcoded = prefix + [valid.encode(Encoding::UTF_16LE)]
+            expect(program.valid?(transcoded)).to be(true)
+            expect(program.diagnostics(transcoded)).to eq([])
+            values << transcoded
           end
           [native, values.map { |value| [value, vm.valid?(value), vm.validate(value).errors] }]
         end
@@ -1891,14 +1901,82 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "preserves JSON transcoding and invalid-encoding exceptions" do
-    schema = {"contentMediaType" => "application/json"}
-    vm = Schemurai.compile(schema, content: true, backend: :vm)
+  it "checks transcoded JSON content without VM execution" do
+    rule = {"contentMediaType" => "application/json"}
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    schemas = [rule, {"items" => rule}, {"properties" => {"value" => rule}},
+      dialect.merge("anyOf" => [{"items" => rule}], "unevaluatedItems" => false)]
+    encodings = [Encoding::UTF_16LE, Encoding::UTF_16BE, Encoding::UTF_32LE, Encoding::UTF_32BE, Encoding::ISO_8859_1, Encoding::Shift_JIS]
+    values = encodings.flat_map { |encoding| ['{"a":1}', "[false,null,1]", "false", "null", "bad"].map { |value| value.encode(encoding) } }
+    values += ['"é"'.encode(Encoding::ISO_8859_1), '"日本"'.encode(Encoding::Shift_JIS)]
+    inputs = values + values.map { |value| [value, value] } + values.map { |value| {"value" => value} }
+    expect_native_policy_results(schemas, inputs, content: true)
+  end
+
+  it "preserves JSON transcoding exceptions and bounded runtime ordering" do # rubocop:disable RSpec/ExampleLength
+    rule = {"contentMediaType" => "application/json"}
+    properties = {"value" => rule, "count" => {"type" => "integer"}}
+    schemas = [rule, {"items" => rule}, {"properties" => properties}]
+    broken = "\"\xFF\"".dup.force_encoding(Encoding::US_ASCII)
+    values = [broken, "\x00".dup.force_encoding(Encoding::UTF_16LE), "[]".encode(Encoding::UTF_16LE),
+      [broken], ["bad".encode(Encoding::UTF_16LE), broken], {"count" => "bad", "value" => broken}, {"value" => broken, "count" => "bad"}]
+    limits = [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]
+    combinations = values.product([:valid?, :validate], limits)
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, content: true, backend: :vm)
+      [Schemurai.compile(schema, content: true, backend: :native), combinations.map do |value, method, options|
+        capture_validation(vm, method, value, **options)
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      combinations.zip(expected).each do |(value, method, options), result|
+        expect(capture_validation(native, method, value, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "roots JSON runtime observations and rechecks mutable content" do # rubocop:disable RSpec/ExampleLength
+    schema = {"properties" => {"pattern" => {"pattern" => "(?=x)x"}, "json" => {"contentMediaType" => "application/json"}}}
     native = Schemurai.compile(schema, content: true, backend: :native)
-    value = "{\"a\":1}".encode(Encoding::UTF_16LE)
-    expect(native.valid?(value)).to eq(vm.valid?(value))
-    invalid = "\"\xFF\"".dup.force_encoding(Encoding::US_ASCII)
-    expect { native.valid?(invalid) }.to raise_error(Encoding::InvalidByteSequenceError)
+    value = {"pattern" => "x", "json" => "[1]".encode(Encoding::UTF_16LE)}
+    parses = 0
+    allow(JSON).to receive(:parse).and_wrap_original do |original, *args|
+      parses += 1
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      original.call(*args)
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(native.valid?(value)).to be(true)
+    expect(native.validate(value).valid?).to be(true)
+    value["json"].replace("bad".encode(Encoding::UTF_16LE))
+    expect(native.valid?(value)).to be(false)
+    expect(native.validate(value).errors.map(&:keyword)).to eq(["contentMediaType"])
+    value["json"].replace("null".encode(Encoding::UTF_16LE))
+    expect(native.valid?(value)).to be(true)
+    expect(parses).to eq(5)
+    annotation = Schemurai.compile(schema, backend: :native)
+    expect(annotation.valid?(value)).to be(true)
+    expect(parses).to eq(5)
+  end
+
+  it "keeps JSON runtime observations private to each Ractor" do
+    schema = {"items" => {"contentMediaType" => "application/json"}}
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:json" => schema}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:json", content: true)
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        valid = "[1]".encode(Encoding::UTF_16LE)
+        invalid = "bad".encode(Encoding::UTF_16LE)
+        GC.start
+        [runner.valid?([valid]), runner.valid?([invalid]), runner.diagnostics([invalid]).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, ["contentMediaType"]]) }
   end
 
   it "isolates streamed content assertions in Ractors using a shared registry" do # rubocop:disable RSpec/ExampleLength
@@ -3388,12 +3466,7 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "preserves Ruby regexp encoding errors without VM execution" do # rubocop:disable RSpec/ExampleLength
-    capture = lambda do |validator, method, value, **options|
-      result = validator.public_send(method, value, **options)
-      [:result, (method == :validate) ? result.errors : result]
-    rescue => error
-      [:error, error.class, error.message]
-    end
+    capture = method(:capture_validation)
     values = ["aa".b, "a".encode(Encoding::UTF_16LE), "\xFF".dup.force_encoding(Encoding::UTF_8),
       "\xFF".dup.force_encoding(Encoding::US_ASCII), "é".encode(Encoding::ISO_8859_1)]
     schemas = ["^a+$", "(?=a)a", "(?=é)é"].flat_map { |pattern| [{"pattern" => pattern}, {"items" => {"pattern" => pattern}}] }
@@ -3418,12 +3491,7 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "replays runtime matches in input order before exposing regexp exceptions" do # rubocop:disable RSpec/ExampleLength
-    capture = lambda do |validator, method, value, **options|
-      result = validator.public_send(method, value, **options)
-      [:result, (method == :validate) ? result.errors : result]
-    rescue => error
-      [:error, error.class, error.message]
-    end
+    capture = method(:capture_validation)
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     properties = {"p1" => {"pattern" => "(?=x)"}, "p2" => {"type" => "integer"}}
     rules = [{"properties" => properties},
@@ -3502,15 +3570,20 @@ RSpec.describe "native VALUE execution" do
     expect(compiles).to eq(2)
   end
 
-  it "retains the native duration deadline across Ruby regexp retries" do
-    values = Array.new(20_000) { |i| "a#{i}" }
-    native = Schemurai.compile({"items" => {"pattern" => "(?=a)a"}}, backend: :native)
+  it "retains the native duration deadline across Ruby assertion retries" do
+    cases = [[{"pattern" => "(?=a)a"}, Array.new(20_000) { |i| "a#{i}" }, "a"],
+      [{"contentMediaType" => "application/json"}, Array.new(20_000) { |i| "[#{i}]".encode(Encoding::UTF_16LE) }, "[]".encode(Encoding::UTF_16LE)]]
     allow(Process).to receive(:clock_gettime).and_call_original
     allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
     allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
-    expect { native.valid?(values, timeout: 0.005) }.to raise_error(Schemurai::LimitExceeded) { |error| expect(error.limit).to eq(:timeout) }
-    expect(native.valid?(["a"], timeout: 10)).to be(true)
-    expect(native.validate(["a"], timeout: 10).errors).to be_empty
+    cases.each do |rule, values, valid|
+      native = Schemurai.compile({"items" => rule}, content: true, backend: :native)
+      [:valid?, :validate].each do |method|
+        expect { native.public_send(method, values, timeout: 0.005) }.to raise_error(Schemurai::LimitExceeded) { |error| expect(error.limit).to eq(:timeout) }
+      end
+      expect(native.valid?([valid], timeout: 10)).to be(true)
+      expect(native.validate([valid], timeout: 10).errors).to be_empty
+    end
   end
 
   it "keeps libruby regexps and observation tables private to each Ractor" do
