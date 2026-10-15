@@ -120,6 +120,10 @@ enum Verdict {
 }
 use Verdict::*;
 const MAX_EVALUATION_DEPTH: usize = 256;
+// Control-flow instructions can forward an instance without examining its kind.
+// No real classified Ruby value has this kind.
+const TYPE_UNCHECKED: i32 = 0;
+type InstanceKind = std::cell::Cell<i32>;
 const MAX_UNIQUE_INDEX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 enum Op {
@@ -659,6 +663,7 @@ pub struct Engine {
     pattern_cache_count: usize,
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
+    needs_kind: Vec<bool>,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -837,6 +842,7 @@ impl Engine {
         self.nodes.push(vec![]);
         self.error_operands.push(vec![]);
         self.tracks.push(false);
+        self.needs_kind.push(false);
         self.metadata.push(scope::Metadata::default());
         let code = self.field(program, b"code\0")?;
         let flags = unsafe { sn_integer(sn_entry(code, 0)) };
@@ -1227,6 +1233,24 @@ impl Engine {
             };
             ops.push(op);
         }
+        self.needs_kind[index] = ops.iter().any(|op| match op {
+            Op::Type(_)
+            | Op::Const(_)
+            | Op::Enum(_)
+            | Op::Number(..)
+            | Op::String(..)
+            | Op::Array(..)
+            | Op::Object(..) => true,
+            Op::Unsupported
+            | Op::Boolean(_)
+            | Op::UnresolvedRef(_)
+            | Op::Ref(_)
+            | Op::All(_)
+            | Op::Any(_)
+            | Op::One(_)
+            | Op::Not(_)
+            | Op::Conditional(..) => false,
+        });
         self.nodes[index] = ops;
         self.error_operands[index] = error_operands;
         Ok(index)
@@ -1258,7 +1282,7 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        known_kind: Option<i32>,
+        known_kind: Option<&InstanceKind>,
     ) -> Verdict {
         if !self.budget.checkpoint() {
             return Unsupported;
@@ -1288,7 +1312,7 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        known_kind: Option<i32>,
+        known_kind: Option<&InstanceKind>,
     ) -> Verdict {
         let frame = scope::ScopeFrame {
             resource: self.metadata[node].resource,
@@ -1316,13 +1340,16 @@ impl Execution<'_> {
         {
             return rules.eval_guarded(self.caches, *required, value);
         }
-        let kind = known_kind.unwrap_or_else(|| {
-            if value & self.fixnum_flag != 0 {
-                TYPE_INTEGRAL_NUMBER
-            } else {
-                self.instance_kind(node, value)
-            }
-        });
+        let local_kind = InstanceKind::new(TYPE_UNCHECKED);
+        let kind_state = known_kind.unwrap_or(&local_kind);
+        let kind = if known_kind.is_some() {
+            // A proof shared with sibling branches must guard every Hash key.
+            self.diagnostic_kind(node, value, kind_state)
+        } else {
+            let kind = self.instance_kind(node, value);
+            kind_state.set(kind);
+            kind
+        };
         if kind == TYPE_UNSUPPORTED {
             return Unsupported;
         }
@@ -1348,7 +1375,7 @@ impl Execution<'_> {
                                 active: Some(&frame),
                                 ..active
                             },
-                            Some(kind),
+                            Some(kind_state),
                         )
                     }
                 }
@@ -1358,7 +1385,8 @@ impl Execution<'_> {
                         if !self.budget.checkpoint() {
                             return Unsupported;
                         }
-                        outcome = self.eval_with_kind(n, value, depth + 1, active, Some(kind));
+                        outcome =
+                            self.eval_with_kind(n, value, depth + 1, active, Some(kind_state));
                         if outcome != Valid {
                             break;
                         }
@@ -1374,23 +1402,27 @@ impl Execution<'_> {
                     match evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Validity(branch_kind),
-                        |child| self.eval_with_kind(child, value, depth + 1, active, Some(kind)),
+                        |child| {
+                            self.eval_with_kind(child, value, depth + 1, active, Some(kind_state))
+                        },
                     ) {
                         Ok(result) => verdict(branch_kind.accepts(result.matches)),
                         Err(status) => status,
                     }
                 }
-                Op::Not(n) => match self.eval_with_kind(*n, value, depth + 1, active, Some(kind)) {
-                    Valid => Invalid,
-                    Invalid => Valid,
-                    Unsupported => Unsupported,
-                },
+                Op::Not(n) => {
+                    match self.eval_with_kind(*n, value, depth + 1, active, Some(kind_state)) {
+                        Valid => Invalid,
+                        Invalid => Valid,
+                        Unsupported => Unsupported,
+                    }
+                }
                 Op::Conditional(c, yes, no) => {
-                    match self.eval_with_kind(*c, value, depth + 1, active, Some(kind)) {
+                    match self.eval_with_kind(*c, value, depth + 1, active, Some(kind_state)) {
                         Unsupported => Unsupported,
                         result => match if result == Valid { yes } else { no } {
                             Some(n) => {
-                                self.eval_with_kind(*n, value, depth + 1, active, Some(kind))
+                                self.eval_with_kind(*n, value, depth + 1, active, Some(kind_state))
                             }
                             None => Valid,
                         },
@@ -1963,11 +1995,33 @@ impl Execution<'_> {
         decode(unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) })
     }
     fn instance_kind(&self, node: usize, value: Value) -> i32 {
+        if value & self.fixnum_flag != 0 {
+            return TYPE_INTEGRAL_NUMBER;
+        }
+        if !self.needs_kind[node] {
+            return TYPE_UNCHECKED;
+        }
         if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)] if rules.record.is_some()) {
             unsafe { sn_shallow_kind(value) }
         } else {
             unsafe { sn_kind(value) }
         }
+    }
+    // Diagnostic/trial paths require a full Hash-key guard. A known parent kind
+    // remains reusable, while control-flow-only children need no classification.
+    fn diagnostic_kind(&self, node: usize, value: Value, known: &InstanceKind) -> i32 {
+        if known.get() != TYPE_UNCHECKED {
+            return known.get();
+        }
+        let kind = if value & self.fixnum_flag != 0 {
+            TYPE_INTEGRAL_NUMBER
+        } else if !self.needs_kind[node] {
+            TYPE_UNCHECKED
+        } else {
+            unsafe { sn_kind(value) }
+        };
+        known.set(kind);
+        kind
     }
     fn record_value(
         &self,
@@ -1998,11 +2052,7 @@ impl Execution<'_> {
                 | Op::Const(_)
                 | Op::Enum(_)),
             ] if depth <= MAX_EVALUATION_DEPTH => {
-                let kind = if value & self.fixnum_flag != 0 {
-                    TYPE_INTEGRAL_NUMBER
-                } else {
-                    unsafe { sn_kind(value) }
-                };
+                let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
                 if kind == TYPE_UNSUPPORTED {
                     Unsupported
                 } else {
@@ -3314,6 +3364,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
+    let kinds = unsafe { &*std::ptr::addr_of!((*engine).needs_kind) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3322,7 +3373,8 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let projection = unsafe { &*std::ptr::addr_of!((*engine).memo_scope_projection) };
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
-        + (contextual.capacity()
+        + (kinds.capacity()
+            + contextual.capacity()
             + guarded.capacity()
             + sources.capacity()
             + same.capacity()

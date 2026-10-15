@@ -150,6 +150,100 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "evaluates input-independent schemas and boolean children without VM execution" do # rubocop:disable RSpec/ExampleLength
+    special = Class.new do
+      def is_a?(*) = raise("instance type queried")
+      def class = raise("instance class queried")
+      def hash = raise("instance hash queried")
+      def ==(*) = raise("instance equality queried")
+      def inspect = raise("instance inspected")
+    end.new
+    cycle = []
+    cycle << cycle
+    hash = {Object.new => special}
+    hash["cycle"] = hash
+    values = [BasicObject.new, special, Class.new(String).new("value"), Class.new(Array).new,
+      Class.new(Hash).new, Rational(1, 2), Complex(1, 2), :value, cycle, hash, nil, 1]
+    rules = [true, false, {}, {"not" => false}, {"not" => true}, {"allOf" => [true, false]},
+      {"anyOf" => [false, true]}, {"oneOf" => [true, true]}, {"if" => false, "then" => false, "else" => true},
+      {"$defs" => {"value" => false}, "$ref" => "#/$defs/value"}, {"$ref" => "#/missing"},
+      {"$defs" => {"value" => {"$ref" => "#/$defs/value"}}, "$ref" => "#/$defs/value"},
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"value" => {"$dynamicAnchor" => "value", "allOf" => [false]}},
+       "$dynamicRef" => "#value"}]
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value]] },
+      ->(rule, value) { [{"properties" => {"x" => rule}}, {"x" => value}] },
+      ->(rule, value) { [{"patternProperties" => {"^x$" => rule}}, {"x" => value}] },
+      ->(rule, value) { [{"contains" => rule}, [value]] }]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}])
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, inputs|
+      inputs.each do |input, method, options, expected|
+        expect(capture_validation(native, method, input, **options)).to eq(expected)
+      end
+    end
+  end
+
+  it "classifies only reached instance-dependent branches" do # rubocop:disable RSpec/ExampleLength
+    value = Class.new do
+      def is_a?(*) = raise("reached type query")
+    end.new
+    typed = {"type" => "integer"}
+    cases = [[{"anyOf" => [true, typed]}, true], [{"allOf" => [false, typed]}, false],
+      [{"if" => true, "then" => false, "else" => typed}, false],
+      [{"if" => false, "then" => typed, "else" => true}, true],
+      [{"oneOf" => [true, true, typed]}, false], [{"allOf" => [true, typed]}, nil]].map do |schema, verdict|
+      vm = Schemurai.compile(schema, backend: :vm)
+      native = Schemurai.compile(schema, backend: :native)
+      [native, verdict, [:valid?, :validate].map { |method| capture_validation(vm, method, value) }]
+    end
+    cases.each do |native, verdict, expected|
+      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      expect(program.valid?(value)).to eq(verdict)
+      [:valid?, :validate].zip(expected).each do |method, result|
+        expect(capture_validation(native, method, value)).to eq(result)
+        expect(capture_validation(native, method, value, timeout: 10)).to eq(result)
+      end
+    end
+  end
+
+  it "guards every Hash key before sharing a record kind with sibling branches" do
+    schema = {"anyOf" => [{"maxProperties" => 0, "properties" => {"x" => true}},
+      {"required" => ["x"], "properties" => 9.times.to_h { |i| ["p#{i}", true] }}]}
+    value = {"x" => 1, :foreign => 2}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(runner.valid?(value)).to be_nil
+    expect(native.valid?(value)).to eq(vm.valid?(value))
+    expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+  end
+
+  it "shares input-independent native programs between Ractor runners" do
+    schema = {"$defs" => {"value" => false}, "allOf" => [{"$ref" => "#/$defs/value"}, {"not" => true}]}
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:boolean" => schema}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:boolean")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        value = BasicObject.new
+        GC.start
+        [runner.valid?(value), runner.diagnostics(value).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[falseSchema not]]) }
+  end
+
   it "validates plain Object and Symbol scalar types without VM execution" do
     object = Object.new
     object.instance_variable_set(:@cycle, object)

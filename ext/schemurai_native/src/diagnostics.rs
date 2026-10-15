@@ -182,8 +182,9 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        kind: i32,
+        kind_state: &InstanceKind,
     ) -> Tracked {
+        let kind = kind_state.get();
         if depth > MAX_EVALUATION_DEPTH || kind == TYPE_UNSUPPORTED {
             return Tracked::new(Unsupported);
         }
@@ -194,7 +195,7 @@ impl Execution<'_> {
             silent: true,
             ..Report::default()
         };
-        self.collect_uncached::<true>(&mut report, node, value, depth, active, kind)
+        self.collect_uncached::<true>(&mut report, node, value, depth, active, kind_state)
             .unwrap_or_else(Tracked::new)
     }
     fn collect<const ANNOTATIONS: bool>(
@@ -211,11 +212,12 @@ impl Execution<'_> {
         if !self.budget.checkpoint() {
             return Err(Unsupported);
         }
-        let kind = unsafe { sn_kind(value) };
+        let kind_state = InstanceKind::new(TYPE_UNCHECKED);
+        let kind = self.diagnostic_kind(node, value, &kind_state);
         if kind == TYPE_UNSUPPORTED {
             return Err(Unsupported);
         }
-        self.collect_kind::<ANNOTATIONS>(report, node, value, depth, active, kind)
+        self.collect_kind::<ANNOTATIONS>(report, node, value, depth, active, &kind_state)
     }
     fn collect_kind<const ANNOTATIONS: bool>(
         &self,
@@ -224,10 +226,14 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        kind: i32,
+        kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
+        let kind = self.diagnostic_kind(node, value, kind_state);
+        if kind == TYPE_UNSUPPORTED {
+            return Err(Unsupported);
+        }
         if report.silent {
-            let result = self.eval_tracked_kind(node, value, depth, active, kind);
+            let result = self.eval_tracked_kind(node, value, depth, active, kind_state);
             if result.status == Unsupported {
                 return Err(Unsupported);
             }
@@ -251,7 +257,8 @@ impl Execution<'_> {
         {
             return Ok(result);
         }
-        let result = self.collect_uncached::<ANNOTATIONS>(report, node, value, depth, active, kind);
+        let result =
+            self.collect_uncached::<ANNOTATIONS>(report, node, value, depth, active, kind_state);
         if let Some(key) = key
             && let Ok(coverage) = &result
             && coverage.status == Valid
@@ -268,8 +275,9 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        kind: i32,
+        kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
+        let kind = kind_state.get();
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
@@ -818,9 +826,23 @@ impl Execution<'_> {
                         }
                         let result = report.scoped(&format!("allOf/{index}"), None, |r| {
                             if tracked {
-                                self.collect_kind::<true>(r, child, value, depth + 1, active, kind)
+                                self.collect_kind::<true>(
+                                    r,
+                                    child,
+                                    value,
+                                    depth + 1,
+                                    active,
+                                    kind_state,
+                                )
                             } else {
-                                self.collect_kind::<false>(r, child, value, depth + 1, active, kind)
+                                self.collect_kind::<false>(
+                                    r,
+                                    child,
+                                    value,
+                                    depth + 1,
+                                    active,
+                                    kind_state,
+                                )
                             }
                         })?;
                         if tracked {
@@ -842,7 +864,7 @@ impl Execution<'_> {
                     let result = evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Complete,
-                        |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
+                        |child| self.eval_tracked_kind(child, value, depth + 1, active, kind_state),
                     )?;
                     if !branch_kind.accepts(result.matches) {
                         report.add(
@@ -858,7 +880,7 @@ impl Execution<'_> {
                 }
                 Op::Not(child) => {
                     match self
-                        .eval_tracked_kind(*child, value, depth + 1, active, kind)
+                        .eval_tracked_kind(*child, value, depth + 1, active, kind_state)
                         .status
                     {
                         Unsupported => return Err(Unsupported),
@@ -868,7 +890,7 @@ impl Execution<'_> {
                 }
                 Op::Conditional(condition, yes, no) => {
                     let condition =
-                        self.eval_tracked_kind(*condition, value, depth + 1, active, kind);
+                        self.eval_tracked_kind(*condition, value, depth + 1, active, kind_state);
                     let mut coverage = Tracked::new(Valid);
                     let (child, segment) = match condition.status {
                         Unsupported => return Err(Unsupported),
@@ -883,7 +905,14 @@ impl Execution<'_> {
                     if let Some(child) = child {
                         let result = report.scoped(segment, None, |r| {
                             if tracked {
-                                self.collect_kind::<true>(r, *child, value, depth + 1, active, kind)
+                                self.collect_kind::<true>(
+                                    r,
+                                    *child,
+                                    value,
+                                    depth + 1,
+                                    active,
+                                    kind_state,
+                                )
                             } else {
                                 self.collect_kind::<false>(
                                     r,
@@ -891,7 +920,7 @@ impl Execution<'_> {
                                     value,
                                     depth + 1,
                                     active,
-                                    kind,
+                                    kind_state,
                                 )
                             }
                         })?;
@@ -920,9 +949,23 @@ impl Execution<'_> {
                     };
                     let result = report.scoped(keyword, None, |r| {
                         if tracked {
-                            self.collect_kind::<true>(r, target, value, depth + 1, active, kind)
+                            self.collect_kind::<true>(
+                                r,
+                                target,
+                                value,
+                                depth + 1,
+                                active,
+                                kind_state,
+                            )
                         } else {
-                            self.collect_kind::<false>(r, target, value, depth + 1, active, kind)
+                            self.collect_kind::<false>(
+                                r,
+                                target,
+                                value,
+                                depth + 1,
+                                active,
+                                kind_state,
+                            )
                         }
                     })?;
                     if tracked {
@@ -976,11 +1019,7 @@ impl Execution<'_> {
             [op @ (Op::Type(_) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_))]
                 if depth <= MAX_EVALUATION_DEPTH =>
             {
-                let kind = if value & self.fixnum_flag != 0 {
-                    TYPE_INTEGRAL_NUMBER
-                } else {
-                    unsafe { sn_kind(value) }
-                };
+                let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
                 if kind == TYPE_UNSUPPORTED {
                     Unsupported
                 } else {
