@@ -1,5 +1,6 @@
-//! Evaluated locations stay in native buffers, scoped to one instance location.
-//! Keys remain borrowed VALUEs; no Ruby objects or instance trees are allocated.
+//! Ordinary locations use native buffers; runtime locations retain opaque Ruby
+//! buffers without borrowing their sets. This module never allocates Ruby objects
+//! or decodes instance trees.
 use super::*;
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -23,6 +24,23 @@ impl Hash for JsonKey {
     }
 }
 pub(super) type KeySet = HashSet<JsonKey, BuildHasherDefault<BucketHasher>>;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RuntimeLocations {
+    pub(crate) buffer: Value,
+    pub(crate) properties: Value,
+    pub(crate) items: Value,
+}
+impl RuntimeLocations {
+    pub(crate) fn mark(&self) {
+        for value in [self.buffer, self.properties, self.items] {
+            unsafe {
+                sn_pin(value);
+            }
+        }
+    }
+}
 
 // An owned export snapshot can be traversed by C across Ruby allocations.
 pub struct PropertyLocations {
@@ -162,7 +180,7 @@ impl PropertyBits {
 pub(super) struct Tracked {
     pub status: Verdict,
     properties: KeySet,
-    runtime_properties: Option<(Value, usize)>,
+    runtime: Option<RuntimeLocations>,
     known_properties: PropertyBits,
     items: Vec<u64>,
 }
@@ -179,10 +197,8 @@ impl Tracked {
             }
     }
     pub(super) fn mark(&self) {
-        if let Some((set, _)) = self.runtime_properties {
-            unsafe {
-                sn_pin(set);
-            }
+        if let Some(runtime) = self.runtime {
+            runtime.mark();
         }
         for key in &self.properties {
             unsafe {
@@ -192,7 +208,7 @@ impl Tracked {
     }
     // Bound retained annotation slots independently of the number of results.
     pub(super) fn memo_slots(&self) -> usize {
-        self.runtime_properties.map_or(0, |(_, count)| count)
+        self.runtime.map_or(0, |_| 3)
             + self.properties.capacity()
             + self.items.capacity()
             + match &self.known_properties.words {
@@ -205,7 +221,7 @@ impl Tracked {
         Self {
             status,
             properties: KeySet::default(),
-            runtime_properties: None,
+            runtime: None,
             known_properties: PropertyBits::default(),
             items: vec![],
         }
@@ -229,9 +245,13 @@ impl Tracked {
         self.known_properties.contains(index)
     }
     pub(super) fn property_count(&self) -> usize {
-        self.runtime_properties.map_or(0, |(_, count)| count)
-            + self.properties.len()
-            + self.known_properties.count
+        // Runtime sets can be reset or changed by retained blocks. Returning
+        // zero disables native count-based scan elision; Ruby reads live sets.
+        if self.runtime.is_some() {
+            0
+        } else {
+            self.properties.len() + self.known_properties.count
+        }
     }
     pub(super) fn item_count(&self) -> usize {
         self.items
@@ -240,7 +260,7 @@ impl Tracked {
             .sum()
     }
     pub(super) fn merge(&mut self, other: Self) -> Verdict {
-        debug_assert!(self.runtime_properties.is_none() && other.runtime_properties.is_none());
+        debug_assert!(self.runtime.is_none() && other.runtime.is_none());
         if other.status != Valid {
             return other.status;
         }
@@ -271,14 +291,34 @@ impl Tracked {
         Ok(())
     }
     pub(super) fn has_runtime_properties(&self) -> bool {
-        self.runtime_properties.is_some()
+        self.runtime.is_some()
+    }
+    pub(super) fn runtime_locations(&self) -> Option<RuntimeLocations> {
+        self.runtime
     }
     pub(super) fn properties_set(&self) -> Option<Value> {
-        self.runtime_properties.map(|(set, _)| set)
+        self.runtime.map(|runtime| runtime.properties)
     }
-    pub(super) fn set_properties(&mut self, set: Value, count: usize) {
-        debug_assert!(self.properties.is_empty() && self.known_properties.count == 0);
-        self.runtime_properties = (count != 0).then_some((set, count));
+    pub(super) fn items_set(&self) -> Option<Value> {
+        self.runtime.map(|runtime| runtime.items)
+    }
+    pub(super) fn set_runtime(&mut self, runtime: RuntimeLocations) {
+        debug_assert!(
+            self.properties.is_empty() && self.known_properties.count == 0 && self.items.is_empty()
+        );
+        self.runtime = Some(runtime);
+    }
+    pub(super) fn native_items(&self) -> Vec<usize> {
+        let mut result = vec![];
+        for (word, &bits) in self.items.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                result.push(word * 64 + bit);
+                bits &= bits - 1;
+            }
+        }
+        result
     }
     pub(super) fn native_properties(&self, engine: &Engine) -> Vec<Value> {
         let mut known: Vec<_> = engine
@@ -301,23 +341,16 @@ impl Tracked {
         if !self.has_runtime_properties() && !other.has_runtime_properties() {
             return self.merge(other);
         }
-        if self.property_count() == 0 && self.item_count() == 0 {
-            *self = other;
-            return Valid;
-        }
-        if other.property_count() != 0 {
-            let Ok((set, count)) =
-                execution
-                    .caches
-                    .merge_properties(execution.engine, self, &other)
-            else {
-                return Unsupported;
-            };
-            self.properties.clear();
-            self.known_properties = PropertyBits::default();
-            self.runtime_properties = Some((set, count));
-        }
-        merge_bits(&mut self.items, other.items);
+        let Ok(runtime) = execution
+            .caches
+            .merge_properties(execution.engine, self, &other)
+        else {
+            return Unsupported;
+        };
+        self.properties.clear();
+        self.known_properties = PropertyBits::default();
+        self.items.clear();
+        self.runtime = Some(runtime);
         Valid
     }
     pub(super) fn property(&mut self, engine: &Engine, value: Value) {

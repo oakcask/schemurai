@@ -29,7 +29,7 @@ module Schemurai
         @number_state = Internal::NumberChecks::State.new
         @regexps = {}
         @scope_state = []
-        @report_state = []
+        @report_state = [nil, Internal::EvaluationPool.new]
         @reference_state = []
         @active_state = {}.compare_by_identity
         @program = @compiled.runner(root)

@@ -3582,9 +3582,7 @@ pub unsafe extern "C" fn sn_valid(
         let e = unsafe { &*engine };
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
-        caches.allow_callbacks(e.scalar_callbacks_safe(root));
-        caches.allow_continuations(e.native_continuations_safe(root));
-        caches.allow_report_continuations(e.report_continuations_safe(root));
+        caches.admit(e, root);
         let execution = Execution {
             engine: e,
             caches,
@@ -3613,9 +3611,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let e = unsafe { &*engine };
-        caches.allow_callbacks(e.scalar_callbacks_safe(root));
-        caches.allow_continuations(e.native_continuations_safe(root));
-        caches.allow_report_continuations(e.report_continuations_safe(root));
+        caches.admit(e, root);
         let execution = Execution {
             engine: unsafe { &*engine },
             caches,

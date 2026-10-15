@@ -1063,17 +1063,24 @@ can clear a collection; replay preserves that reset and the VM's path cleanup
 behavior. Trial contexts restore their caller's collection, and bounded public
 invocations keep independent state. Interrupted child and Array frames transfer
 already collected errors when a Ruby caller rescues their exception.
-Evaluated properties from Ruby Object traversal remain immutable Ruby Set
-snapshots. Native branch merges request Ruby Set merging after Rust unwinds,
-retaining key hash/equality semantics while ordinary native property bitsets
-keep their existing fast path. Owned export snapshots keep native property
-handles and opaque sets rooted across Ruby allocation and compaction. Retained
-Object iterator blocks follow the active collection while preserving their
-original program and budget owner. Silent failures still affect the current
-trial's verdict even when a Ruby caller rescues a retained block's nonlocal
-return or a later primitive exception. Silent children share the active failure
-collection; only explicit trials isolate it. Sharing reused evaluated-location
-buffers with these retained blocks remains under validation.
+Ruby container traversal shares the VM's data-only evaluation pool. A buffer
+retains both its property and item Sets, including when an older Object block
+runs after the same slot has been reused by an Array. Native results retain
+opaque buffer handles; merges call the shared buffer's merge method after Rust
+unwinds, preserving receiver identity and key hash/equality behavior. Native
+code never borrows those Ruby sets or caches their cardinality for scan elision.
+Ordinary invocations without exposed Ruby buffers keep their native location
+bitsets. Once a validator has used the shared pool, later public invocations
+start with ordered container traversal so buffer acquisition order stays the
+same. Bounded invocations own independent pools. Owned export snapshots root
+native property handles across Ruby allocation and compaction.
+Retained Object iterator blocks follow the active collection while preserving
+their original program and budget owner. Silent failures still affect the
+current trial's verdict even when a Ruby caller rescues a retained block's
+nonlocal return or a later primitive exception. Silent children share the active
+failure collection; only explicit trials isolate it. Validity and diagnostic
+entrypoints share graph admission, including validity children reached from
+silent diagnostic trials beyond the native physical stack bound.
 The remaining VM compatibility evaluator exposes only its active collection
 state to retained native blocks. Those blocks execute native programs and append
 their completed errors/counts to that collection without interpreting VM code.

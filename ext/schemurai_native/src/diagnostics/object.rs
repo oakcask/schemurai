@@ -66,20 +66,22 @@ pub unsafe extern "C" fn sn_object_report_error(
     )))
 }
 /// # Safety
-/// Report is exclusively borrowed, C roots set in immutable completed roots,
-/// and count is the size of that immutable Ruby Set. The collector guards mutation.
+/// Report is exclusively borrowed and locations is readable. C roots all Ruby
+/// handles before entering this mutation and the collector guards marking.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_object_report_finish(
+pub unsafe extern "C" fn sn_container_report_finish(
     report: *mut Report,
     valid: i32,
-    set: Value,
-    count: usize,
+    locations: *const tracking::RuntimeLocations,
 ) {
     let report = unsafe { &mut *report };
     report.container_prior = None;
     let mut evaluation = Tracked::new(if valid != 0 { Valid } else { Invalid });
     if valid != 0 {
-        evaluation.set_properties(set, count);
+        let locations = unsafe { *locations };
+        if locations.buffer != unsafe { sn_nil() } {
+            evaluation.set_runtime(locations);
+        }
     } else {
         report.failed = true;
     }
@@ -176,19 +178,32 @@ mod tests {
     #[test]
     fn child_adoption_exports_child_properties_without_overwriting_parent_locations() {
         let mut parent = Report::default().container_continuation(true, &Tracked::new(Valid));
-        parent.evaluation.as_mut().unwrap().set_properties(11, 2);
+        parent
+            .evaluation
+            .as_mut()
+            .unwrap()
+            .set_runtime(tracking::RuntimeLocations {
+                buffer: 11,
+                properties: 13,
+                items: 15,
+            });
         let mut completed = parent.continuation(true);
         let mut child = Tracked::new(Valid);
-        child.set_properties(17, 3);
+        child.set_runtime(tracking::RuntimeLocations {
+            buffer: 17,
+            properties: 19,
+            items: 21,
+        });
         completed.evaluation = Some(child);
         let child = parent.adopt(completed);
-        assert_eq!(child.properties_set(), Some(17));
-        assert_eq!(child.property_count(), 3);
+        assert_eq!(child.properties_set(), Some(19));
+        assert_eq!(child.property_count(), 0);
+        assert_eq!(child.items_set(), Some(21));
         assert_eq!(
             parent.evaluation.as_ref().unwrap().properties_set(),
-            Some(11)
+            Some(13)
         );
-        assert_eq!(parent.evaluation.as_ref().unwrap().property_count(), 2);
+        assert_eq!(parent.evaluation.as_ref().unwrap().property_count(), 0);
         let empty = Tracked::new(Valid);
         assert_eq!(empty.properties_set(), None);
         assert_eq!(empty.property_count(), 0);

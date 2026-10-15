@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "string_checks"
+require_relative "evaluation_pool"
 require_relative "container_checks/array_diagnostics"
 require_relative "container_checks/object_diagnostics"
 
@@ -11,11 +12,20 @@ module Schemurai
   module Internal
     module ContainerChecks
       module Properties
-        module_function def merge(left, left_keys, right, right_keys)
-          result = left ? left.dup : Set.new(left_keys)
-          result.merge(right || right_keys)
-          result.freeze
+        module_function def merge(left, left_keys, left_items, right, right_keys, right_items)
+          materialize(left, left_keys, left_items).merge(materialize(right, right_keys, right_items))
         end
+
+        module_function def materialize(buffer, properties, items)
+          return buffer if buffer
+          return Evaluation.valid if properties.empty? && items.empty?
+
+          result = EvaluationBuffer.new
+          properties.each { |key| result.record_property(key) }
+          items.each { |index| result.record_item(index) }
+          result
+        end
+        private_class_method :materialize
       end
 
       module Bounds
@@ -313,10 +323,10 @@ module Schemurai
             if @required && collecting_array_errors?
               @callback.error("type", self)
             end
-            return @callback.finish(!@required)
+            return @callback.finish(!@required, nil)
           end
           result = check_array(@rules, @value, ArrayReportItems.new(@callback, true))
-          @callback.finish(result.valid? && !@failed)
+          @callback.finish(result.valid? && !@failed, @evaluation)
         end
 
         def message(keyword, rescued)
@@ -333,7 +343,7 @@ module Schemurai
           @callback.error(keyword, self)
         end
 
-        private def tracked_evaluation = (@evaluation ||= ArrayReportItems.new(@callback, false))
+        private def tracked_evaluation = (@evaluation ||= @callback.evaluation_buffer)
 
         private def evaluate_child_at(program, instance, index, keyword, child_segment = nil)
           valid = @callback.evaluate(program, instance, index, keyword, child_segment)
@@ -463,13 +473,13 @@ module Schemurai
             return @callback.finish_object(!@required, nil)
           end
           result = check_object(@rules, @value, ObjectReportPrior.new(@callback))
-          @callback.finish_object(result.valid? && !@failed, @evaluation&.evaluated_properties)
+          @callback.finish_object(result.valid? && !@failed, @evaluation)
         end
 
         private def collecting_object_errors? = !@callback.silent?
         private def object_budget = @callback.invocation_budget
         private def regexp_cache = (@regexps ||= @callback.regexp_cache)
-        private def tracked_evaluation = (@evaluation ||= ObjectReportLocations.new)
+        private def tracked_evaluation = (@evaluation ||= @callback.evaluation_buffer)
 
         private def object_error(keyword, _rules, _value, name = nil, required_name = nil)
           @failed = true
@@ -489,7 +499,7 @@ module Schemurai
           flags = segment.equal?(ObjectDiagnostics::MISSING_SEGMENT) ? 3 : 2
           valid, properties = @callback.evaluate_object(program, instance, segment, keyword, child, flags, true)
           @failed = true unless valid
-          valid ? Evaluation.valid(evaluated_properties: properties) : Evaluation.invalid
+          valid ? ObjectReportLocations.new(properties) : Evaluation.invalid
         end
       end
 

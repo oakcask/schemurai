@@ -2529,19 +2529,89 @@ RSpec.describe "native VALUE execution" do
         end
       end
     end
-    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
-              "properties" => {"a" => true, "b" => true}, "unevaluatedProperties" => false}
-    run = lambda do |backend|
-      validator = Schemurai.compile(schema, backend: backend)
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rule = {"properties" => {"a" => true, "b" => true}, "unevaluatedProperties" => false}
+    cases = [[rule, ->(value) { value }], [{"items" => rule}, ->(value) { [{"a" => 1}, value] }],
+      [{"properties" => {"v" => rule}}, ->(value) { {"v" => value} }], [{"allOf" => [rule]}, ->(value) { value }],
+      [{"$defs" => {"rule" => rule}, "$ref" => "#/$defs/rule"}, ->(value) { value }]]
+    run = lambda do |backend, schema, wrap|
+      validator = Schemurai.compile(dialect.merge(schema), backend: backend)
       value = hash["a", 1]
-      expect(validator.validate(value).valid?).to be(true)
+      input = wrap.call(value)
+      expect(validator.validate(input).valid?).to be(true)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
       value["b"] = 2
-      capture_validation(validator, :validate, value)
+      capture_validation(validator, :validate, input)
+    end
+    expected = cases.map { |schema, wrap| run.call(:vm, schema, wrap) }
+    expect(expected).to all(eq([:result, []]))
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.zip(expected).each { |(schema, wrap), result| expect(run.call(:native, schema, wrap)).to eq(result) }
+  end
+
+  it "shares a reused buffer's properties when the current owner is an array" do # rubocop:disable RSpec/ExampleLength
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "allOf" => [
+      {"properties" => {"b" => true}}, {"items" => true}
+    ], "unevaluatedProperties" => false}
+    run = lambda do |backend|
+      saved = nil
+      hash = Class.new(Hash) do
+        define_method(:each) do |&block|
+          saved ||= block
+          super(&block)
+        end
+      end
+      array = Class.new(Array) do
+        define_method(:is_a?) do |type|
+          if type == Hash
+            @hash_checks = (@hash_checks || 0) + 1
+            if @hash_checks > 1
+              saved.call("b", 2)
+              return true
+            end
+            return false
+          end
+          super(type)
+        end
+
+        def each = self
+
+        def each_key
+          yield "b"
+          self
+        end
+
+        def [](key) = (key == "b") ? 2 : super
+      end
+      validator = Schemurai.compile(schema, backend: backend)
+      expect(validator.validate(hash["b", 2]).valid?).to be(true)
+      capture_validation(validator, :validate, array.new([1]))
     end
     expected = run.call(:vm)
     expect(expected).to eq([:result, []])
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     expect(run.call(:native)).to eq(expected)
+  end
+
+  it "continues recursive object reports and their silent validity children without VM execution" do # rubocop:disable RSpec/ExampleLength
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"node" => {
+      "anyOf" => [{"type" => "integer"}, {"type" => "object", "properties" => {"v" => {"$ref" => "#/$defs/node"}},
+                                          "unevaluatedProperties" => false}]
+    }}, "$ref" => "#/$defs/node"}
+    values = [Hash, Class.new(Hash)].product([40, 260, 300], [1, "bad"]).map do |klass, depth, leaf|
+      depth.times.reduce(leaf) { |child, _| klass["v", child] }
+    end
+    run = lambda do |backend, value, method, options|
+      validator = Schemurai.compile(schema, backend: backend)
+      capture_validation(validator, method, value, **options)
+    end
+    cases = values.product([:valid?, :validate], [{}, {max_errors: 0}, {timeout: 10}])
+    expected = cases.map { |value, method, options| run.call(:vm, value, method, options) }
+    expect(expected.first).to eq([:result, true])
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.zip(expected).each { |(value, method, options), result| expect(run.call(:native, value, method, options)).to eq(result) }
   end
 
   it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength

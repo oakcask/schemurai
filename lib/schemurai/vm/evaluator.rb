@@ -3,7 +3,7 @@
 require_relative "../decimal"
 require "base64"
 require "json"
-require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ruby 3.4.
+require_relative "../evaluation_pool"
 require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
@@ -16,44 +16,7 @@ require_relative "../string_checks"
 
 module Schemurai
   module VM
-    class EvaluationBuffer
-      attr_reader :evaluated_properties, :evaluated_items
-
-      def initialize
-        # Applicators can overlap. Array membership makes collecting and merging
-        # their annotations quadratic in the number of instance locations.
-        @evaluated_properties = Set.new
-        @evaluated_items = Set.new
-      end
-
-      def valid? = true
-
-      def reset
-        @evaluated_properties.clear
-        @evaluated_items.clear
-        self
-      end
-
-      def record_property(name)
-        @evaluated_properties.add(name)
-        self
-      end
-
-      def record_item(index)
-        @evaluated_items.add(index)
-        self
-      end
-
-      def merge(other)
-        return Evaluation.invalid unless other.valid?
-
-        properties = other.evaluated_properties
-        items = other.evaluated_items
-        @evaluated_properties.merge(properties) unless properties.empty?
-        @evaluated_items.merge(items) unless items.empty?
-        self
-      end
-    end
+    EvaluationBuffer = Internal::EvaluationBuffer
     private_constant :EvaluationBuffer
 
     class Evaluator
@@ -87,8 +50,7 @@ module Schemurai
         @dynamic_scope = dynamic_scope
         @instance_path_buffer = nil
         @schema_path_buffer = nil
-        @evaluation_pool = nil
-        @evaluation_pool_index = 0
+        @evaluation_pool = native_reports ? native_reports[1] : Internal::EvaluationPool.new
       end
 
       def validate(instance)
@@ -257,14 +219,11 @@ module Schemurai
       end
 
       private def reset_evaluation_pool
-        @evaluation_pool_index = 0
+        @evaluation_pool.reset
       end
 
       private def tracked_evaluation
-        pool = (@evaluation_pool ||= [])
-        index = @evaluation_pool_index
-        @evaluation_pool_index += 1
-        (pool[index] ||= EvaluationBuffer.new).reset
+        @evaluation_pool.acquire
       end
 
       private def evaluate(program, instance)

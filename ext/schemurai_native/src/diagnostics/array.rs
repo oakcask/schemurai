@@ -374,3 +374,19 @@ pub unsafe extern "C" fn sn_report_partial(report: *const Report) -> *mut Report
     report.complete_callback(false);
     Box::into_raw(Box::new(report))
 }
+
+/// # Safety
+/// Report is live, immutable and C-rooted. Prior selects inherited locations.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_items_set(report: *const Report, prior: i32) -> Value {
+    let report = unsafe { &*report };
+    let locations = if prior != 0 {
+        &report.container_prior
+    } else {
+        &report.evaluation
+    };
+    locations
+        .as_ref()
+        .and_then(Tracked::items_set)
+        .unwrap_or_else(|| unsafe { sn_nil() })
+}

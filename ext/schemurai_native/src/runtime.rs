@@ -154,6 +154,11 @@ impl Caches {
     pub(super) fn report_continuations_allowed(&self) -> bool {
         self.report_continuations_allowed.get()
     }
+    pub(super) fn admit(&self, engine: &Engine, root: usize) {
+        self.allow_callbacks(engine.scalar_callbacks_safe(root));
+        self.allow_continuations(engine.native_continuations_safe(root));
+        self.allow_report_continuations(engine.report_continuations_safe(root));
+    }
     pub(super) fn initial_report(&self) -> Option<diagnostics::Report> {
         self.reports.initial()
     }
@@ -1003,4 +1008,13 @@ mod tests {
             std::mem::size_of::<Caches>()
         );
     }
+}
+
+/// # Safety
+/// Caches are idle at the start of a public invocation with a reused Ruby pool.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_reuse_buffers(caches: *const Caches) {
+    let caches = unsafe { &*caches };
+    caches.dynamic_calls.set(true);
+    caches.runtime_order.set(true);
 }

@@ -845,7 +845,9 @@ impl Execution<'_> {
                 Op::Array(required, rules) => {
                     if self.caches.report_continuations_allowed()
                         && !rules.header_only()
-                        && (kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls())
+                        && (kind == TYPE_UNSUPPORTED
+                            || self.caches.dynamic_calls()
+                            || prior.has_runtime_properties())
                     {
                         let result = self.caches.container_report(
                             node,
@@ -1727,7 +1729,7 @@ pub unsafe extern "C" fn sn_diagnose(
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
         };
-        caches.allow_report_continuations(engine.report_continuations_safe(root));
+        caches.admit(engine, root);
         let inherited = caches.initial_report();
         let resumed = inherited.is_some();
         let mut report = inherited.unwrap_or_else(|| Report {
@@ -1766,7 +1768,7 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             memo: memo::Memo::default(),
             budget: caches.budget(limits),
         };
-        caches.allow_report_continuations(execution.report_continuations_safe(root));
+        caches.admit(execution.engine, root);
         let inherited = caches.initial_report();
         let resumed = inherited.is_some();
         let mut report = inherited.unwrap_or_else(|| Report {

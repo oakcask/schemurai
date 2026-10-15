@@ -1,12 +1,40 @@
-//! Immutable property-set results for annotation merges that require Ruby hashing.
+//! Opaque evaluation buffers for annotation merges that require Ruby semantics.
 use super::*;
-use crate::tracking::{PropertyLocations, Tracked};
+use crate::tracking::{RuntimeLocations, Tracked};
 use std::cell::RefCell;
 
+struct Part {
+    runtime: Option<RuntimeLocations>,
+    keys: Vec<Value>,
+    items: Vec<usize>,
+}
+impl Part {
+    fn new(engine: &Engine, tracked: &Tracked) -> Self {
+        Self {
+            runtime: tracked.runtime_locations(),
+            keys: tracked.native_properties(engine),
+            items: tracked.native_items(),
+        }
+    }
+    fn mark(&self) {
+        if let Some(runtime) = self.runtime {
+            runtime.mark();
+        }
+        for &key in &self.keys {
+            unsafe {
+                sn_pin(key);
+            }
+        }
+    }
+    fn memory_usage(&self) -> usize {
+        self.keys.capacity() * std::mem::size_of::<Value>()
+            + self.items.capacity() * std::mem::size_of::<usize>()
+    }
+}
 #[derive(Default)]
 pub(super) struct Properties {
-    pending: RefCell<Option<(Value, [PropertyLocations; 2])>>,
-    completed: RefCell<HashMap<Value, (Value, usize)>>,
+    pending: RefCell<Option<(Value, [Part; 2])>>,
+    completed: RefCell<HashMap<Value, RuntimeLocations>>,
 }
 impl Properties {
     pub(super) fn reset(&self) {
@@ -19,10 +47,10 @@ impl Properties {
     pub(super) fn memory_usage(&self) -> usize {
         self.pending.try_borrow().map_or(0, |pending| {
             pending.as_ref().map_or(0, |(_, parts)| {
-                parts.iter().map(|part| part.memory_usage()).sum::<usize>()
+                parts.iter().map(Part::memory_usage).sum::<usize>()
             })
         }) + self.completed.try_borrow().map_or(0, |results| {
-            results.capacity() * std::mem::size_of::<(Value, (Value, usize))>()
+            results.capacity() * std::mem::size_of::<(Value, RuntimeLocations)>()
         })
     }
     pub(super) fn mark(&self) {
@@ -34,10 +62,8 @@ impl Properties {
             }
         }
         if let Ok(completed) = self.completed.try_borrow() {
-            for &(set, _) in completed.values() {
-                unsafe {
-                    sn_pin(set);
-                }
+            for runtime in completed.values() {
+                runtime.mark();
             }
         }
     }
@@ -48,16 +74,11 @@ impl Caches {
         engine: &Engine,
         left: &Tracked,
         right: &Tracked,
-    ) -> Result<(Value, usize), Verdict> {
+    ) -> Result<RuntimeLocations, Verdict> {
         let ordinal = self.next_call()?;
         if self.observe(ordinal, unsafe { sn_nil() }, RUNTIME_PROPERTY_MERGE) == Unsupported {
-            *self.properties.pending.borrow_mut() = Some((
-                ordinal,
-                [
-                    PropertyLocations::new(engine, left),
-                    PropertyLocations::new(engine, right),
-                ],
-            ));
+            *self.properties.pending.borrow_mut() =
+                Some((ordinal, [Part::new(engine, left), Part::new(engine, right)]));
             return Err(Unsupported);
         }
         self.properties
@@ -69,20 +90,22 @@ impl Caches {
     }
 }
 /// # Safety
-/// Caches must be idle with a pending merge; side is 0 or 1 and outputs writable.
+/// Caches are idle with a pending merge. Side is 0/1 and outputs are writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_properties_part(
     caches: *const Caches,
     side: usize,
-    set: *mut Value,
-    count: *mut usize,
-) {
+    properties: *mut usize,
+    items: *mut usize,
+) -> Value {
     let pending = unsafe { &*caches }.properties.pending.borrow();
     let part = &pending.as_ref().expect("property merge").1[side];
     unsafe {
-        *set = part.set.unwrap_or_else(|| sn_nil());
-        *count = part.keys.len();
+        *properties = part.keys.len();
+        *items = part.items.len();
     }
+    part.runtime
+        .map_or_else(|| unsafe { sn_nil() }, |runtime| runtime.buffer)
 }
 /// # Safety
 /// Same pending merge requirements as sn_properties_part; index is in bounds.
@@ -102,9 +125,29 @@ pub unsafe extern "C" fn sn_properties_key(
         .keys[index]
 }
 /// # Safety
-/// Caches are idle; set is rooted in C's completed roots and count is its size.
+/// Same pending merge requirements as sn_properties_part; index is in bounds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_properties_result(caches: *const Caches, set: Value, count: usize) {
+pub unsafe extern "C" fn sn_properties_item(
+    caches: *const Caches,
+    side: usize,
+    index: usize,
+) -> usize {
+    unsafe { &*caches }
+        .properties
+        .pending
+        .borrow()
+        .as_ref()
+        .expect("property merge")
+        .1[side]
+        .items[index]
+}
+/// # Safety
+/// Caches are idle; locations is readable and all handles are rooted by C first.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_properties_result(
+    caches: *const Caches,
+    locations: *const RuntimeLocations,
+) {
     let properties = &unsafe { &*caches }.properties;
     let ordinal = properties
         .pending
@@ -115,5 +158,5 @@ pub unsafe extern "C" fn sn_properties_result(caches: *const Caches, set: Value,
     properties
         .completed
         .borrow_mut()
-        .insert(ordinal, (set, count));
+        .insert(ordinal, unsafe { *locations });
 }
