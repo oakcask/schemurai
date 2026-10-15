@@ -2697,6 +2697,131 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "handles null numeric operands without VM execution" do # rubocop:disable RSpec/ExampleLength
+    keys = %w[maximum minimum exclusiveMaximum exclusiveMinimum multipleOf]
+    rules = keys.flat_map { |key| [{key => nil}, {key => nil, "multipleOf" => 0.5}] }
+    rules += [{"maximum" => 3, "minimum" => nil}, {"maximum" => 3, "minimum" => nil, "multipleOf" => nil},
+      {"minimum" => 0, "exclusiveMaximum" => nil}, {"maximum" => 3, "minimum" => 0, "multipleOf" => nil}]
+    rules += rules.first(5).flat_map { |rule| [rule.merge("type" => "number"), rule.merge("type" => "integer")] }
+    values = [-1, 0, 3, 6, 0.5, 2**4096, Float::MAX, Float::NAN, Float::INFINITY, -Float::INFINITY, "x", nil]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}])
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value, value]] },
+      ->(rule, value) { [{"properties" => {"value" => rule}}, {"value" => value}] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, inputs|
+      inputs.each do |input, method, options, expected|
+        expect(capture_validation(native, method, input, **options)).to eq(expected)
+      end
+    end
+  end
+
+  it "preserves null numeric exception order across applicators, paths and limits" do # rubocop:disable RSpec/ExampleLength
+    rule = {"maximum" => 3, "minimum" => nil, "multipleOf" => 0.5}
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    schemas = [{"anyOf" => [true, rule]}, {"allOf" => [false, rule]}, {"oneOf" => [true, rule]},
+      dialect.merge("contains" => rule, "unevaluatedItems" => false), {"additionalProperties" => rule}]
+    bad_key = "x".encode(Encoding::UTF_16LE)
+    values = [1, 5, [5], [5, 1], [1, 5], {bad_key => 5}, {bad_key => 1}, {"x" => 5, bad_key => 1}]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}])
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |input, method, options|
+        capture_validation(vm, method, input, **options)
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      combinations.zip(expected).each do |(input, method, options), result|
+        expect(capture_validation(native, method, input, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "uses full scalar trials and short-circuiting container children" do # rubocop:disable RSpec/ExampleLength
+    numeric = {"maximum" => 3, "minimum" => nil}
+    string = {"minLength" => 2, "pattern" => "(?=x)x"}
+    incompatible = "x".encode(Encoding::UTF_16LE)
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    cases = [[{"anyOf" => [true, string]}, incompatible], [{"not" => string}, incompatible],
+      [{"anyOf" => [true, {"items" => string}]}, [incompatible]],
+      [{"anyOf" => [true, {"properties" => {"x" => numeric}}]}, {"x" => 5}],
+      [{"items" => {"anyOf" => [true, numeric]}, "maxItems" => 1}, [1, 5]],
+      [{"properties" => {"x" => {"anyOf" => [true, numeric]}}}, {"x" => 5}],
+      [{"items" => {"items" => {"anyOf" => [true, numeric]}}}, [[5]]],
+      [{"anyOf" => [true, {"maxItems" => 0, "contains" => numeric}]}, [5]],
+      [{"$defs" => {"s" => string}, "anyOf" => [true, {"$ref" => "#/$defs/s"}]}, incompatible],
+      [dialect.merge(string, "unevaluatedItems" => false), incompatible],
+      [dialect.merge(numeric, "unevaluatedProperties" => false), 5]].map do |schema, value|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), value, [:valid?, :validate].map { |method| capture_validation(vm, method, value) }]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, value, expected|
+      [:valid?, :validate].zip(expected).each do |method, result|
+        expect(capture_validation(native, method, value)).to eq(result)
+        expect(capture_validation(native, method, value, timeout: 10)).to eq(result)
+      end
+    end
+  end
+
+  it "separates null numeric runtime operations and clears observations between calls" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      rules = [{"maximum"=>nil,"minimum"=>nil}, {"multipleOf"=>nil}]
+      pairs = rules.map { |rule| [Schemurai.compile(rule,backend: :vm), Schemurai.compile(rule,backend: :native)] }
+      original_gt = Integer.instance_method(:>)
+      original_lt = Integer.instance_method(:<)
+      Integer.define_method(:>) do |other|
+        if other.nil?
+          GC.verify_compaction_references(double_heap: true, toward: :empty)
+          false
+        else
+          original_gt.bind_call(self,other)
+        end
+      end
+      Integer.define_method(:<) { |other| other.nil? ? true : original_lt.bind_call(self,other) }
+      NilClass.define_method(:positive?) { false }
+      capture = lambda do |validator, method|
+        result = validator.public_send(method, 1)
+        method == :validate ? result.errors : result
+      rescue => error
+        [error.class.name,error.message]
+      end
+      pairs.each do |vm,native|
+        [:valid?, :validate].each do |method|
+          abort "different numeric behavior" unless capture.call(vm,method) == capture.call(native,method)
+        end
+        abort "unsupported numeric operation" if native.instance_variable_get(:@evaluator).instance_variable_get(:@program).valid?(1).nil?
+      end
+      NilClass.define_method(:positive?) { true }
+      capture = lambda do |validator|
+        validator.valid?(1)
+      rescue => error
+        [error.class.name,error.message]
+      end
+      # The VM retains multiple results, so rebuild its oracle after the method change.
+      fresh_vm = Schemurai.compile(rules.last, backend: :vm)
+      abort "stale observation" unless capture.call(fresh_vm) == capture.call(pairs.last.last)
+      puts "ok"
+    RUBY
+    output, errors, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect(status.success?).to be(true), errors
+    expect(output).to eq("ok\n")
+  end
+
   it "matches Ruby decimal spelling at numeric boundaries" do # rubocop:disable RSpec/ExampleLength
     random = Random.new(1729)
     values = [723340043767187.2, 0.8455124082255701, 1e23, -1e23, 1e-20, 0.1, 0.3, -0.0]
@@ -2955,7 +3080,7 @@ RSpec.describe "native VALUE execution" do
 
   it "delegates unsupported record-array instances after the native Hash guard" do
     schemas = [{"items" => {"properties" => {"id" => true}}}, {"items" => {"type" => "object", "properties" => {"id" => true}}}]
-    values = [Class.new(Hash)["id", 1], {Object.new => 1}, {"id" => 1}.compare_by_identity]
+    values = [Class.new(Hash)["id", 1], {Object.new => 1}]
     singleton = {"id" => 1}
     singleton.define_singleton_method(:key?) { |_key| false }
     values << singleton
@@ -2969,6 +3094,20 @@ RSpec.describe "native VALUE execution" do
         expect(native.valid?([value])).to eq(vm.valid?([value]))
         expect(native.validate([value]).errors).to eq(vm.validate([value]).errors)
       end
+    end
+  end
+
+  it "collects identity Hash diagnostics without the record validity precheck" do
+    identity = {"id" => 1}.compare_by_identity
+    rules = {"properties" => {"id" => true}}
+    cases = [rules, rules.merge("type" => "object")].map do |items|
+      schema = {"items" => items}
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), vm.validate([identity]).errors]
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, errors|
+      expect(native.validate([identity]).errors).to eq(errors)
     end
   end
 

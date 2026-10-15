@@ -26,7 +26,12 @@ struct PointerRequest {
     result: Option<Value>,
 }
 unsafe extern "C" {
-    fn sn_cached_runtime(matches: *const c_void, source: Value, value: Value) -> i32;
+    fn sn_cached_runtime(
+        matches: *const c_void,
+        operation: i32,
+        source: Value,
+        value: Value,
+    ) -> i32;
 }
 impl Caches {
     pub(super) fn runtime_order(&self) -> bool {
@@ -87,14 +92,23 @@ impl Caches {
         )));
         Err(Unsupported)
     }
+    pub(super) fn null_number(&self, value: Value, bit: i32, decimal: bool) -> Verdict {
+        self.observe(
+            unsafe { sn_nil() },
+            value,
+            RUNTIME_NULL_NUMBER + bit * 2 + i32::from(decimal),
+        )
+    }
     pub(super) fn invalid_regexp(&self, source: Value, value: Value) -> bool {
         let matches = self.matches.get();
-        !matches.is_null() && unsafe { sn_cached_runtime(matches, source, value) } == REGEXP_INVALID
+        !matches.is_null()
+            && unsafe { sn_cached_runtime(matches, RUNTIME_REGEXP_ASSERTION, source, value) }
+                == REGEXP_INVALID
     }
     fn observe(&self, source: Value, value: Value, operation: i32) -> Verdict {
         let matches = self.matches.get();
         if !matches.is_null() {
-            let cached = unsafe { sn_cached_runtime(matches, source, value) };
+            let cached = unsafe { sn_cached_runtime(matches, operation, source, value) };
             if operation == RUNTIME_REGEXP_ASSERTION && cached == REGEXP_INVALID {
                 return Invalid;
             }

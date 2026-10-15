@@ -795,8 +795,13 @@ to require successful reference resolution before sharing.
 
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
-unusual Numeric objects and invalid numeric operands. Successful
-detailed validation builds its public Result in Ruby. Rust now collects ordered
+unusual Numeric objects. Null numeric operands execute the original Ruby
+comparisons or divisibility methods through libruby after Rust has returned,
+preserving Ruby exceptions and operator visibility. Native traversal interleaves
+those observations with ordered failures so earlier error limits and diagnostic
+path exceptions retain priority. Runtime observations distinguish operation,
+source and instance, and are cleared after each invocation.
+Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
 errors preserve schema order. It preserves instance and schema paths, including nested array
@@ -821,6 +826,15 @@ runner is selected through thread-local C state only while Rust evaluates,
 keeping recursive C entry and separate Ractors isolated. Ordinary JSON values
 need no method-definition request. These inputs can be nested in
 ordinary arrays and string-keyed Hashes; schema operands must still be JSON-shaped.
+Applicator trials share the native diagnostic traversal with error recording and
+path construction disabled. Like the VM, they finish scalar assertions even after
+an earlier failure, but short-circuit ordinary container children. This preserves
+later scalar exceptions without introducing a separate trial interpreter;
+single-assertion scalar rules retain direct native checks. Trials export only
+successful annotations and do not consume diagnostic error limits.
+Container validity successes do not bypass diagnostic collection: descendants
+can still raise during complete diagnostic trials. Only proven scalar checks
+and cached complete diagnostic successes skip that traversal.
 Builtin subclasses, singleton-method objects, and Hashes with nonstandard keys
 delegate to the VM before native field evaluation. Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

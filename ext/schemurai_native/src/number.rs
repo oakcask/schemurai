@@ -327,8 +327,9 @@ fn decimal_float(value: f64) -> Option<Fraction> {
         denominator: denominator / a,
     })
 }
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Limit {
+    null: bool,
     exact: Option<Fraction>,
     arbitrary: Option<Box<BigRational>>,
     wide_integer: Option<Value>,
@@ -339,6 +340,24 @@ struct Limit {
 }
 
 impl Limit {
+    fn violation(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        bit: i32,
+        decimal: bool,
+        native: impl FnOnce() -> bool,
+    ) -> Result<bool, Verdict> {
+        if self.null {
+            match caches.null_number(value, bit, decimal) {
+                Valid => Ok(false),
+                Invalid => Ok(true),
+                Unsupported => Err(Unsupported),
+            }
+        } else {
+            Ok(native())
+        }
+    }
     fn float_order(&self, n: f64) -> Result<Option<Ordering>, Verdict> {
         if let Some(exact) = self.exact {
             return Ok(compare_float_integer(n, exact.numerator));
@@ -382,6 +401,7 @@ pub(super) struct Rules {
     fixnum_flag: Value,
     bounds_view: bool,
     bounded_signs: Option<[bool; 2]>,
+    runtime_operands: bool,
 }
 
 #[derive(Debug)]
@@ -487,7 +507,10 @@ impl Engine {
                         .any(|(bit, _)| matches!(*bit, MAXIMUM | EXCLUSIVE_MAXIMUM)),
                 ]
             });
+        let runtime_operands = limits.iter().any(|(_, limit)| limit.null)
+            || multiple.as_ref().is_some_and(|limit| limit.null);
         Ok(Some(Rules {
+            runtime_operands,
             limits,
             multiple,
             fast_limits,
@@ -499,6 +522,12 @@ impl Engine {
     }
 
     fn numeric_limit(&mut self, value: Value) -> Result<Option<Limit>, Value> {
+        if unsafe { sn_same(value, sn_nil()) } != 0 {
+            return Ok(Some(Limit {
+                null: true,
+                ..Limit::default()
+            }));
+        }
         let integer = unsafe { sn_kind(value) } & TYPE_INTEGER != 0;
         if !integer && unsafe { sn_is_rational(value) } == 0 {
             return Ok(None);
@@ -530,6 +559,7 @@ impl Engine {
             fraction.numerator > 1 && (1_u128 << 64) % fraction.numerator as u128 == 1
         });
         Ok(Some(Limit {
+            null: false,
             exact,
             arbitrary,
             wide_integer: (integer && exact.is_none()).then(|| self.retain(value)),
@@ -740,8 +770,12 @@ fn wide_float_tie(value: Value, rounded: f64) -> Option<Ordering> {
 impl Rules {
     // Shared by validity scans and diagnostic prechecks. Numeric traversal
     // borrows only opaque VALUEs and uses the compiled primitive shortcuts.
+    pub(super) fn runtime_operands(&self) -> bool {
+        self.runtime_operands
+    }
     pub(super) fn eval_guarded(
         &self,
+        caches: &runtime::Caches,
         required: i32,
         value: Value,
         budget: &budget::Budget,
@@ -773,7 +807,7 @@ impl Rules {
         } else if kind & TYPE_NUMBER == 0 {
             Valid
         } else {
-            self.eval(value, budget)
+            self.eval(caches, value, budget)
         }
     }
 
@@ -857,7 +891,17 @@ impl Rules {
         Valid
     }
 
-    pub(super) fn eval(&self, value: Value, budget: &budget::Budget) -> Verdict {
+    pub(super) fn eval(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
+        if self.runtime_operands {
+            return self
+                .arbitrary_check(caches, value, budget, |_| true)
+                .map_or(Unsupported, |bits| verdict(bits == 0));
+        }
         if let Some(multiple) = &self.fast_multiple
             && value & self.fixnum_flag != 0
         {
@@ -870,14 +914,19 @@ impl Rules {
         }
         let result = self.check(value, |_| true);
         if result == Unsupported {
-            self.arbitrary_failures(value, budget)
+            self.arbitrary_check(caches, value, budget, |_| true)
                 .map_or(Unsupported, |bits| verdict(bits == 0))
         } else {
             result
         }
     }
 
-    pub(super) fn failures(&self, value: Value, budget: &budget::Budget) -> Result<i32, Verdict> {
+    fn failures(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        budget: &budget::Budget,
+    ) -> Result<i32, Verdict> {
         if let Some(multiple) = &self.fast_multiple
             && value & self.fixnum_flag != 0
         {
@@ -906,9 +955,57 @@ impl Rules {
             false
         });
         if status == Unsupported {
-            self.arbitrary_failures(value, budget)
+            self.arbitrary_check(caches, value, budget, |_| false)
         } else {
             Ok(bits)
+        }
+    }
+
+    pub(super) fn visit_failures(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        budget: &budget::Budget,
+        mut visit: impl FnMut(&'static str) -> Result<(), Verdict>,
+    ) -> Result<(), Verdict> {
+        const KEYWORDS: [(i32, &str); 5] = [
+            (MAXIMUM, "maximum"),
+            (MINIMUM, "minimum"),
+            (EXCLUSIVE_MAXIMUM, "exclusiveMaximum"),
+            (EXCLUSIVE_MINIMUM, "exclusiveMinimum"),
+            (MULTIPLE_OF, "multipleOf"),
+        ];
+        if self.runtime_operands {
+            let mut failure = None;
+            let result = self.arbitrary_check(caches, value, budget, |bit| {
+                let keyword = KEYWORDS
+                    .iter()
+                    .find(|&&(candidate, _)| candidate == bit)
+                    .expect("compiled numeric assertion")
+                    .1;
+                if let Err(status) = visit(keyword) {
+                    failure = Some(status);
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(status) = failure {
+                Err(status)
+            } else {
+                result.map(|_| ())
+            }
+        } else {
+            let bits = self.failures(caches, value, budget)?;
+            for (bit, keyword) in KEYWORDS {
+                if !budget.checkpoint() {
+                    return Err(Unsupported);
+                }
+                if bits & bit != 0 {
+                    visit(keyword)?;
+                }
+            }
+            Ok(())
         }
     }
 
