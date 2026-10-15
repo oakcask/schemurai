@@ -1545,7 +1545,7 @@ impl Execution<'_> {
                 } else {
                     equal_budgeted(*v, value, depth, &self.budget)
                 };
-                if self.runtime_equality(result) {
+                if self.can_call_runtime(result) {
                     self.caches.equality(*v, value, RUNTIME_EQUAL)
                 } else {
                     result
@@ -1557,7 +1557,7 @@ impl Execution<'_> {
                 } else {
                     values.eval(value, kind, depth, self.fixnum_flag, &self.budget)
                 };
-                if self.runtime_equality(result) {
+                if self.can_call_runtime(result) {
                     values.runtime(self.caches, value)
                 } else {
                     result
@@ -1590,7 +1590,7 @@ impl Execution<'_> {
             _ => unreachable!("applicators must be evaluated with their context"),
         }
     }
-    fn runtime_equality(&self, result: Verdict) -> bool {
+    fn can_call_runtime(&self, result: Verdict) -> bool {
         result == Unsupported && self.budget.failure.get() == 0 && self.budget.hit.get().0 == 0
     }
     fn unique_values(&self, value: Value, depth: usize) -> Verdict {
@@ -1599,7 +1599,7 @@ impl Execution<'_> {
         } else {
             unique(value, depth, self.fixnum_flag, &self.budget)
         };
-        if self.runtime_equality(result) {
+        if self.can_call_runtime(result) {
             self.caches
                 .equality(unsafe { sn_nil() }, value, RUNTIME_UNIQUE)
         } else {
@@ -1686,8 +1686,7 @@ impl Execution<'_> {
                 [Op::Object(required, rules)]
                     if depth <= MAX_EVALUATION_DEPTH
                         && !self.tracks[child]
-                        && rules.record.is_some()
-                        && !rules.header_only() =>
+                        && rules.record.is_some() =>
                 {
                     Some((*required, rules))
                 }
@@ -1946,6 +1945,7 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        let header_only = rules.header_only();
         for &value in values {
             if !self.budget.checkpoint() {
                 return Unsupported;
@@ -1955,12 +1955,23 @@ impl Execution<'_> {
             } else {
                 unsafe { sn_shallow_kind(value) }
             };
-            let result = if kind == TYPE_UNSUPPORTED {
+            let runtime = header_only && rules.header.runtime_required(self.caches, kind);
+            let result = if runtime {
+                rules.header.valid(self.caches, required, value)
+            } else if kind == TYPE_UNSUPPORTED {
                 Unsupported
             } else if kind != TYPE_OBJECT {
                 verdict(required == 0)
             } else {
                 self.object(rules, value, depth, active)
+            };
+            let result = if header_only && !runtime && self.can_call_runtime(result) {
+                // A declined record guard has not invoked instance methods.
+                // Preserve the fast record walk while handing special values
+                // to the same runtime frame as general header evaluation.
+                rules.header.valid(self.caches, required, value)
+            } else {
+                result
             };
             if result != Valid {
                 return result;
