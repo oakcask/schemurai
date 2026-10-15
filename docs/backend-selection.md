@@ -952,10 +952,13 @@ schemas. Frames preserve exception ordering, trial short circuits and error
 limits, and remain rooted during GC and private to each Ractor runner.
 Ordinary supported containers retain native size and uniqueness algorithms.
 Object validity with only count assertions needs no key scan because only its size is read.
-Contains validity can call a native child from Ruby any?/count methods when
-no item-schema or unevaluated-item traversal is required. The compiler proof
+Array validity can call native children from Ruby indexed traversal and
+any?/count methods when no unevaluated-item traversal is required. Shared Ruby
+helpers preserve prefix/item/additional-item selection, length snapshots,
+indexing and contains enumeration. Native children are selected by compiled
+Program identity; Ruby never reads their instruction streams. The compiler proof
 admits scalar assertions, empty schemas, logical applicators, acyclic static
-references and container headers, including nested contains. Children need
+references, Array child traversal and Object headers, including nested contains. Children need
 no inherited dynamic bindings or exported annotations. Original dynamic or
 recursive reference opcodes remain excluded from isolated children, even when
 the native compiler can simplify their target: VM scope polling is observable
@@ -991,9 +994,10 @@ the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
-Array/Hash subclasses, singleton-method containers, and Hashes with nonstandard keys
-can still delegate to the VM when reached container assertions require child
-traversal, including schema dependencies. Schema evaluation beyond the native
+Array subclasses and singleton-method Arrays can still delegate when child
+graphs need inherited dynamic scope or evaluated-location export. Special Hashes,
+including subclasses, singleton methods and nonstandard keys, retain VM child
+traversal for properties and schema dependencies. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

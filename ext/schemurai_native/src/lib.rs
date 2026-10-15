@@ -1321,7 +1321,7 @@ impl Engine {
                 Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
                     KindDemand::Predicate
                 }
-                Op::Array(_, rules) if rules.header_only() || self.scalar_contains(rules) => {
+                Op::Array(_, rules) if rules.header_only() || self.array_callbacks(rules) => {
                     KindDemand::Predicate
                 }
                 Op::Object(_, rules) if rules.header_only() => KindDemand::Predicate,
@@ -1544,6 +1544,16 @@ impl Execution<'_> {
                                 rules.contains.expect("scalar contains child"),
                             ),
                         )
+                    } else if self.caches.callbacks_allowed()
+                        && self.array_callbacks(rules)
+                        && rules.header.runtime_required(self.caches, kind)
+                    {
+                        if depth >= MAX_EVALUATION_DEPTH {
+                            return Unsupported;
+                        }
+                        rules
+                            .header
+                            .children(self.caches, *required, value, node, depth + 1)
                     } else if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
                     } else if kind != TYPE_ARRAY {
@@ -2192,7 +2202,7 @@ impl Execution<'_> {
     fn unsupported_kind(&self, node: usize, kind: i32) -> bool {
         kind == TYPE_UNSUPPORTED
             && (self.kind_demand[node] == KindDemand::Data
-                || (!self.caches.callbacks_allowed() && self.scalar_contains_node(node)))
+                || (!self.caches.callbacks_allowed() && self.callback_array_node(node)))
     }
     fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
         if kind == TYPE_UNSUPPORTED
@@ -3454,6 +3464,18 @@ pub unsafe extern "C" fn sn_node_index(engine: *const Engine, program: Value) ->
         .get(&program)
         .copied()
         .unwrap_or(usize::MAX)
+}
+/// # Safety
+/// Engine must be initialized, node compiled, and flags writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_callback_kind(
+    engine: *const Engine,
+    node: usize,
+    flags: *mut i32,
+) -> i32 {
+    let (kind, value) = unsafe { &*engine }.scalar_callback_kind(node);
+    unsafe { *flags = value };
+    kind
 }
 /// # Safety
 /// Engine must be initialized.
