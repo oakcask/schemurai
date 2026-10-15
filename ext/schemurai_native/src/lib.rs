@@ -236,8 +236,8 @@ impl StringRules {
         }
         if let Some(pattern) = &self.pattern {
             let result = match view {
-                Some((bytes, encoding)) => pattern.eval_bytes(caches, bytes, encoding),
-                None => pattern.eval(caches, value),
+                Some((bytes, encoding)) => pattern.eval_bytes(caches, value, bytes, encoding),
+                None => pattern.assertion(caches, value),
             };
             if result != Valid {
                 return result;
@@ -483,10 +483,11 @@ impl Object {
     // All execution policies use the same property/pattern/additional routing.
     // Schema-order validity scans have already visited declared properties;
     // input-order diagnostic scans visit them here as well.
-    fn visit_value_rules<const PROPERTIES: bool>(
+    fn visit_value_rules(
         &self,
         caches: &pattern::Caches,
         budget: &budget::Budget,
+        properties: bool,
         key: Value,
         location: Option<tracking::JsonKey>,
         mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
@@ -495,7 +496,7 @@ impl Object {
         // Reuse that result, and skip hashing for pattern-only object rules.
         let mut matched = if self.properties.is_empty() {
             false
-        } else if PROPERTIES {
+        } else if properties {
             if let Some(target) = self
                 .property_targets
                 .get(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
@@ -1739,7 +1740,9 @@ impl Execution<'_> {
         if !self.budget.checkpoint() {
             return Unsupported;
         }
-        if let Some(record) = &r.record {
+        if !self.caches.runtime_order()
+            && let Some(record) = &r.record
+        {
             // C initializes only the written key/value pairs. The untouched
             // tail is never read, including empty and unsupported records.
             let mut buffer = std::mem::MaybeUninit::<[Value; 16]>::uninit();
@@ -1825,27 +1828,43 @@ impl Execution<'_> {
         if status != Valid {
             return status;
         }
-        let found = match r.visit_properties(
-            value,
-            len,
-            self.undefined,
-            &self.budget,
-            |_, child, item| self.eval(child, item, depth, active),
-        ) {
-            Ok(found) => found,
-            Err(status) => return status,
+        let ordered = self.caches.runtime_order();
+        let found = if ordered {
+            0
+        } else {
+            match r.visit_properties(
+                value,
+                len,
+                self.undefined,
+                &self.budget,
+                |_, child, item| self.eval(child, item, depth, active),
+            ) {
+                Ok(found) => found,
+                Err(status) => return status,
+            }
         };
-        if r.names.is_some() || !r.patterns.is_empty() || (r.additional.is_some() && found < len) {
+        if ordered
+            || r.names.is_some()
+            || !r.patterns.is_empty()
+            || (r.additional.is_some() && found < len)
+        {
             let mut context = ObjectContext {
                 engine: self,
                 rules: r,
                 depth,
                 active,
+                names_only: false,
             };
             let result =
                 unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) };
             if result != VERDICT_VALID {
                 return if result == 0 { Invalid } else { Unsupported };
+            }
+        }
+        if ordered && r.names.is_some() {
+            let status = self.object_names(r, value, depth, active);
+            if status != Valid {
+                return status;
             }
         }
         let status = r.check_dependent_required(value, self.undefined, &self.budget);
@@ -1864,6 +1883,22 @@ impl Execution<'_> {
             }
         }
         Valid
+    }
+    fn object_names(
+        &self,
+        rules: &Object,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+    ) -> Verdict {
+        let mut context = ObjectContext {
+            engine: self,
+            rules,
+            depth,
+            active,
+            names_only: true,
+        };
+        decode(unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) })
     }
     fn instance_kind(&self, node: usize, value: Value) -> i32 {
         if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)] if rules.record.is_some()) {
@@ -2978,6 +3013,7 @@ struct ObjectContext<'a> {
     rules: &'a Object,
     depth: usize,
     active: scope::Context<'a>,
+    names_only: bool,
 }
 /// Called synchronously by the C hash iterator. This never calls allocating Ruby APIs.
 /// # Safety
@@ -2992,15 +3028,21 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
-        if let Some(child) = c.rules.names {
+        if (c.names_only || !c.engine.caches.runtime_order())
+            && let Some(child) = c.rules.names
+        {
             let result = c.engine.eval(child, key, c.depth, c.active);
             if result != Valid {
                 return result as i32;
             }
         }
-        match c.rules.visit_value_rules::<false>(
+        if c.names_only {
+            return Valid as i32;
+        }
+        match c.rules.visit_value_rules(
             c.engine.caches,
             &c.engine.budget,
+            c.engine.caches.runtime_order(),
             key,
             None,
             |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
@@ -3137,7 +3179,6 @@ pub unsafe extern "C" fn sn_valid_with_limits(
     limits: *const budget::Limits,
     outcome: *mut budget::Outcome,
 ) -> i32 {
-    let budget = budget::Budget::new(unsafe { *limits });
     let result = catch_unwind(AssertUnwindSafe(|| {
         let local = pattern::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
@@ -3145,7 +3186,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
             engine: unsafe { &*engine },
             caches,
             memo: memo::Memo::default(),
-            budget,
+            budget: caches.budget(unsafe { *limits }),
         };
         let result = if execution.budget.check_deadline() {
             execution.eval(root, value, 0, scope::Context::default())

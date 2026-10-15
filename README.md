@@ -189,8 +189,9 @@ must not be shared between threads or Ractors. With the VM and native backends,
 the registry compiles and shares its bytecode before this transition. The native
 backend also prepares shared native instruction tables for all four combinations
 of `content` and `format`; `validator_for` does not recompile them in each Ractor.
-Native regex search caches and VM fallback evaluation state belong to each
-validator. Preparing these tables adds time and memory to `make_shareable`.
+Native regex search caches, Ruby regexp runtime state and VM fallback evaluation
+state belong to each validator. Preparing these tables adds time and memory to
+`make_shareable`.
 
 ### Meta-schema validation
 

@@ -541,26 +541,41 @@ impl Execution<'_> {
         if status != Valid {
             return status;
         }
-        let found = match r.visit_properties(
-            value,
-            len,
-            self.undefined,
-            &self.budget,
-            |index, child, item| {
-                let result = self.record_value(child, item, depth, active);
-                if result == Valid {
-                    evaluation.known_property(r.property_indices[index]);
-                }
-                result
-            },
-        ) {
-            Ok(found) => found,
-            Err(status) => return status,
+        let ordered = self.caches.runtime_order();
+        let found = if ordered {
+            0
+        } else {
+            match r.visit_properties(
+                value,
+                len,
+                self.undefined,
+                &self.budget,
+                |index, child, item| {
+                    let result = self.record_value(child, item, depth, active);
+                    if result == Valid {
+                        evaluation.known_property(r.property_indices[index]);
+                    }
+                    result
+                },
+            ) {
+                Ok(found) => found,
+                Err(status) => return status,
+            }
         };
-        if r.names.is_some() || !r.patterns.is_empty() || (r.additional.is_some() && found < len) {
+        if ordered
+            || r.names.is_some()
+            || !r.patterns.is_empty()
+            || (r.additional.is_some() && found < len)
+        {
             let result = self.tracked_object_walk(r, value, depth, active, evaluation, false);
             if result != Valid {
                 return result;
+            }
+        }
+        if ordered && r.names.is_some() {
+            let status = self.object_names(r, value, depth, active);
+            if status != Valid {
+                return status;
             }
         }
         let status = r.check_dependent_required(value, self.undefined, &self.budget);
@@ -643,15 +658,18 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
             }
             c.rules.unevaluated
         } else {
-            if let Some(child) = c.rules.names {
+            if !c.engine.caches.runtime_order()
+                && let Some(child) = c.rules.names
+            {
                 let result = c.engine.eval(child, key, c.depth, c.active);
                 if result != Valid {
                     return result as i32;
                 }
             }
-            let result = c.rules.visit_value_rules::<false>(
+            let result = c.rules.visit_value_rules(
                 c.engine.caches,
                 &c.engine.budget,
+                c.engine.caches.runtime_order(),
                 key,
                 Some(key_location),
                 |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {

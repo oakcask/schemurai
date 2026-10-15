@@ -183,7 +183,7 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile(fallback, backend: :native)
     runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     expect(runner.valid?("x")).to be(true)
-    expect(runner.diagnostics("x")).to be_nil
+    expect(runner.diagnostics("x")).to eq([])
     expect(native.validate("x").errors).to eq(vm.validate("x").errors)
     expect_native_policy_results([schema], [1, 0, "bad"])
   end
@@ -490,8 +490,8 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile({"properties" => properties}, backend: :native)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     expect(program.valid?({"p1" => "x", "p0" => "bad"})).to be(false)
-    expect(program.valid?({"p2" => "bad", "p1" => "x"})).to be_nil
-    expect(program.diagnostics({"p1" => "x", "p0" => "bad"})).to be_nil
+    expect(program.valid?({"p2" => "bad", "p1" => "x"})).to be(false)
+    expect(program.diagnostics({"p1" => "x", "p0" => "bad"})).not_to be_nil
     mutable = {"p0" => 1}
     expect(program.valid?(mutable)).to be(true)
     mutable["p0"] = "bad"
@@ -515,7 +515,7 @@ RSpec.describe "native VALUE execution" do
     value = "x".encode(Encoding::UTF_16LE)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     expect(program.valid?(value)).to be(true)
-    expect(program.diagnostics(value)).to be_nil
+    expect { program.diagnostics(value) }.to raise_error(Encoding::CompatibilityError)
     expect(native.valid?(value)).to eq(vm.valid?(value))
     [native, vm].each { |validator| expect { validator.validate(value) }.to raise_error(Encoding::CompatibilityError) }
   end
@@ -1524,8 +1524,8 @@ RSpec.describe "native VALUE execution" do
       dependent_program = dependent.instance_variable_get(:@evaluator).instance_variable_get(:@program)
       # Required failures precede properties; dependencies follow properties.
       expect(required_program.valid?({"probe" => "example.test"})).to be(false)
-      expect(required_program.valid?({"must" => true, "probe" => "example.test"})).to be_nil
-      expect(dependent_program.valid?({"flag" => true, "probe" => "example.test"})).to be_nil
+      expect(required_program.valid?({"must" => true, "probe" => "example.test"})).to be(true)
+      expect(dependent_program.valid?({"flag" => true, "probe" => "example.test"})).to be(false)
       expect(dependent_program.valid?({"flag" => true})).to be(false)
       expect(dependent_program.valid?({"flag" => true, "must" => true})).to be(true)
       expect(dependent_program.valid?({})).to be(true)
@@ -2955,8 +2955,8 @@ RSpec.describe "native VALUE execution" do
     ordered = Schemurai.compile(dialect.merge("oneOf" => [passthrough,
       {"properties" => {"id" => {"pattern" => "(?=x)"}}}, passthrough]), backend: :native)
     program = ordered.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(program.valid?({"id" => "x"})).to be_nil
-    expect(program.diagnostics({"id" => "x"})).to be_nil
+    expect(program.valid?({"id" => "x"})).to be(false)
+    expect(program.diagnostics({"id" => "x"})).not_to be_nil
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     cases.each do |native, expected|
@@ -3377,29 +3377,153 @@ RSpec.describe "native VALUE execution" do
     malformed = Schemurai.compile({"items" => {"pattern" => "[", "minLength" => 2}}, backend: :native)
     raw = malformed.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     expect(raw.valid?(["a"])).to be(false)
-    expect(raw.valid?(["aa"])).to be_nil
+    expect(raw.valid?(["aa"])).to be(false)
   end
 
-  it "preserves VM handling for complex patterns, invalid syntax, and other encodings" do # rubocop:disable RSpec/ExampleLength
-    ["a++a", "a**", "(?=ab)ab", "(a)\\1", "(?i:a)", "\\b日\\b", "[a-z&&[^b]]", "[a--b]", "[a~~b]", "[", "a{2,1}", "a{4097}", "a{100001}"].each do |pattern|
-      schema = {"pattern" => pattern}
-      vm = Schemurai.compile(schema, backend: :vm)
-      native = Schemurai.compile(schema, backend: :native)
-      ["abcd", "b", "é", "", 1].each { |value| expect(native.valid?(value)).to eq(vm.valid?(value)) }
+  it "uses libruby for complex patterns and invalid syntax without VM execution" do
+    patterns = ["a++a", "a**", "(?=ab)ab", "(?<=a)b", "(a)\\1", "(?i:a)", "\\b日\\b", "[a-z&&[^b]]",
+      "[a--b]", "[a~~b]", "[", "a{2,1}", "a{4097}", "a{100001}"]
+    schemas = patterns.flat_map { |pattern| [{"pattern" => pattern}, {"items" => {"pattern" => pattern}}] }
+    expect_native_policy_results(schemas, ["abcd", "aa", "b", "é", "日", "", 1, ["ab", "b", 1]])
+  end
+
+  it "preserves Ruby regexp encoding errors without VM execution" do # rubocop:disable RSpec/ExampleLength
+    capture = lambda do |validator, method, value, **options|
+      result = validator.public_send(method, value, **options)
+      [:result, (method == :validate) ? result.errors : result]
+    rescue => error
+      [:error, error.class, error.message]
     end
-    schema = {"pattern" => "^a+$"}
-    vm = Schemurai.compile(schema, backend: :vm)
+    values = ["aa".b, "a".encode(Encoding::UTF_16LE), "\xFF".dup.force_encoding(Encoding::UTF_8),
+      "\xFF".dup.force_encoding(Encoding::US_ASCII), "é".encode(Encoding::ISO_8859_1)]
+    schemas = ["^a+$", "(?=a)a", "(?=é)é"].flat_map { |pattern| [{"pattern" => pattern}, {"items" => {"pattern" => pattern}}] }
+    values += values.map { |value| [value] }
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), values.map do |value|
+        [:valid?, :validate].map { |method| capture.call(vm, method, value) }
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      values.zip(expected).each do |value, results|
+        [:valid?, :validate].zip(results).each do |method, result|
+          expect(capture.call(native, method, value)).to eq(result)
+          expect(capture.call(native, method, value, timeout: 10)).to eq(result)
+        end
+      end
+    end
+  end
+
+  it "replays runtime matches in input order before exposing regexp exceptions" do # rubocop:disable RSpec/ExampleLength
+    capture = lambda do |validator, method, value, **options|
+      result = validator.public_send(method, value, **options)
+      [:result, (method == :validate) ? result.errors : result]
+    rescue => error
+      [:error, error.class, error.message]
+    end
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    properties = {"p1" => {"pattern" => "(?=x)"}, "p2" => {"type" => "integer"}}
+    rules = [{"properties" => properties},
+      {"properties" => properties, "patternProperties" => {"[" => true}},
+      {"properties" => properties, "propertyNames" => {"pattern" => "["}}]
+    schemas = rules.flat_map { |rule| [rule, dialect.merge(rule, "unevaluatedProperties" => false)] }
+    incompatible = "x".encode(Encoding::UTF_16LE)
+    values = [{"p2" => "bad", "p1" => incompatible}, {"p1" => incompatible, "p2" => "bad"},
+      {"p2" => "bad", "p1" => "x"}, {"p1" => "x", "p2" => 1}]
+    options = [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([:valid?, :validate], options).map do |value, method, limits|
+        capture.call(vm, method, value, **limits)
+      end
+      [Schemurai.compile(schema, backend: :native), expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      values.product([:valid?, :validate], options).zip(expected).each do |(value, method, limits), result|
+        expect(capture.call(native, method, value, **limits)).to eq(result)
+      end
+    end
+  end
+
+  it "preserves pattern error scopes and skips later string assertions after invalid syntax" do
+    schema = {"pattern" => "[", "format" => "date", "contentMediaType" => "application/json", "minLength" => 4, "maxLength" => 1}
+    value = "bad"
+    expected = Schemurai.compile(schema, backend: :vm, format: true, content: true).validate(value).errors
+    native = Schemurai.compile(schema, backend: :native, format: true, content: true)
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(native.validate(value).errors).to eq(expected)
+    key = "x"
+    scoped = Schemurai.compile({"properties" => {key => {"pattern" => "["}}, "patternProperties" => {"[" => true}}, backend: :native)
+    expect(scoped.valid?({key => key})).to be(false)
+    expect { scoped.validate({key => key}) }.to raise_error(RegexpError)
+  end
+
+  it "matches Ruby pattern-property routing and annotation scopes without VM execution" do
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rule = {"patternProperties" => {"(?=a)a" => {"minimum" => 1}, "(a)\\1" => {"type" => "integer"}}, "additionalProperties" => false}
+    schemas = [rule, dialect.merge(rule, "unevaluatedProperties" => false), {"propertyNames" => {"pattern" => "(?=a)a"}}]
+    expect_native_policy_results(schemas, [{}, {"aa" => 1}, {"aa" => 0}, {"ab" => 2}, {"b" => 1}, {"aa" => "bad"}])
+  end
+
+  it "roots runtime regexp observations through GC and clears results between calls" do # rubocop:disable RSpec/ExampleLength
+    schema = {"items" => {"properties" => {"value" => {"pattern" => "(?=a)a"}, "extra" => {"pattern" => "(b)\\1"}}}}
+    values = Array.new(8) { |i| {"value" => "a#{i}", "extra" => (i == 0) ? +"b" : +"bb"} }
+    expected = Schemurai.compile(schema, backend: :vm).validate(values).errors
     native = Schemurai.compile(schema, backend: :native)
-    expect(native.valid?("aa".b)).to eq(vm.valid?("aa".b))
-    incompatible = "a".encode(Encoding::UTF_16LE)
-    expect { native.valid?(incompatible) }.to raise_error(Encoding::CompatibilityError)
-    expect { vm.valid?(incompatible) }.to raise_error(Encoding::CompatibilityError)
-    invalid = "\xFF".dup.force_encoding(Encoding::UTF_8)
-    expect { native.valid?(invalid) }.to raise_error(ArgumentError)
-    expect { vm.valid?(invalid) }.to raise_error(ArgumentError)
-    invalid.force_encoding(Encoding::US_ASCII)
-    expect { native.valid?(invalid) }.to raise_error(ArgumentError)
-    expect { vm.valid?(invalid) }.to raise_error(ArgumentError)
+    compiler = Schemurai.const_get(:Internal)::EcmaRegexp
+    compiles = 0
+    matches = 0
+    allow(compiler).to receive(:compile).and_wrap_original do |original, source, budget|
+      compiles += 1
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      regexp = original.call(source, budget)
+      match = regexp.method(:match?)
+      regexp.define_singleton_method(:match?) do |value|
+        matches += 1
+        GC.verify_compaction_references(double_heap: true, toward: :empty) if matches <= 6
+        match.call(value)
+      end
+      regexp
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect(native.valid?(values)).to be(false)
+    expect(native.validate(values).errors).to eq(expected)
+    expect(native.validate(values, timeout: 10).errors).to eq(expected)
+    values.first["extra"].replace("bb")
+    expect(native.valid?(values)).to be(true)
+    expect(compiles).to eq(2)
+  end
+
+  it "retains the native duration deadline across Ruby regexp retries" do
+    values = Array.new(20_000) { |i| "a#{i}" }
+    native = Schemurai.compile({"items" => {"pattern" => "(?=a)a"}}, backend: :native)
+    allow(Process).to receive(:clock_gettime).and_call_original
+    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect { native.valid?(values, timeout: 0.005) }.to raise_error(Schemurai::LimitExceeded) { |error| expect(error.limit).to eq(:timeout) }
+    expect(native.valid?(["a"], timeout: 10)).to be(true)
+    expect(native.validate(["a"], timeout: 10).errors).to be_empty
+  end
+
+  it "keeps libruby regexps and observation tables private to each Ractor" do
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:ruby-regexp" => {"pattern" => "(a)\\1"}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        native = shared.validator_for("urn:ruby-regexp")
+        program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        GC.start
+        [program.valid?("aa"), program.valid?("b"), program.diagnostics("b").map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, ["pattern"]]) }
   end
 
   it "shares native instruction tables while Ractors own their search caches" do # rubocop:disable RSpec/ExampleLength

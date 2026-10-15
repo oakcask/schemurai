@@ -1,6 +1,7 @@
 //! Crate-backed matching over borrowed Ruby string bytes.
 //! The compatibility adapter translates VM shorthands and absolute anchors;
-//! regex-syntax parses syntax, and regex-automata performs every search.
+//! regex-syntax parses syntax and regex-automata handles the fast searches.
+//! Other cases request a libruby match after the Rust evaluation returns.
 use super::*;
 use regex_automata::{
     Anchored, Input, MatchKind,
@@ -12,12 +13,27 @@ use regex_syntax::ast::{Ast, RepetitionKind, RepetitionRange};
 
 // Each validator owns its search caches. Compiled regex/DFA data stays shared.
 #[derive(Default)]
-pub struct Caches(std::cell::RefCell<Vec<Option<Box<Cache>>>>);
+pub struct Caches {
+    searches: std::cell::RefCell<Vec<Option<Box<Cache>>>>,
+    matches: std::cell::Cell<*const c_void>,
+    pending: std::cell::Cell<Option<(Value, Value, bool)>>,
+    deadline: std::cell::Cell<Option<std::time::Instant>>,
+    runtime_order: std::cell::Cell<bool>,
+}
+unsafe extern "C" {
+    fn sn_cached_regexp(matches: *const c_void, source: Value, value: Value) -> i32;
+}
 impl Caches {
+    pub(super) fn runtime_order(&self) -> bool {
+        self.runtime_order.get()
+    }
+    pub(super) fn budget(&self, limits: budget::Limits) -> budget::Budget {
+        budget::Budget::resume(limits, &self.deadline)
+    }
     fn is_match(&self, index: usize, regex: &Regex, bytes: &[u8]) -> bool {
         // Each runner is tied to one engine, whose regex indices are fixed at
         // compilation. Allocate only the caches this validator actually uses.
-        let mut caches = self.0.borrow_mut();
+        let mut caches = self.searches.borrow_mut();
         if caches.len() <= index {
             caches.resize_with(index + 1, || None);
         }
@@ -25,6 +41,22 @@ impl Caches {
         regex
             .search_half_with(cache, &Input::new(bytes).earliest(true))
             .is_some()
+    }
+
+    fn ruby_match(&self, source: Value, value: Value, assertion: bool) -> Verdict {
+        let matches = self.matches.get();
+        if !matches.is_null() {
+            let cached = unsafe { sn_cached_regexp(matches, source, value) };
+            if assertion && cached == REGEXP_INVALID {
+                return Invalid;
+            }
+            let result = decode(cached);
+            if result != Unsupported {
+                return result;
+            }
+        }
+        self.pending.set(Some((source, value, assertion)));
+        Unsupported
     }
 }
 #[unsafe(no_mangle)]
@@ -42,7 +74,7 @@ pub unsafe extern "C" fn sn_caches_free(caches: *mut Caches) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_size(caches: *const Caches) -> usize {
     // GC may inspect a stopped runner while its search has borrowed a cache.
-    let Ok(caches) = (unsafe { &*caches }).0.try_borrow() else {
+    let Ok(caches) = (unsafe { &*caches }).searches.try_borrow() else {
         return std::mem::size_of::<Caches>();
     };
     std::mem::size_of::<Caches>()
@@ -54,8 +86,70 @@ pub unsafe extern "C" fn sn_caches_size(caches: *const Caches) -> usize {
             .sum::<usize>()
 }
 
+/// # Safety
+/// All pointers must be live. The C table belongs to the owning runner.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *const c_void) {
+    let caches = unsafe { &*caches };
+    caches.matches.set(matches);
+    caches.pending.set(None);
+}
+/// # Safety
+/// Caches must be live and called only between complete validation calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
+    let caches = unsafe { &*caches };
+    caches.pending.set(None);
+    caches.deadline.set(None);
+    caches.runtime_order.set(false);
+}
+/// # Safety
+/// Caches must be live and no Rust evaluation may be active.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
+    let caches = unsafe { &*caches };
+    caches.pending.set(None);
+    caches.runtime_order.set(true);
+}
+/// # Safety
+/// Caches and output pointers must be live under the GVL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_pending(
+    caches: *const Caches,
+    source: *mut Value,
+    value: *mut Value,
+    assertion: *mut i32,
+) -> i32 {
+    if let Some((pattern, instance, rescues)) = unsafe { &*caches }.pending.get() {
+        unsafe {
+            *source = pattern;
+            *value = instance;
+            *assertion = i32::from(rescues);
+        }
+        1
+    } else {
+        0
+    }
+}
+/// # Safety
+/// Call from the owning runner's GC mark callback while caches are live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
+    if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
+        unsafe {
+            sn_pin(source);
+            sn_pin(value);
+        }
+    }
+}
+
 #[derive(Debug)]
-pub(super) enum Pattern {
+pub(super) struct Pattern {
+    source: Value,
+    matcher: Matcher,
+}
+#[derive(Debug)]
+enum Matcher {
     Unsupported,
     Dfa(Box<dense::DFA<Vec<u32>>>),
     Compiled { regex: Regex, index: usize },
@@ -73,7 +167,7 @@ impl PatternGroup {
         if !(2..=64).contains(&patterns.len())
             || !patterns
                 .iter()
-                .all(|(pattern, _)| matches!(pattern, Pattern::Dfa(_)))
+                .all(|(pattern, _)| matches!(pattern.matcher, Matcher::Dfa(_)))
         {
             return None;
         }
@@ -149,30 +243,99 @@ impl Pattern {
         values: &[Value],
         invalid: impl FnMut(usize, Value) -> Verdict,
     ) -> Verdict {
-        match self {
-            Self::Dfa(dfa) => scan_items(required, values, invalid, |bytes| {
-                match dfa.try_search_fwd(&Input::new(bytes).anchored(Anchored::Yes).earliest(true))
+        match &self.matcher {
+            Matcher::Dfa(dfa) => scan_items(
+                required,
+                values,
+                invalid,
+                |bytes| match dfa
+                    .try_search_fwd(&Input::new(bytes).anchored(Anchored::Yes).earliest(true))
                 {
                     Ok(matched) => verdict(matched.is_some()),
                     Err(_) => Unsupported,
-                }
-            }),
-            Self::Compiled { regex, index } => scan_items(required, values, invalid, |bytes| {
-                verdict(caches.is_match(*index, regex, bytes))
-            }),
-            Self::Unsupported => scan_items(required, values, invalid, |_| Unsupported),
+                },
+                |value| caches.ruby_match(self.source, value, true),
+            ),
+            Matcher::Compiled { regex, index } => scan_items(
+                required,
+                values,
+                invalid,
+                |bytes| verdict(caches.is_match(*index, regex, bytes)),
+                |value| caches.ruby_match(self.source, value, true),
+            ),
+            Matcher::Unsupported => scan_items(
+                required,
+                values,
+                invalid,
+                |_| Unsupported,
+                |value| caches.ruby_match(self.source, value, true),
+            ),
         }
     }
 
     pub(super) fn memory_usage(&self) -> usize {
-        match self {
-            Self::Dfa(dfa) => std::mem::size_of_val(&**dfa) + dfa.memory_usage(),
-            Self::Compiled { regex, .. } => regex.memory_usage(),
-            Self::Unsupported => 0,
+        match &self.matcher {
+            Matcher::Dfa(dfa) => std::mem::size_of_val(&**dfa) + dfa.memory_usage(),
+            Matcher::Compiled { regex, .. } => regex.memory_usage(),
+            Matcher::Unsupported => 0,
         }
     }
 
     pub(super) fn compile(value: Value, cache_count: &mut usize) -> Self {
+        Self {
+            source: value,
+            matcher: Matcher::compile(value, cache_count),
+        }
+    }
+
+    pub(super) fn eval(&self, caches: &Caches, value: Value) -> Verdict {
+        self.eval_value(caches, value, false)
+    }
+    pub(super) fn assertion(&self, caches: &Caches, value: Value) -> Verdict {
+        self.eval_value(caches, value, true)
+    }
+    fn eval_value(&self, caches: &Caches, value: Value, assertion: bool) -> Verdict {
+        if matches!(self.matcher, Matcher::Unsupported) {
+            return caches.ruby_match(self.source, value, assertion);
+        }
+        let mut data = std::ptr::null();
+        let mut len = 0;
+        let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
+        if encoding == ENCODING_OTHER {
+            return caches.ruby_match(self.source, value, assertion);
+        }
+        let bytes = unsafe { byte_view(data, len) };
+        let result = self.matcher.eval_bytes(caches, bytes, encoding);
+        if result == Unsupported {
+            caches.ruby_match(self.source, value, assertion)
+        } else {
+            result
+        }
+    }
+
+    pub(super) fn eval_bytes(
+        &self,
+        caches: &Caches,
+        value: Value,
+        bytes: &[u8],
+        encoding: i32,
+    ) -> Verdict {
+        let result = self.matcher.eval_bytes(caches, bytes, encoding);
+        if result == Unsupported {
+            caches.ruby_match(self.source, value, true)
+        } else {
+            result
+        }
+    }
+    pub(super) fn invalid(&self, caches: &Caches, value: Value) -> bool {
+        let matches = caches.matches.get();
+        !matches.is_null()
+            && unsafe { sn_cached_regexp(matches, self.source, value) } == REGEXP_INVALID
+    }
+}
+
+impl Matcher {
+    fn compile(value: Value, cache_count: &mut usize) -> Self {
         if unsafe { sn_kind(value) } != TYPE_STRING {
             return Self::Unsupported;
         }
@@ -231,21 +394,7 @@ impl Pattern {
             .unwrap_or(Self::Unsupported)
     }
 
-    pub(super) fn eval(&self, caches: &Caches, value: Value) -> Verdict {
-        if matches!(self, Self::Unsupported) {
-            return Unsupported;
-        }
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
-        if encoding == ENCODING_OTHER {
-            return Unsupported;
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        self.eval_bytes(caches, bytes, encoding)
-    }
-
-    pub(super) fn eval_bytes(&self, caches: &Caches, bytes: &[u8], encoding: i32) -> Verdict {
+    fn eval_bytes(&self, caches: &Caches, bytes: &[u8], encoding: i32) -> Verdict {
         if encoding == ENCODING_OTHER || matches!(self, Self::Unsupported) {
             return Unsupported;
         }
@@ -285,6 +434,7 @@ fn scan_items(
     values: &[Value],
     mut invalid: impl FnMut(usize, Value) -> Verdict,
     mut matches: impl FnMut(&[u8]) -> Verdict,
+    mut fallback: impl FnMut(Value) -> Verdict,
 ) -> Verdict {
     for (index, &value) in values.iter().enumerate() {
         let mut data = std::ptr::null();
@@ -302,14 +452,21 @@ fn scan_items(
             }
             continue;
         }
-        if encoding == ENCODING_OTHER {
-            return Unsupported;
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        if !valid_encoding(bytes, encoding) {
-            return Unsupported;
-        }
-        let result = matches(bytes);
+        let result = if encoding == ENCODING_OTHER {
+            Unsupported
+        } else {
+            let bytes = unsafe { byte_view(data, len) };
+            if valid_encoding(bytes, encoding) {
+                matches(bytes)
+            } else {
+                Unsupported
+            }
+        };
+        let result = if result == Unsupported {
+            fallback(value)
+        } else {
+            result
+        };
         match result {
             Unsupported => return Unsupported,
             Invalid => {
@@ -448,7 +605,7 @@ mod tests {
         let regex = Regex::new("value[0-9]+").unwrap();
         assert!(caches.is_match(0, &regex, b"value1"));
         assert!(unsafe { sn_caches_size(&caches) } > std::mem::size_of::<Caches>());
-        let _search = caches.0.borrow_mut();
+        let _search = caches.searches.borrow_mut();
         assert_eq!(
             unsafe { sn_caches_size(&caches) },
             std::mem::size_of::<Caches>()
