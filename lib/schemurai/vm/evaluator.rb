@@ -60,7 +60,7 @@ module Schemurai
       include Internal::UniqueItems
       include Internal::ValueEquality
       include Internal::ContainerChecks::Bounds
-      include Internal::ContainerChecks::Required
+      include Internal::ContainerChecks::ObjectChildren
       include Internal::ContainerChecks::ArrayChildren
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
@@ -622,52 +622,7 @@ module Schemurai
         return false unless valid_container_bounds?(length, rules.max_properties, rules.min_properties)
         return false unless valid_required_keys?(rules.required, value)
 
-        properties = rules.properties
-        patterns = rules.patterns
-        additional = rules.additional
-        unless properties.empty? && patterns.nil? && additional.nil?
-          value.each do |name, property_value|
-            @budget&.checkpoint
-            matched = false
-            if (child = properties[name])
-              matched = true
-              return false unless evaluate_valid(child, property_value)
-            end
-            if patterns
-              patterns.each do |pattern, child|
-                @budget&.checkpoint
-                next unless ecma_regexp(pattern).match?(name)
-                matched = true
-                return false unless evaluate_valid(child, property_value)
-              end
-            end
-            return false if !matched && additional && !evaluate_valid(additional, property_value)
-          end
-        end
-
-        if (property_names = rules.property_names)
-          value.each_key { |name| return false unless evaluate_valid(property_names, name) }
-        end
-        if (dependencies = rules.dependencies)
-          dependencies.each do |name, dependency|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            if dependency.is_a?(Array)
-              return false unless all_keys_present?(dependency, value)
-            else
-              return false unless evaluate_valid(dependency, value)
-            end
-          end
-        end
-        return false unless valid_dependency_keys?(rules.dependent_required, value)
-        if (dependent_schemas = rules.dependent_schemas)
-          dependent_schemas.each do |name, child|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            return false unless evaluate_valid(child, value)
-          end
-        end
-        true
+        valid_object_children?(rules, value) { |child, item| evaluate_valid(child, item) }
       end
 
       private def check_object(rules, value, prior_evaluation)

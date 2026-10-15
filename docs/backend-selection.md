@@ -952,13 +952,13 @@ schemas. Frames preserve exception ordering, trial short circuits and error
 limits, and remain rooted during GC and private to each Ractor runner.
 Ordinary supported containers retain native size and uniqueness algorithms.
 Object validity with only count assertions needs no key scan because only its size is read.
-Array validity can call native children from Ruby indexed traversal and
-any?/count methods when no unevaluated-item traversal is required. Shared Ruby
-helpers preserve prefix/item/additional-item selection, length snapshots,
-indexing and contains enumeration. Native children are selected by compiled
+Array and Object validity can call native children from Ruby indexed traversal,
+any?/count and each/each_key methods when no unevaluated-location traversal is
+required. Shared Ruby helpers preserve item/property selection, length snapshots,
+indexing, pattern matching, key names and dependency order. Native children are selected by compiled
 Program identity; Ruby never reads their instruction streams. The compiler proof
 admits scalar assertions, empty schemas, logical applicators, acyclic static
-references, Array child traversal and Object headers, including nested contains. Children need
+references and Array/Object child traversal, including nested contains. Children need
 no inherited dynamic bindings or exported annotations. Original dynamic or
 recursive reference opcodes remain excluded from isolated children, even when
 the native compiler can simplify their target: VM scope polling is observable
@@ -987,6 +987,9 @@ are cleared through one ensure boundary, with persistent scalar caches retained.
 Diagnostics/trials still require indexed errors and annotation export and
 retain their existing compatibility path for these special containers. Their
 guard and the depth guard run before other scalar methods in the same node.
+Object pattern matching uses the shared Ruby regexp cache and deadline wrapper.
+Frames read the invocation's current budget when retained each blocks run, so
+limited blocks observe the VM's cleared budget after the public call returns.
 The native evaluator owns unbounded number/regexp state and shares it with
 the remaining VM compatibility evaluator. Alternating validity and detailed
 validation, or recompiling after reference registration, therefore retains
@@ -994,10 +997,9 @@ the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
-Array subclasses and singleton-method Arrays can still delegate when child
-graphs need inherited dynamic scope or evaluated-location export. Special Hashes,
-including subclasses, singleton methods and nonstandard keys, retain VM child
-traversal for properties and schema dependencies. Schema evaluation beyond the native
+Special Arrays and Hashes, including subclasses, singleton methods and
+nonstandard keys, can still delegate when child graphs need inherited dynamic
+scope or evaluated-location export. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

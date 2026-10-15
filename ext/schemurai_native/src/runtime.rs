@@ -133,13 +133,14 @@ impl Caches {
             RUNTIME_SCALAR_CONTAINS,
         )
     }
-    pub(super) fn array_children(
+    pub(super) fn container_children(
         &self,
         rules: Value,
         instance: Value,
         node: usize,
         depth: usize,
         required: i32,
+        object: bool,
     ) -> Verdict {
         self.children_request(
             ContainsArguments {
@@ -151,7 +152,11 @@ impl Caches {
                 scalar_kind: CALLBACK_RUNTIME,
                 scalar_flags: 0,
             },
-            RUNTIME_ARRAY_CHILDREN,
+            if object {
+                RUNTIME_OBJECT_CHILDREN
+            } else {
+                RUNTIME_ARRAY_CHILDREN
+            },
         )
     }
     fn children_request(&self, arguments: ContainsArguments, operation: i32) -> Verdict {

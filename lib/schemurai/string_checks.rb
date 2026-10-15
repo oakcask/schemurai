@@ -11,10 +11,24 @@ module Schemurai
     module StringChecks
       module Regexps
         private def ecma_regexp(pattern)
-          regexps = (@regexps ||= {})
+          regexps = regexp_cache
           return regexps[pattern] if regexps.key?(pattern)
 
           regexps[pattern] = EcmaRegexp.compile(pattern, @budget)
+        end
+
+        private def regexp_cache = (@regexps ||= {})
+      end
+
+      module TimedRegexps
+        private def regexp_budget = @budget
+
+        private def ecma_regexp(pattern)
+          budget = regexp_budget
+          budget.check_deadline!
+          result = super
+          budget.check_deadline!
+          result
         end
       end
 

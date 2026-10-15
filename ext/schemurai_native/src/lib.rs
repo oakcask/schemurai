@@ -1324,7 +1324,9 @@ impl Engine {
                 Op::Array(_, rules) if rules.header_only() || self.array_callbacks(rules) => {
                     KindDemand::Predicate
                 }
-                Op::Object(_, rules) if rules.header_only() => KindDemand::Predicate,
+                Op::Object(_, rules) if rules.header_only() || self.object_callbacks(rules) => {
+                    KindDemand::Predicate
+                }
                 Op::Array(..) | Op::Object(..) => KindDemand::Data,
                 Op::Unsupported
                 | Op::Boolean(_)
@@ -1528,8 +1530,8 @@ impl Execution<'_> {
                     if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
                         rules.header.valid(self.caches, *required, value)
                     } else if self.caches.callbacks_allowed()
-                        && self.scalar_contains(rules)
                         && rules.header.runtime_required(self.caches, kind)
+                        && self.scalar_contains(rules)
                     {
                         if depth >= MAX_EVALUATION_DEPTH {
                             return Unsupported;
@@ -1545,8 +1547,8 @@ impl Execution<'_> {
                             ),
                         )
                     } else if self.caches.callbacks_allowed()
-                        && self.array_callbacks(rules)
                         && rules.header.runtime_required(self.caches, kind)
+                        && self.array_callbacks(rules)
                     {
                         if depth >= MAX_EVALUATION_DEPTH {
                             return Unsupported;
@@ -1565,6 +1567,16 @@ impl Execution<'_> {
                 Op::Object(required, rules) => {
                     if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
                         rules.header.valid(self.caches, *required, value)
+                    } else if self.caches.callbacks_allowed()
+                        && rules.header.runtime_required(self.caches, kind)
+                        && self.object_callbacks(rules)
+                    {
+                        if depth >= MAX_EVALUATION_DEPTH {
+                            return Unsupported;
+                        }
+                        rules
+                            .header
+                            .children(self.caches, *required, value, node, depth + 1)
                     } else if *required != 0 && kind != TYPE_OBJECT {
                         Invalid
                     } else if kind != TYPE_OBJECT {
@@ -1572,7 +1584,17 @@ impl Execution<'_> {
                     } else if rules.header_only() {
                         rules.valid_header(self.caches, value, self.undefined, &self.budget)
                     } else {
-                        self.object(rules, value, depth + 1, active)
+                        let result = self.object(rules, value, depth + 1, active);
+                        if self.can_call_runtime(result)
+                            && self.caches.callbacks_allowed()
+                            && self.object_callbacks(rules)
+                        {
+                            rules
+                                .header
+                                .children(self.caches, *required, value, node, depth + 1)
+                        } else {
+                            result
+                        }
                     }
                 }
                 _ => self.leaf(op, kind, value, depth),
@@ -1802,6 +1824,7 @@ impl Execution<'_> {
                 }
             } else if let Some((required, rules)) = object {
                 let result = self.record_items(
+                    child,
                     rules,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
@@ -1989,6 +2012,7 @@ impl Execution<'_> {
     }
     fn record_items(
         &self,
+        node: usize,
         rules: &Object,
         required: i32,
         values: &[Value],
@@ -2015,7 +2039,14 @@ impl Execution<'_> {
             } else {
                 self.object(rules, value, depth, active)
             };
-            let result = if header_only && !runtime && self.can_call_runtime(result) {
+            let result = if self.can_call_runtime(result)
+                && self.caches.callbacks_allowed()
+                && self.object_callbacks(rules)
+            {
+                rules
+                    .header
+                    .children(self.caches, required, value, node, depth)
+            } else if header_only && !runtime && self.can_call_runtime(result) {
                 // A declined record guard has not invoked instance methods.
                 // Preserve the fast record walk while handing special values
                 // to the same runtime frame as general header evaluation.
@@ -2202,7 +2233,7 @@ impl Execution<'_> {
     fn unsupported_kind(&self, node: usize, kind: i32) -> bool {
         kind == TYPE_UNSUPPORTED
             && (self.kind_demand[node] == KindDemand::Data
-                || (!self.caches.callbacks_allowed() && self.callback_array_node(node)))
+                || (!self.caches.callbacks_allowed() && self.callback_container_node(node)))
     }
     fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
         if kind == TYPE_UNSUPPORTED
