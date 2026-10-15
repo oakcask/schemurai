@@ -947,13 +947,14 @@ static VALUE call_runtime(VALUE context) {
     int staged = (operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL)
         || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches)
         || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
-        || operation->kind == SN_RUNTIME_ARRAY_CHILDREN;
+        || operation->kind == SN_RUNTIME_ARRAY_CHILDREN || operation->kind == SN_RUNTIME_OBJECT_CHILDREN;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
         return Qtrue;
     }
-    if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS || operation->kind == SN_RUNTIME_ARRAY_CHILDREN) {
+    if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS || operation->kind == SN_RUNTIME_ARRAY_CHILDREN
+        || operation->kind == SN_RUNTIME_OBJECT_CHILDREN) {
         contains_arguments arguments;
         sn_contains_arguments(r->caches, &arguments);
         VALUE callback = build_runner(r->owner, arguments.child);
@@ -969,7 +970,9 @@ static VALUE call_runtime(VALUE context) {
         VALUE checks = rb_const_get(internal, rb_intern_const("ContainerChecks"));
         const char *frame_name = operation->kind == SN_RUNTIME_SCALAR_CONTAINS
             ? (NIL_P(call->budget) ? "ContainsFrame" : "LimitedContainsFrame")
-            : (NIL_P(call->budget) ? "ArrayChildrenFrame" : "LimitedArrayChildrenFrame");
+            : operation->kind == SN_RUNTIME_ARRAY_CHILDREN
+                ? (NIL_P(call->budget) ? "ArrayChildrenFrame" : "LimitedArrayChildrenFrame")
+                : (NIL_P(call->budget) ? "ObjectChildrenFrame" : "LimitedObjectChildrenFrame");
         VALUE klass = rb_const_get(checks, rb_intern(frame_name));
         VALUE args[] = {arguments.rules, arguments.instance, call->budget, INT2FIX(arguments.required), callback};
         VALUE frame = rb_class_new_instance(5, args, klass);
@@ -1279,6 +1282,24 @@ static VALUE runner_evaluate_child(VALUE self, VALUE program, VALUE instance) {
     RB_GC_GUARD(self);
     return result;
 }
+static runner_holder *factory_scope(VALUE self) {
+    runner_holder *factory, *scope;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, factory);
+    if (NIL_P(factory->parent) || !factory->callback_context)
+        rb_raise(rb_eRuntimeError, "not a native child factory");
+    TypedData_Get_Struct(factory->parent, runner_holder, &runner_type, scope);
+    return scope;
+}
+static VALUE runner_invocation_budget(VALUE self) {
+    return factory_scope(self)->active_budget;
+}
+static VALUE runner_regexp_cache(VALUE self) {
+    runner_holder *scope = factory_scope(self);
+    VALUE *slot = NIL_P(scope->active_budget) ? &scope->regexps : &scope->limited_regexps;
+    if (NIL_P(*slot)) *slot = rb_hash_new();
+    publish_states(scope);
+    return *slot;
+}
 static VALUE diagnostics(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
     VALUE run = build_runner(self, sn_root_index(h->engine));
@@ -1332,6 +1353,8 @@ void Init_schemurai_native(void) {
     rb_undef_alloc_func(runner_class);
     rb_define_method(runner_class, "call", scalar_callback, 1);
     rb_define_method(runner_class, "evaluate_child", runner_evaluate_child, 2);
+    rb_define_method(runner_class, "invocation_budget", runner_invocation_budget, 0);
+    rb_define_method(runner_class, "regexp_cache", runner_regexp_cache, 0);
     rb_define_method(runner_class, "share_scalar_state", runner_share_scalar_state, 2);
     rb_define_method(runner_class, "valid?", runner_valid, 1);
     rb_define_method(runner_class, "valid_with_budget", runner_valid_with_budget, 2);

@@ -226,7 +226,7 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile(schema, backend: :native)
     vm = Schemurai.compile(schema, backend: :vm)
     runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(runner.valid?(value)).to be_nil
+    expect(runner.valid?(value)).to eq(vm.valid?(value))
     expect(native.valid?(value)).to eq(vm.valid?(value))
     expect(native.validate(value).errors).to eq(vm.validate(value).errors)
   end
@@ -516,7 +516,7 @@ RSpec.describe "native VALUE execution" do
     value = {"x" => 1}
     expect(runner.valid?(value)).to be(true)
     value[:foreign] = 1
-    expect(runner.valid?(value)).to be_nil
+    expect(runner.valid?(value)).to be(true)
     expect(runner.diagnostics(value)).to be_nil
   end
 
@@ -1279,6 +1279,102 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "evaluates special object child traversals without VM execution" do # rubocop:disable RSpec/ExampleLength
+    rescuing = Class.new(Hash) do
+      def each(&block)
+        super
+      rescue RegexpError, ArgumentError, NoMethodError
+        self
+      end
+    end
+    fake = Object.new
+    fake.define_singleton_method(:is_a?) { |type| type == Hash }
+    fake.define_singleton_method(:length) { 2 }
+    fake.define_singleton_method(:key?) { |name| name == "x" }
+    fake.define_singleton_method(:each) { |&block| {"x" => 1, "y" => "a"}.each(&block) }
+    fake.define_singleton_method(:each_key) { |&block| {"x" => 1, "y" => "a"}.each_key(&block) }
+    values = [Class.new(Hash)["x", 1, "y", "a"], rescuing["x", BasicObject.new],
+      Class.new(Hash)["x", Class.new(Hash)["x", 1]], Class.new(Hash)[1, 2], Class.new(Hash).new,
+      Class.new(Hash)["x".encode("UTF-16LE"), 1], Class.new(Hash)["\xff".b.force_encoding("UTF-8"), 1],
+      {"x".dup => 1}.compare_by_identity, fake, BasicObject.new, nil, {"x" => [1]}, [1]]
+    children = [true, false, {"type" => "integer"}, {"type" => "string", "minLength" => 2},
+      {"anyOf" => [{"type" => "integer"}, {"const" => "a"}]}, {"items" => {"type" => "integer"}},
+      {"properties" => {"x" => {"type" => "integer"}}},
+      {"$id" => "urn:object-child", "$defs" => {"n" => {"type" => "integer"}}, "allOf" => [{"$ref" => "urn:object-child#/$defs/n"}]}]
+    rules = children.flat_map do |child|
+      [{"properties" => {"x" => child}, "additionalProperties" => false},
+        {"patternProperties" => {"x" => child}}, {"propertyNames" => child},
+        {"dependencies" => {"x" => child}},
+        {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentSchemas" => {"x" => child}},
+        {"type" => "object", "required" => ["x"], "maxProperties" => 2, "properties" => {"x" => child},
+         "patternProperties" => {"x" => child}, "additionalProperties" => child}]
+    end
+    rules.concat([{"patternProperties" => {"[" => true}}, {"minProperties" => 3, "patternProperties" => {"[" => true}}])
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value]] },
+      ->(rule, value) { [{"properties" => {"v" => rule}}, Class.new(Hash)["v", value]] },
+      ->(rule, value) { [{"contains" => rule}, Class.new(Array).new([value])] },
+      ->(rule, value) { [{"anyOf" => [rule, false]}, value] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([{}, {timeout: 10}, {max_errors: 0}]).map do |value, options|
+        input = wrap.call(rule, value).last
+        [input, options, capture_validation(vm, :valid?, input, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each_with_index do |(input, options, outcome), index|
+        expect(capture_validation(native, :valid?, input, **options)).to eq(outcome), [schema, options, index].inspect
+      end
+    end
+  end
+
+  it "preserves saved object iteration blocks and invocation budgets" do # rubocop:disable RSpec/ExampleLength
+    record = Class.new(Hash) do
+      attr_reader :saved
+
+      def each(&block)
+        @saved = block
+        super
+      end
+    end
+    schemas = [{"properties" => {"x" => {"type" => "integer"}}}, {"patternProperties" => {"^x$" => true}}]
+    run = lambda do |backend, schema, options|
+      value = record["x", 1]
+      validator = Schemurai.compile(schema, backend: backend)
+      result = capture_validation(validator, :valid?, value, **options)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      invoke = ->(pair) { value.saved.call(*pair) }
+      [result, capture_validation(invoke, :call, ["x", 2]), capture_validation(invoke, :call, ["unused", 3])]
+    end
+    cases = schemas.product([{}, {timeout: 10}]).map { |schema, options| [schema, options, run.call(:vm, schema, options)] }
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |schema, options, expected| expect(run.call(:native, schema, options)).to eq(expected) }
+  end
+
+  it "shares object-pattern caches with diagnostic and bounded evaluation" do # rubocop:disable RSpec/ExampleLength
+    compiler = Schemurai.const_get(:Internal)::EcmaRegexp
+    schema = {"patternProperties" => {"^x" => {"type" => "integer"}}}
+    [{}, {timeout: 10}].each do |options|
+      results = [:vm, :native].map do |backend|
+        calls = []
+        allow(compiler).to receive(:compile).and_wrap_original do |original, *args|
+          calls << args.first
+          original.call(*args)
+        end
+        validator = Schemurai.compile(schema, backend: backend)
+        value = Class.new(Hash)["x", 1, "xx", 2]
+        outcomes = [:valid?, :validate, :valid?, :validate].map { |method| capture_validation(validator, method, value, **options) }
+        [outcomes, calls]
+      end
+      expect(results.last).to eq(results.first)
+    end
+  end
+
   it "evaluates special array item traversals without VM execution" do # rubocop:disable RSpec/ExampleLength
     indexed = Class.new(Array) do
       def [](index)
@@ -1377,6 +1473,33 @@ RSpec.describe "native VALUE execution" do
         super
       end
     end
+    record = Class.new(Hash) do
+      def initialize(calls, values)
+        super()
+        merge!(values)
+        @calls = calls
+      end
+
+      def length
+        @calls << :length
+        super
+      end
+
+      def key?(name)
+        @calls << [:key?, name]
+        super
+      end
+
+      def each(&block)
+        @calls << :each
+        super
+      end
+
+      def each_key(&block)
+        @calls << :each_key
+        super
+      end
+    end
     state = nil
     budget_class = Schemurai.const_get(:Internal)::LimitBudget
     allow(budget_class).to receive(:new).and_wrap_original do |original, **options|
@@ -1397,12 +1520,17 @@ RSpec.describe "native VALUE execution" do
       {"$id" => "urn:contains-child", "$defs" => {"leaf" => leaf},
        "allOf" => [{"$ref" => "urn:contains-child#/$defs/leaf"}, {"$ref" => "urn:contains-child#/$defs/leaf"}]},
       {"items" => leaf}, {"prefixItems" => [leaf, false], "items" => true},
-      {"items" => leaf, "contains" => {"const" => "a"}}].map do |child|
+      {"items" => leaf, "contains" => {"const" => "a"}},
+      {"properties" => {"x" => leaf}, "patternProperties" => {"^x$" => leaf}, "additionalProperties" => false},
+      {"propertyNames" => {"minLength" => 1}, "dependentRequired" => {"x" => ["x"]},
+       "dependentSchemas" => {"x" => {"properties" => {"x" => leaf}}}}].map do |child|
       {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => child}
     end
     run = lambda do |backend, schema, fail_at, options, text|
       state = {calls: [], checks: 0, fail_at: fail_at, active: false}
-      item = if text.is_a?(Array)
+      item = if text.is_a?(Hash)
+        record.new(state[:calls], text.transform_values { |value| string.new(state[:calls], value) })
+      elsif text.is_a?(Array)
         indexed.new(state[:calls], text.map { |value| string.new(state[:calls], value) })
       else
         string.new(state[:calls], text)
@@ -1411,7 +1539,7 @@ RSpec.describe "native VALUE execution" do
       outcome = capture_validation(Schemurai.compile(schema, backend: backend), :valid?, value, **options)
       [outcome, state[:calls]]
     end
-    cases = schemas.product([nil] + (1..20).to_a, [{timeout: 10}, {max_errors: 0}], ["a", "b", ["a"], %w[a b]]).map do |schema, fail_at, options, text|
+    cases = schemas.product([nil] + (1..20).to_a, [{timeout: 10}, {max_errors: 0}], ["a", "b", ["a"], %w[a b], {"x" => "a"}, {"x" => "b", "y" => "a"}]).map do |schema, fail_at, options, text|
       [schema, fail_at, options, text, run.call(:vm, schema, fail_at, options, text)]
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -1437,17 +1565,18 @@ RSpec.describe "native VALUE execution" do
     end
     rule = {"contains" => {"type" => "integer"}}
     cases = [
-      [{"allOf" => [rule, {"items" => {"properties" => {"v" => true}}}]}, ->(value) { value }],
-      [{"items" => {"allOf" => [rule, {"properties" => {"v" => true}}]}}, ->(value) { [value] }],
-      [{"properties" => {"v" => rule}}, ->(value) { {"v" => value} }],
+      [{"allOf" => [rule, {"items" => {"unevaluatedProperties" => true}}]}, ->(value) { value }],
+      [{"items" => {"allOf" => [rule, {"unevaluatedProperties" => true}]}}, ->(value) { [value] }],
+      [{"properties" => {"v" => rule}, "unevaluatedProperties" => true}, ->(value) { {"v" => value} }],
       [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }],
-      [{"contains" => {"anyOf" => [true, {"properties" => {"v" => true}}]}}, ->(value) { value }],
+      [{"contains" => {"anyOf" => [true, {"unevaluatedProperties" => true}]}}, ->(value) { value }],
       [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"unevaluatedProperties" => true}}, ->(value) { value }],
       [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "contains" => {"$ref" => "#/$defs/loop"}}, ->(value) { value }],
       [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "integer"}},
         "contains" => {"$dynamicRef" => "#x"}}, ->(value) { value }]
     ]
     cases.each do |schema, wrap|
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema)
       native = Schemurai.compile(schema, backend: :native)
       value = klass.new
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
@@ -1835,19 +1964,26 @@ RSpec.describe "native VALUE execution" do
   it "keeps native contains callbacks private to independent Ractor runners" do
     schemas = {"urn:contains" => {"contains" => {"type" => "integer"}},
                "urn:composite-contains" => {"contains" => {"allOf" => [{"type" => "integer"}, {"minimum" => 0}]}},
-               "urn:array-items" => {"items" => {"type" => "integer"}}}
+               "urn:array-items" => {"items" => {"type" => "integer"}},
+               "urn:object-properties" => {"properties" => {"x" => {"type" => "integer"}}, "patternProperties" => {"^x" => {"minimum" => 0}}}}
     registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
     workers = Array.new(2) do
       Ractor.new(registry) do |shared|
-        %w[urn:contains urn:composite-contains urn:array-items].map do |uri|
+        %w[urn:contains urn:composite-contains urn:array-items urn:object-properties].map do |uri|
           runner = shared.validator_for(uri).instance_variable_get(:@evaluator).instance_variable_get(:@program)
-          klass = Class.new(Array)
+          values = if uri == "urn:object-properties"
+            klass = Class.new(Hash)
+            [klass["x", 1], klass["x", "bad"], klass["x", 2]]
+          else
+            klass = Class.new(Array)
+            [klass.new([1]), klass.new(["bad"]), klass.new([2])]
+          end
           GC.start
-          [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+          values.map { |value| runner.valid?(value) }
         end
       end
     end
-    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([[true, false, true], [true, false, true], [true, false, true]]) }
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq(Array.new(4) { [true, false, true] }) }
   end
 
   it "preserves dependency triggers, key occurrences and message exceptions" do # rubocop:disable RSpec/ExampleLength
@@ -2952,9 +3088,9 @@ RSpec.describe "native VALUE execution" do
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     [0, 7, 8].each do |position|
       entries = Array.new(9) { |i| [(i == position) ? :unsupported : "k#{i}", i] }
-      expect(program.valid?(entries.to_h)).to be_nil
+      expect(program.valid?(entries.to_h)).to eq(vm.valid?(entries.to_h))
       expect(program.diagnostics(entries.to_h)).to be_nil
-      expect(program.valid?(entries.take(8).to_h)).to be_nil if position < 8
+      expect(program.valid?(entries.take(8).to_h)).to eq(vm.valid?(entries.take(8).to_h)) if position < 8
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -3331,7 +3467,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "leaves arbitrary Hash keys to the VM before performing native lookups" do # rubocop:disable RSpec/ExampleLength
+  it "uses Ruby key semantics for arbitrary Hash keys after native guards" do # rubocop:disable RSpec/ExampleLength
     calls = 0
     key = Object.new
     key.define_singleton_method(:hash) do
@@ -3352,12 +3488,16 @@ RSpec.describe "native VALUE execution" do
       native = Schemurai.compile(rules, backend: :native)
       vm = Schemurai.compile(rules, backend: :vm)
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      before = calls
       values.each do |value|
-        expect(program.valid?(value)).to be_nil
+        before = calls
         expect(program.diagnostics(value)).to be_nil
+        expect(calls).to eq(before)
+        expected = vm.valid?(value)
+        vm_calls = calls - before
+        before = calls
+        expect(program.valid?(value)).to eq(expected)
+        expect(calls - before).to eq(vm_calls)
       end
-      expect(calls).to eq(before)
       values.each do |value|
         expect(native.valid?(value)).to eq(vm.valid?(value))
         expect(native.validate(value).errors).to eq(vm.validate(value).errors)
@@ -5158,8 +5298,8 @@ RSpec.describe "native VALUE execution" do
         vm = Schemurai.compile(schema, backend: :vm)
         native = Schemurai.compile(schema, backend: :native)
         program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-        expect(program.valid?([full, {Object.new => 1}])).to be_nil
-        expect(program.valid?([full, full.dup.compare_by_identity])).to be_nil
+        special = [[full, {Object.new => 1}], [full, full.dup.compare_by_identity]]
+        special.each { |value| expect(program.valid?(value)).to eq(vm.valid?(value)) }
         [native, values.map { |value| [value, vm.valid?(value), vm.validate(value).errors] }]
       end
     end
@@ -5205,7 +5345,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "delegates unsupported record-array instances after the native Hash guard" do
+  it "evaluates special record-array validity after the native Hash guard" do
     schemas = [{"items" => {"properties" => {"id" => true}}}, {"items" => {"type" => "object", "properties" => {"id" => true}}}]
     values = [Class.new(Hash)["id", 1], {Object.new => 1}]
     singleton = {"id" => 1}
@@ -5216,7 +5356,7 @@ RSpec.describe "native VALUE execution" do
       vm = Schemurai.compile(schema, backend: :vm)
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
       values.each do |value|
-        expect(program.valid?([value])).to be_nil
+        expect(program.valid?([value])).to eq(vm.valid?([value]))
         expect(program.diagnostics([value])).to be_nil
         expect(native.valid?([value])).to eq(vm.valid?([value]))
         expect(native.validate([value]).errors).to eq(vm.validate([value]).errors)

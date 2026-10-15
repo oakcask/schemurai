@@ -37,7 +37,7 @@ impl Header {
         node: usize,
         depth: usize,
     ) -> Verdict {
-        caches.array_children(self.source, value, node, depth, required)
+        caches.container_children(self.source, value, node, depth, required, self.object)
     }
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
         !self.native_bounds
@@ -158,8 +158,10 @@ impl Engine {
     // Otherwise a later unsupported container could replay an already invoked
     // user block through the VM. Postorder leaves cycles unproven.
     pub(super) fn compile_scalar_callback_depths(&mut self) {
-        if !self.nodes.iter().flatten().any(|op| {
-            matches!(op, Op::Array(_, rules) if rules.unevaluated.is_none() && !rules.header_only())
+        if !self.nodes.iter().flatten().any(|op| match op {
+            Op::Array(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
+            Op::Object(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
+            _ => false,
         }) {
             self.scalar_callback_depths.clear();
             self.callback_child_depths.clear();
@@ -168,7 +170,7 @@ impl Engine {
         let mut edges = vec![vec![]; self.nodes.len()];
         let mut admitted = vec![true; self.nodes.len()];
         let mut child_admitted = vec![true; self.nodes.len()];
-        let mut contains = vec![false; self.nodes.len()];
+        let mut callbacks = vec![false; self.nodes.len()];
         for (node, ops) in self.nodes.iter().enumerate() {
             admitted[node] = !self.tracks[node];
             for (index, op) in ops.iter().enumerate() {
@@ -186,10 +188,14 @@ impl Engine {
                     | Op::Enum(_) => {}
                     Op::Array(_, rules) if rules.header_only() => {}
                     Op::Array(_, rules) if rules.unevaluated.is_none() => {
-                        contains[node] = true;
+                        callbacks[node] = true;
                         edges[node].extend(rules.callback_children().copied());
                     }
                     Op::Object(_, rules) if rules.header_only() => {}
+                    Op::Object(_, rules) if rules.unevaluated.is_none() => {
+                        callbacks[node] = true;
+                        edges[node].extend(rules.callback_children().copied());
+                    }
                     Op::Ref(reference) => match reference.static_target() {
                         Some(child) => edges[node].push(child),
                         None => admitted[node] = false,
@@ -213,7 +219,7 @@ impl Engine {
         let mut depths: Vec<Option<usize>> = vec![None; edges.len()];
         let mut child_depths: Vec<Option<usize>> = vec![None; edges.len()];
         for node in order {
-            contains[node] |= edges[node].iter().any(|&child| contains[child]);
+            callbacks[node] |= edges[node].iter().any(|&child| callbacks[child]);
             let extend_depth = |depths: &[Option<usize>]| {
                 edges[node].iter().try_fold(0, |depth, &child| {
                     Some(depth.max(depths[child]?.checked_add(1)?))
@@ -222,20 +228,23 @@ impl Engine {
             if admitted[node] && child_admitted[node] {
                 child_depths[node] = extend_depth(&child_depths);
             }
-            let contains_children_safe = self.nodes[node].iter().all(|op| match op {
+            let children_safe = self.nodes[node].iter().all(|op| match op {
                 Op::Array(_, rules) => rules
+                    .callback_children()
+                    .all(|&child| child_depths[child].is_some()),
+                Op::Object(_, rules) => rules
                     .callback_children()
                     .all(|&child| child_depths[child].is_some()),
                 _ => true,
             });
-            if admitted[node] && contains_children_safe {
+            if admitted[node] && children_safe {
                 depths[node] = extend_depth(&depths);
             }
         }
         self.scalar_callback_depths = depths
             .into_iter()
             .enumerate()
-            .map(|(node, depth)| if contains[node] { depth } else { None })
+            .map(|(node, depth)| if callbacks[node] { depth } else { None })
             .collect();
         self.callback_child_depths = child_depths;
     }
@@ -246,19 +255,26 @@ impl Engine {
             _ => (CALLBACK_RUNTIME, 0),
         }
     }
-    pub(super) fn callback_array_node(&self, node: usize) -> bool {
-        self.nodes[node].iter().any(|op| {
-            matches!(op, Op::Array(_, rules) if !rules.header_only() && self.array_callbacks(rules))
+    pub(super) fn callback_container_node(&self, node: usize) -> bool {
+        self.nodes[node].iter().any(|op| match op {
+            Op::Array(_, rules) => !rules.header_only() && self.array_callbacks(rules),
+            Op::Object(_, rules) => !rules.header_only() && self.object_callbacks(rules),
+            _ => false,
         })
     }
     // Children share no inherited dynamic binding or exported coverage.
     pub(super) fn array_callbacks(&self, rules: &Array) -> bool {
-        rules.unevaluated.is_none()
-            && rules.callback_children().all(|&child| {
-                self.callback_child_depths
-                    .get(child)
-                    .is_some_and(Option::is_some)
-            })
+        rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
+    }
+    pub(super) fn object_callbacks(&self, rules: &Object) -> bool {
+        rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
+    }
+    fn callback_children_safe<'a>(&self, mut children: impl Iterator<Item = &'a usize>) -> bool {
+        children.all(|&child| {
+            self.callback_child_depths
+                .get(child)
+                .is_some_and(Option::is_some)
+        })
     }
     pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
         rules.has_no_item_schemas() && rules.contains.is_some() && self.array_callbacks(rules)
@@ -359,6 +375,15 @@ impl Array {
     }
 }
 impl Object {
+    fn callback_children(&self) -> impl Iterator<Item = &usize> {
+        self.properties
+            .iter()
+            .map(|(_, child)| child)
+            .chain(self.patterns.iter().map(|(_, child)| child))
+            .chain(self.additional.iter())
+            .chain(self.names.iter())
+            .chain(self.dependent_schemas.iter().map(|(_, child)| child))
+    }
     pub(super) fn valid_header(
         &self,
         caches: &runtime::Caches,

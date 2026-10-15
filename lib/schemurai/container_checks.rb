@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "string_checks"
+
 require_relative "error_message"
 require_relative "value_equality"
 
@@ -97,6 +99,61 @@ module Schemurai
         end
       end
 
+      module ObjectChildren
+        include Required
+
+        private def child_budget = @budget
+
+        private def valid_object_children?(rules, value)
+          properties = rules.properties
+          patterns = rules.patterns
+          additional = rules.additional
+          unless properties.empty? && patterns.nil? && additional.nil?
+            value.each do |name, property_value|
+              child_budget&.checkpoint
+              matched = false
+              if (child = properties[name])
+                matched = true
+                return false unless yield(child, property_value)
+              end
+              if patterns
+                patterns.each do |pattern, child|
+                  child_budget&.checkpoint
+                  next unless ecma_regexp(pattern).match?(name)
+                  matched = true
+                  return false unless yield(child, property_value)
+                end
+              end
+              return false if !matched && additional && !yield(additional, property_value)
+            end
+          end
+
+          if (property_names = rules.property_names)
+            value.each_key { |name| return false unless yield(property_names, name) }
+          end
+          if (dependencies = rules.dependencies)
+            dependencies.each do |name, dependency|
+              child_budget&.checkpoint
+              next unless value.key?(name)
+              if dependency.is_a?(Array)
+                return false unless all_keys_present?(dependency, value)
+              else
+                return false unless yield(dependency, value)
+              end
+            end
+          end
+          return false unless valid_dependency_keys?(rules.dependent_required, value)
+          if (dependent_schemas = rules.dependent_schemas)
+            dependent_schemas.each do |name, child|
+              child_budget&.checkpoint
+              next unless value.key?(name)
+              return false unless yield(child, value)
+            end
+          end
+          true
+        end
+      end
+
       # Frames preserve Ruby container operations. Compiled child schema
       # execution remains with the native traversal.
       class Frame
@@ -181,11 +238,15 @@ module Schemurai
         include ValueEquality::Checkpoints
       end
 
-      class CallbackArrayFrame < ArrayFrame
+      module ChildCallback
         def initialize(rules, value, budget, required, callback)
           super(rules, value, budget, required)
           @callback = callback
         end
+      end
+
+      class CallbackArrayFrame < ArrayFrame
+        include ChildCallback
       end
 
       class ContainsFrame < CallbackArrayFrame
@@ -293,6 +354,27 @@ module Schemurai
           @budget&.checkpoint
           @value.key?(name) || false
         end
+      end
+
+      class ObjectChildrenFrame < ObjectFrame
+        include ChildCallback
+        include ObjectChildren
+        include StringChecks::Regexps
+
+        private def child_budget = @callback.invocation_budget
+        private def regexp_cache = (@regexps ||= @callback.regexp_cache)
+
+        private def valid_tail?(_length)
+          return false unless valid_required_keys?(@rules.required, @value)
+
+          valid_object_children?(@rules, @value) { |child, item| @callback.evaluate_child(child, item) }
+        end
+      end
+
+      class LimitedObjectChildrenFrame < ObjectChildrenFrame
+        include StringChecks::TimedRegexps
+
+        private def regexp_budget = child_budget
       end
     end
   end

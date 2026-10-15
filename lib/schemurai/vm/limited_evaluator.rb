@@ -9,6 +9,7 @@ module Schemurai
     # VM execution with invocation-local limits; no Ruby evaluator delegation.
     class LimitedEvaluator < Evaluator
       include Internal::ValueEquality::Checkpoints
+      include Internal::StringChecks::TimedRegexps
 
       def validate(instance, max_errors: nil, timeout: nil, budget: nil)
         @budget = budget || Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
@@ -61,13 +62,6 @@ module Schemurai
         state = super
         state.budget = @budget
         state
-      end
-
-      private def ecma_regexp(pattern)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
       end
 
       private def valid_content?(schema, value)
