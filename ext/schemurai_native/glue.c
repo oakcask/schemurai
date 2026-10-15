@@ -376,8 +376,8 @@ int sn_integer1024(VALUE value, uint64_t *words) {
 size_t sn_integer_word_count(VALUE value) {
     return rb_absint_numwords(value, 64, NULL);
 }
-void sn_integer_words(VALUE value, uint64_t *words, size_t count) {
-    rb_integer_pack(value, words, count, sizeof(uint64_t), 0,
+int sn_integer_words(VALUE value, uint64_t *words, size_t count) {
+    return rb_integer_pack(value, words, count, sizeof(uint64_t), 0,
         INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_NATIVE_BYTE_ORDER);
 }
 int sn_is_bignum(VALUE value) { return RB_TYPE_P(value, T_BIGNUM); }
