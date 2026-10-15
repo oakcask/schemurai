@@ -7,6 +7,7 @@ require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ru
 require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
+require_relative "../value_equality"
 require_relative "../ecma_regexp"
 require_relative "../json_pointer"
 require_relative "compiler"
@@ -56,6 +57,7 @@ module Schemurai
 
     class Evaluator
       include Internal::UniqueItems
+      include Internal::ValueEquality
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
@@ -972,33 +974,6 @@ module Schemurai
 
       private def number?(value)
         Internal::TypeChecks.number?(value)
-      end
-
-      private def json_equal?(left, right)
-        if left.is_a?(Numeric) && !left.is_a?(Complex)
-          return right.is_a?(Numeric) && !right.is_a?(Complex) && left == right
-        end
-        return false unless left.instance_of?(right.class)
-
-        case left
-        when Hash
-          left.length == right.length && left.all? do |key, value|
-            @budget&.checkpoint
-            right.key?(key) && json_equal?(value, right[key])
-          end
-        when Array
-          return false unless left.length == right.length
-
-          index = 0
-          while index < left.length
-            @budget&.checkpoint
-            return false unless json_equal?(left[index], right[index])
-            index += 1
-          end
-          true
-        else
-          left == right
-        end
       end
 
       private def pointer(path, final_segment = MISSING_SEGMENT)

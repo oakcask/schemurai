@@ -896,6 +896,7 @@ impl Engine {
                 }
                 OP_CONST => Op::Const(operand),
                 OP_ENUM => Op::Enum(Box::new(enumeration::Enumeration::compile(
+                    operand,
                     self.values(operand),
                     self.fixnum_flag,
                 ))),
@@ -1273,8 +1274,10 @@ impl Engine {
         self.kind_demand[index] = ops
             .iter()
             .map(|op| match op {
-                Op::Type(..) | Op::Number(..) | Op::String(..) => KindDemand::Predicate,
-                Op::Const(_) | Op::Enum(_) | Op::Array(..) | Op::Object(..) => KindDemand::Data,
+                Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
+                    KindDemand::Predicate
+                }
+                Op::Array(..) | Op::Object(..) => KindDemand::Data,
                 Op::Unsupported
                 | Op::Boolean(_)
                 | Op::UnresolvedRef(_)
@@ -1497,8 +1500,30 @@ impl Execution<'_> {
             Op::UnresolvedRef(_) => Invalid,
             Op::Boolean(v) => verdict(*v),
             Op::Type(mask, union) => self.type_verdict(*mask, *union, kind, value),
-            Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
-            Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag, &self.budget),
+            Op::Const(v) => {
+                let result = if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                    Unsupported
+                } else {
+                    equal_budgeted(*v, value, depth, &self.budget)
+                };
+                if self.runtime_equality(result) {
+                    self.caches.equality(*v, value, RUNTIME_EQUAL)
+                } else {
+                    result
+                }
+            }
+            Op::Enum(values) => {
+                let result = if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                    Unsupported
+                } else {
+                    values.eval(value, kind, depth, self.fixnum_flag, &self.budget)
+                };
+                if self.runtime_equality(result) {
+                    values.runtime(self.caches, value)
+                } else {
+                    result
+                }
+            }
             Op::Number(required, rules) => {
                 if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
                     return rules.runtime_valid(self.caches, *required, value);
@@ -1526,6 +1551,22 @@ impl Execution<'_> {
             _ => unreachable!("applicators must be evaluated with their context"),
         }
     }
+    fn runtime_equality(&self, result: Verdict) -> bool {
+        result == Unsupported && self.budget.failure.get() == 0 && self.budget.hit.get().0 == 0
+    }
+    fn unique_values(&self, value: Value, depth: usize) -> Verdict {
+        let result = if self.caches.dynamic_calls() {
+            Unsupported
+        } else {
+            unique(value, depth, self.fixnum_flag, &self.budget)
+        };
+        if self.runtime_equality(result) {
+            self.caches
+                .equality(unsafe { sn_nil() }, value, RUNTIME_UNIQUE)
+        } else {
+            result
+        }
+    }
     fn array(&self, r: &Array, value: Value, depth: usize, active: scope::Context<'_>) -> Verdict {
         if !self.budget.checkpoint() {
             return Unsupported;
@@ -1535,7 +1576,7 @@ impl Execution<'_> {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag, &self.budget);
+            let result = self.unique_values(value, depth);
             if result != Valid {
                 return result;
             }

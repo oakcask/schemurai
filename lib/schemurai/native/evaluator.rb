@@ -3,6 +3,7 @@
 require_relative "../decimal"
 require_relative "../number_checks"
 require_relative "../string_checks"
+require_relative "../value_equality"
 require_relative "../type_checks"
 require_relative "../vm/limited_evaluator"
 require_relative "../ecma_regexp"
