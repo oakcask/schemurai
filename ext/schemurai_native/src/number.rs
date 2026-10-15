@@ -586,12 +586,19 @@ fn wide_integer_multiple(value: Value, divisor: Fraction, sum_words: bool) -> Ve
     }
     let mut words = [0_u64; 16];
     if unsafe { sn_integer1024(value, words.as_mut_ptr()) }.abs() > 1 {
-        return Unsupported;
+        return unbounded_integer_multiple(value, divisor, sum_words);
     }
     wide_multiple_words(&words, divisor, sum_words)
 }
 
-fn wide_multiple_words(words: &[u64; 16], divisor: Fraction, sum_words: bool) -> Verdict {
+fn unbounded_integer_multiple(value: Value, divisor: Fraction, sum_words: bool) -> Verdict {
+    let count = unsafe { sn_integer_word_count(value) };
+    let mut words = vec![0_u64; count];
+    unsafe { sn_integer_words(value, words.as_mut_ptr(), count) };
+    wide_multiple_words(&words, divisor, sum_words)
+}
+
+fn wide_multiple_words(words: &[u64], divisor: Fraction, sum_words: bool) -> Verdict {
     let len = words
         .iter()
         .rposition(|&word| word != 0)
@@ -600,8 +607,8 @@ fn wide_multiple_words(words: &[u64; 16], divisor: Fraction, sum_words: bool) ->
     let mut remainder = 0_u128;
     if sum_words {
         // If base 2^64 is 1 modulo the divisor, a magnitude has the same
-        // remainder as the sum of its words. At most 16 u64 words sum below
-        // 2^68, so one u128 remainder replaces per-word division.
+        // remainder as the sum of its words. An addressable slice of u64 words
+        // sums within u128, so one remainder replaces per-word division.
         remainder = words[..len]
             .iter()
             .map(|&word| u128::from(word))
@@ -907,7 +914,7 @@ impl Rules {
                 .multiple_of(divisor),
             )
         } else if sign.abs() > 1 {
-            Unsupported
+            unbounded_integer_multiple(value, divisor, sum_words)
         } else {
             wide_multiple_words(&words, divisor, sum_words)
         };
@@ -944,7 +951,7 @@ impl Rules {
         if !float && integer.is_none() {
             // An ordinary Integer outside i128 is beyond every representable
             // exact limit (whose denominator is positive). Bounds alone need
-            // only its sign. Multiples can use a bounded magnitude below.
+            // only its sign. Multiples read the full magnitude below.
             if large_sign == 0 {
                 return Unsupported;
             }

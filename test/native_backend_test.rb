@@ -2206,29 +2206,42 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "delegates Integer multiples beyond the bounded scalar magnitude" do
-    schema = {"multipleOf" => 3}
-    vm = Schemurai.compile(schema, backend: :vm)
-    native = Schemurai.compile(schema, backend: :native)
-    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    [2**1024, -(2**1024), 2**4096 * 3].each do |value|
-      expect(program.valid?(value)).to be_nil
-      expect(program.diagnostics(value)).to be_nil
-      expect(native.valid?(value)).to eq(vm.valid?(value))
-      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+  it "checks unbounded Integer multiples without VM execution" do # rubocop:disable RSpec/ExampleLength
+    divisors = [3, 7, 0.3, 1.25, 2**64 - 1, 2**64 + 1, 2**126 + 1]
+    cases = divisors.flat_map do |divisor|
+      numerator = divisor.to_s.to_r.numerator
+      values = [1023, 1024, 1025, 4096, 65_536].flat_map do |power|
+        multiple = 2**power * numerator
+        [multiple - 1, multiple, multiple + 1, -multiple - 1, -multiple, -multiple + 1]
+      end
+      schemas = [{"multipleOf" => divisor}, {"minimum" => 0, "maximum" => 1, "multipleOf" => divisor}]
+      schemas.flat_map do |schema|
+        [[schema, values], [{"items" => schema}, [values]],
+          [{"properties" => {"n" => schema}}, values.map { |value| {"n" => value} }]]
+      end
+    end
+    cases.map! do |schema, values|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), values,
+        values.map { |value| [vm.valid?(value), vm.validate(value).errors] }]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, values, expected|
+      values.zip(expected).each do |value, (valid, errors)|
+        expect(native.valid?(value)).to eq(valid)
+        expect(native.validate(value).errors).to eq(errors)
+        expect(native.valid?(value, timeout: 10)).to eq(valid)
+        expect(native.validate(value, timeout: 10).errors).to eq(errors)
+      end
     end
   end
 
-  it "retains known bound failures when wide multiple diagnostics must delegate" do
-    schema = {"maximum" => 0, "multipleOf" => 3}
-    vm = Schemurai.compile(schema, backend: :vm)
-    native = Schemurai.compile(schema, backend: :native)
-    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    [2**1024, 2**4096 * 3].each do |value|
-      expect(program.valid?(value)).to be(false)
-      expect(program.diagnostics(value)).to be_nil
-      expect(native.validate(value).errors).to eq(vm.validate(value).errors)
-    end
+  it "retains bound failures and complete multiple diagnostics for unbounded Integers" do
+    schemas = [{"maximum" => 0, "multipleOf" => 3}, {"minimum" => 0, "multipleOf" => 7}]
+    values = [2**1024, 2**4096 * 3, -(2**4096), -(2**4096) * 7]
+    expect_native_policy_results(schemas, values)
   end
 
   it "scans typed and untyped numeric arrays with preselected rules" do # rubocop:disable RSpec/ExampleLength

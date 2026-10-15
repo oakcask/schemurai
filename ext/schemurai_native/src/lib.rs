@@ -56,6 +56,8 @@ unsafe extern "C" {
         required: i32,
     ) -> i32;
     fn sn_integer1024(value: Value, words: *mut u64) -> i32;
+    fn sn_integer_word_count(value: Value) -> usize;
+    fn sn_integer_words(value: Value, words: *mut u64, count: usize);
     fn sn_is_bignum(value: Value) -> i32;
     fn sn_big256(value: Value, words: *mut u64) -> i32;
     fn sn_big_hash(value: Value, hash: *mut u64) -> i32;
