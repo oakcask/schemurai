@@ -256,7 +256,7 @@ impl Execution<'_> {
         }
         let kind_state = InstanceKind::new(TYPE_UNCHECKED);
         let kind = self.diagnostic_kind(node, value, &kind_state);
-        if kind == TYPE_UNSUPPORTED {
+        if self.unsupported_kind(node, kind) {
             return Unsupported;
         }
         self.trial_scalar(node, value, depth, kind)
@@ -297,7 +297,7 @@ impl Execution<'_> {
             return Tracked::new(Unsupported);
         }
         if depth <= MAX_EVALUATION_DEPTH
-            && kind != TYPE_UNSUPPORTED
+            && !self.unsupported_kind(node, kind)
             && let Some(status) = self.trial_scalar(node, value, depth, kind)
         {
             return Tracked::new(status);

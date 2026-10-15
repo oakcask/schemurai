@@ -818,8 +818,9 @@ Boolean instructions, empty schemas, references and applicators defer instance
 classification until they reach a node that examines the instance. Their native
 control flow therefore accepts arbitrary Ruby values, including BasicObject,
 builtin subclasses, non-string-keyed Hashes and cyclic containers, whenever the
-reached assertions do not need to inspect them. A compiled per-node flag uses an
-exhaustive opcode match so new instruction types must declare that requirement.
+reached assertions do not need to inspect them. A compiled per-node requirement
+distinguishes no inspection, a type predicate, and typed storage access. Its
+exhaustive opcode match requires new instruction types to declare that need.
 Diagnostic and trial branches retain their full traversal policy: a later
 instance-dependent branch still performs its guard even when validity could
 have stopped earlier. Same-instance branches share a lazy classification cell,
@@ -830,6 +831,20 @@ Immediate Integer tags can still supply their kind without Ruby inspection.
 Pure boolean children also avoid unnecessary guards in
 array, property, contains and small-record traversal. Existing depth and budget
 checks continue to apply.
+For unsupported Ruby representations, single and union `type` assertions call
+shared Ruby type predicates through libruby after Rust unwinds. Their distinct
+method-call orders are preserved, including unions containing only one name.
+Ruby, VM and native runtime predicates share the same type checks and masks.
+A successful Ruby predicate is never treated as proof of native Array, Hash,
+String or numeric storage; assertions that read storage still need their own
+guard. Dynamic type observations are keyed by reached occurrence as well as
+operation and instance. Result memoization and grouped branch execution stop
+coalescing calls once such predicates are reached, preserving stateful methods.
+Diagnostic prechecks do not execute a dynamic predicate twice. Before invoking
+one, an ordered retry also renders earlier messages at their evaluation positions,
+preserving message exceptions and side effects before later predicates. Message
+observations distinguish output occurrences. Ordinary supported values retain
+the native bit-mask and scan paths.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../decimal"
+require_relative "../type_checks"
 
 module Schemurai
   module VM
@@ -21,13 +22,13 @@ module Schemurai
 
     TypeRules = Data.define(:mask, :names)
 
-    TYPE_NULL = 1 << 0
-    TYPE_BOOLEAN = 1 << 1
-    TYPE_OBJECT = 1 << 2
-    TYPE_ARRAY = 1 << 3
-    TYPE_NUMBER = 1 << 4
-    TYPE_INTEGER = 1 << 5
-    TYPE_STRING = 1 << 6
+    TYPE_NULL = Internal::TypeChecks::NULL
+    TYPE_BOOLEAN = Internal::TypeChecks::BOOLEAN
+    TYPE_OBJECT = Internal::TypeChecks::OBJECT
+    TYPE_ARRAY = Internal::TypeChecks::ARRAY
+    TYPE_NUMBER = Internal::TypeChecks::NUMBER
+    TYPE_INTEGER = Internal::TypeChecks::INTEGER
+    TYPE_STRING = Internal::TypeChecks::STRING
 
     TRACKS_EVALUATION = 1 << 0
     TRACKS_DYNAMIC_SCOPE = 1 << 1
@@ -42,15 +43,7 @@ module Schemurai
     KEYWORD_OBJECT = DIALECT::OBJECT
     private_constant :DIALECT
 
-    TYPE_BITS = {
-      "null" => TYPE_NULL,
-      "boolean" => TYPE_BOOLEAN,
-      "object" => TYPE_OBJECT,
-      "array" => TYPE_ARRAY,
-      "number" => TYPE_NUMBER,
-      "integer" => TYPE_INTEGER,
-      "string" => TYPE_STRING
-    }.freeze
+    TYPE_BITS = Internal::TypeChecks::BITS
 
     TYPE_OPCODES = {
       "null" => :type_null,

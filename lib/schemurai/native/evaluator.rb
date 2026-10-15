@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../decimal"
+require_relative "../type_checks"
 require_relative "../vm/limited_evaluator"
 require_relative "../ecma_regexp"
 require_relative "../json_pointer"

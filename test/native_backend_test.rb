@@ -55,7 +55,7 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "retains the original duration deadline when native transfers to VM", :aggregate_failures do
-    validator = Schemurai.compile({"type" => "array"}, backend: :native)
+    validator = Schemurai.compile({"type" => "array", "minItems" => 0}, backend: :native)
     value = Class.new(Array).new
     allow(Process).to receive(:clock_gettime).and_call_original
     allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
@@ -207,9 +207,9 @@ RSpec.describe "native VALUE execution" do
       native = Schemurai.compile(schema, backend: :native)
       [native, verdict, [:valid?, :validate].map { |method| capture_validation(vm, method, value) }]
     end
-    cases.each do |native, verdict, expected|
+    cases.each do |native, _verdict, expected|
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      expect(program.valid?(value)).to eq(verdict)
+      expect(capture_validation(program, :valid?, value)).to eq(expected.first)
       [:valid?, :validate].zip(expected).each do |method, result|
         expect(capture_validation(native, method, value)).to eq(result)
         expect(capture_validation(native, method, value, timeout: 10)).to eq(result)
@@ -242,6 +242,159 @@ RSpec.describe "native VALUE execution" do
       end
     end
     workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[falseSchema not]]) }
+  end
+
+  it "checks special Ruby values with single and union type predicates without VM execution" do # rubocop:disable RSpec/ExampleLength
+    names = %w[null boolean object array number integer string]
+    types = names + (0...128).map { |mask| names.each_with_index.filter_map { |name, bit| name if (mask & (1 << bit)) != 0 } }
+    fake = Object.new
+    fake.define_singleton_method(:is_a?) { |klass| klass == String }
+    numeric = Class.new(Numeric) do
+      def finite? = true
+      def to_i = 2
+      def ==(other) = other == 2
+    end.new
+    private_query_class = Class.new do
+      private def is_a?(*) = true
+    end
+    stub_const("NativePrivateTypeQuery", private_query_class)
+    private_query = private_query_class.new
+    null_like = Object.new
+    null_like.define_singleton_method(:nil?) { 0 }
+    boolean_like = Object.new
+    boolean_like.define_singleton_method(:==) { |_other| [] }
+    values = [BasicObject.new, Class.new.new, Object.new, :value, Rational(1, 2), Rational(2, 1), Complex(1, 2), numeric, fake,
+      private_query, null_like, boolean_like,
+      Class.new(String).new("value"), Class.new(Array).new([1]), Class.new(Hash)["x", 1], {Object.new => 1},
+      nil, false, true, 1, 1.5, "value", [], {}]
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value]] },
+      ->(rule, value) { [{"properties" => {"x" => rule}}, {"x" => value}] },
+      ->(rule, value) { [{"contains" => rule}, [value]] }]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}])
+    cases = types.product(wrappers).map do |type, wrap|
+      rule = {"type" => type}
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, inputs|
+      inputs.each do |input, method, options, expected|
+        expect(capture_validation(native, method, input, **options)).to eq(expected)
+      end
+    end
+  end
+
+  it "preserves stateful type calls and messages across repeated branches and references" do # rubocop:disable RSpec/ExampleLength
+    value_class = Class.new do
+      attr_reader :trace
+
+      def initialize
+        @trace = []
+        @calls = 0
+      end
+
+      def is_a?(type)
+        @trace << ["is_a?", type.name]
+        @calls += 1
+        type == String && @calls.even?
+      end
+
+      def class
+        @trace << ["class"]
+        @calls += 1
+        Object
+      end
+    end
+    wrap = lambda do |shape, value|
+      case shape
+      when :object then {"x" => value}
+      when :array then [value, value]
+      else value
+      end
+    end
+    single = {"type" => "string"}
+    object = {"properties" => {"x" => single}}
+    cases = [[{"allOf" => [single, single]}, :scalar], [{"anyOf" => [single, single]}, :scalar],
+      [{"oneOf" => [single, single]}, :scalar], [{"allOf" => [single, {"type" => ["string"]}]}, :scalar],
+      [{"$defs" => {"t" => single}, "allOf" => [{"$ref" => "#/$defs/t"}, {"$ref" => "#/$defs/t"}]}, :scalar],
+      [{"anyOf" => [object, object]}, :object], [{"oneOf" => [object, object]}, :object],
+      [{"items" => single}, :array], [{"contains" => single}, :array]].map do |schema, shape|
+      vm = Schemurai.compile(schema, backend: :vm)
+      native = Schemurai.compile(schema, backend: :native)
+      combinations = [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}])
+      inputs = combinations.map do |method, options|
+        value = value_class.new
+        input = wrap.call(shape, value)
+        [method, options, capture_validation(vm, method, input, **options), value.trace]
+      end
+      [native, shape, inputs]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, shape, inputs|
+      inputs.each do |method, options, expected, trace|
+        value = value_class.new
+        input = wrap.call(shape, value)
+        expect(capture_validation(native, method, input, **options)).to eq(expected), [shape, method, options].inspect
+        expect(value.trace).to eq(trace)
+      end
+    end
+  end
+
+  it "does not use dynamic type success as a native collection storage proof" do
+    value = Object.new
+    value.define_singleton_method(:is_a?) { |type| type == Array }
+    value.define_singleton_method(:length) { raise "Ruby collection method reached" }
+    schema = {"allOf" => [{"type" => "array"}, {"minItems" => 1}]}
+    vm = Schemurai.compile(schema, backend: :vm)
+    native = Schemurai.compile(schema, backend: :native)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(runner.valid?(value)).to be_nil
+    [:valid?, :validate].each do |method|
+      expect(capture_validation(native, method, value)).to eq(capture_validation(vm, method, value))
+    end
+  end
+
+  it "keeps type callbacks safe during compaction and method changes" do
+    value_class = Class.new(String) do
+      def is_a?(type)
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        type == String
+      end
+    end
+    value = value_class.new("value")
+    schema = {"type" => ["integer", "string"]}
+    native = Schemurai.compile(schema, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(native.valid?(value)).to be(true)
+    expect(native.validate(value).errors).to be_empty
+    value_class.define_method(:is_a?) { |_type| false }
+    expect(native.valid?(value)).to be(false)
+    # The type message still uses Ruby's physical String case classification.
+    expect(native.validate(value).errors.map(&:keyword)).to eq(["type"])
+  end
+
+  it "runs dynamic type predicates in independent Ractor runners" do
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:type" => {"type" => ["integer", "null"]}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:type")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        value = Rational(1, 2)
+        GC.start
+        [runner.valid?(value), runner.diagnostics(value).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, ["type"]]) }
   end
 
   it "validates plain Object and Symbol scalar types without VM execution" do
@@ -337,7 +490,11 @@ RSpec.describe "native VALUE execution" do
         [original_class.bind_call(error).name, error.message]
       end
       expected = capture.call(vm)
-      abort "native bypassed an overridden method" unless runner.valid?(input).nil?
+      if method == "is_a?"
+        abort "type query did not use libruby" unless capture.call(runner) == expected
+      else
+        abort "native bypassed an overridden method" unless runner.valid?(input).nil?
+      end
       abort "different override behavior" unless capture.call(native) == expected
       puts "ok"
     RUBY
@@ -1635,9 +1792,7 @@ RSpec.describe "native VALUE execution" do
     object.define_singleton_method(:key?) { |_key| false }
     identity = Object.new
     identity.define_singleton_method(:==) { |_other| false }
-    typed = Object.new
-    typed.define_singleton_method(:is_a?) { |klass| klass == String }
-    values = [[{"uniqueItems" => true}, [identity, identity]], [{"type" => "string"}, typed],
+    values = [[{"uniqueItems" => true}, [identity, identity]],
       [{"minLength" => 1}, string], [{"minItems" => 1}, array], [{"required" => ["id"]}, object],
       [{"type" => "string", "minLength" => 1}, Class.new(String).new("abc")],
       [{"type" => "array", "minItems" => 1}, Class.new(Array).new([1])],

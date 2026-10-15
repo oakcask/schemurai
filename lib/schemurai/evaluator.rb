@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "decimal"
+require_relative "type_checks"
 require "json"
 require "base64"
 require_relative "evaluation"
@@ -750,20 +751,11 @@ module Schemurai
       end
 
       private def type?(value, type)
-        case type
-        when "null" then value.nil?
-        when "boolean" then value == true || value == false
-        when "object" then value.is_a?(Hash)
-        when "array" then value.is_a?(Array)
-        when "number" then number?(value)
-        when "integer" then number?(value) && value.finite? && value.to_i == value
-        when "string" then value.is_a?(String)
-        else false
-        end
+        TypeChecks.single?(value, TypeChecks::BITS.fetch(type, 0))
       end
 
       private def number?(value)
-        value.is_a?(Numeric) && !value.is_a?(Complex)
+        TypeChecks.number?(value)
       end
 
       private def json_equal?(left, right)

@@ -59,8 +59,8 @@ impl Report {
         ))
         .then_some(keyword);
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
-        let message = if self.render_messages {
-            caches.error_message(keyword, source, instance, detail)?
+        let message = if self.render_messages || caches.dynamic_types() {
+            caches.error_message(keyword, source, instance, detail, self.errors.len())?
         } else {
             unsafe { sn_nil() }
         };
@@ -163,7 +163,7 @@ impl Execution<'_> {
                 };
                 Some(status)
             }
-            [op @ (Op::Boolean(_) | Op::Type(_))] => Some(self.leaf(op, kind, value, depth)),
+            [op @ (Op::Boolean(_) | Op::Type(..))] => Some(self.leaf(op, kind, value, depth)),
             [op @ Op::String(_, rules)]
                 if kind != TYPE_STRING
                     || rules.length_only()
@@ -185,7 +185,7 @@ impl Execution<'_> {
         kind_state: &InstanceKind,
     ) -> Tracked {
         let kind = kind_state.get();
-        if depth > MAX_EVALUATION_DEPTH || kind == TYPE_UNSUPPORTED {
+        if depth > MAX_EVALUATION_DEPTH || self.unsupported_kind(node, kind) {
             return Tracked::new(Unsupported);
         }
         if let [op @ (Op::Const(_) | Op::Enum(_))] = self.nodes[node].as_slice() {
@@ -214,7 +214,7 @@ impl Execution<'_> {
         }
         let kind_state = InstanceKind::new(TYPE_UNCHECKED);
         let kind = self.diagnostic_kind(node, value, &kind_state);
-        if kind == TYPE_UNSUPPORTED {
+        if self.unsupported_kind(node, kind) {
             return Err(Unsupported);
         }
         self.collect_kind::<ANNOTATIONS>(report, node, value, depth, active, &kind_state)
@@ -229,7 +229,7 @@ impl Execution<'_> {
         kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
         let kind = self.diagnostic_kind(node, value, kind_state);
-        if kind == TYPE_UNSUPPORTED {
+        if self.unsupported_kind(node, kind) {
             return Err(Unsupported);
         }
         if report.silent {
@@ -309,11 +309,13 @@ impl Execution<'_> {
                     prior = Tracked::new(Invalid);
                 }
                 Op::Boolean(true) => {}
-                Op::Type(mask) => {
-                    if kind & mask == 0 {
+                Op::Type(mask, union) => match self.type_verdict(*mask, *union, kind, value) {
+                    Unsupported => return Err(Unsupported),
+                    Valid => {}
+                    Invalid => {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
-                }
+                },
                 Op::Const(..) | Op::Enum(..) => match self.leaf(op, kind, value, depth) {
                     Unsupported => return Err(Unsupported),
                     Invalid => report.add(
@@ -493,7 +495,7 @@ impl Execution<'_> {
                         }
                     } else if let Some(&child) = rules.items.first() {
                         let primitive = match self.nodes[child].as_slice() {
-                            [Op::Type(mask)]
+                            [Op::Type(mask, _)]
                                 if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 =>
                             {
                                 Some(&[][..])
@@ -864,6 +866,7 @@ impl Execution<'_> {
                     let result = evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Complete,
+                        self.caches.dynamic_types(),
                         |child| self.eval_tracked_kind(child, value, depth + 1, active, kind_state),
                     )?;
                     if !branch_kind.accepts(result.matches) {
@@ -1016,11 +1019,16 @@ impl Execution<'_> {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
                 rules.eval_guarded(self.caches, *required, value, &self.budget)
             }
-            [op @ (Op::Type(_) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_))]
-                if depth <= MAX_EVALUATION_DEPTH =>
-            {
+            [
+                op @ (Op::Type(..) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_)),
+            ] if depth <= MAX_EVALUATION_DEPTH => {
                 let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
-                if kind == TYPE_UNSUPPORTED {
+                if kind == TYPE_UNSUPPORTED && matches!(op, Op::Type(..)) {
+                    // Collection must execute a dynamic predicate once, rather
+                    // than once here and again while recording its failure.
+                    return Ok(true);
+                }
+                if self.unsupported_kind(node, kind) {
                     Unsupported
                 } else {
                     self.leaf(op, kind, value, depth)

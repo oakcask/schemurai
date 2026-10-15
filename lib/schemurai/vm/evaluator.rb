@@ -145,19 +145,19 @@ module Schemurai
             target = dynamic_target(program, operand)
             return false unless valid_reference?(program, target, instance)
           when :type_null
-            return false unless instance.nil?
+            return false unless Internal::TypeChecks.single?(instance, TYPE_NULL)
           when :type_boolean
-            return false unless instance == true || instance == false
+            return false unless Internal::TypeChecks.single?(instance, TYPE_BOOLEAN)
           when :type_object
-            return false unless instance.is_a?(Hash)
+            return false unless Internal::TypeChecks.single?(instance, TYPE_OBJECT)
           when :type_array
-            return false unless instance.is_a?(Array)
+            return false unless Internal::TypeChecks.single?(instance, TYPE_ARRAY)
           when :type_number
-            return false unless instance.is_a?(Numeric) && !instance.is_a?(Complex)
+            return false unless Internal::TypeChecks.single?(instance, TYPE_NUMBER)
           when :type_integer
-            return false unless instance.is_a?(Numeric) && !instance.is_a?(Complex) && instance.finite? && instance.to_i == instance
+            return false unless Internal::TypeChecks.single?(instance, TYPE_INTEGER)
           when :type_string
-            return false unless instance.is_a?(String)
+            return false unless Internal::TypeChecks.single?(instance, TYPE_STRING)
           when :typed_number
             return false unless instance.is_a?(Numeric) && !instance.is_a?(Complex) && valid_number?(operand, instance)
           when :typed_integer
@@ -257,19 +257,19 @@ module Schemurai
           when :dynamic_ref
             evaluation = evaluation.merge(evaluate_dynamic_ref(program, operand, instance))
           when :type_null
-            check_compiled_type("null", instance.nil?, instance)
+            check_compiled_type("null", Internal::TypeChecks.single?(instance, TYPE_NULL), instance)
           when :type_boolean
-            check_compiled_type("boolean", instance == true || instance == false, instance)
+            check_compiled_type("boolean", Internal::TypeChecks.single?(instance, TYPE_BOOLEAN), instance)
           when :type_object
-            check_compiled_type("object", instance.is_a?(Hash), instance)
+            check_compiled_type("object", Internal::TypeChecks.single?(instance, TYPE_OBJECT), instance)
           when :type_array
-            check_compiled_type("array", instance.is_a?(Array), instance)
+            check_compiled_type("array", Internal::TypeChecks.single?(instance, TYPE_ARRAY), instance)
           when :type_number
-            check_compiled_type("number", number?(instance), instance)
+            check_compiled_type("number", Internal::TypeChecks.single?(instance, TYPE_NUMBER), instance)
           when :type_integer
-            check_compiled_type("integer", integer?(instance), instance)
+            check_compiled_type("integer", Internal::TypeChecks.single?(instance, TYPE_INTEGER), instance)
           when :type_string
-            check_compiled_type("string", instance.is_a?(String), instance)
+            check_compiled_type("string", Internal::TypeChecks.single?(instance, TYPE_STRING), instance)
           when :typed_number
             if number?(instance)
               check_number(operand, instance)
@@ -441,19 +441,11 @@ module Schemurai
       end
 
       private def instance_type_mask(value, integer:)
-        return TYPE_NULL if value.nil?
-        return TYPE_BOOLEAN if value == true || value == false
-        return TYPE_OBJECT if value.is_a?(Hash)
-        return TYPE_ARRAY if value.is_a?(Array)
-        return TYPE_STRING if value.is_a?(String)
-        return 0 unless number?(value)
-        return TYPE_NUMBER unless integer
-
-        (value.finite? && value.to_i == value) ? TYPE_NUMBER | TYPE_INTEGER : TYPE_NUMBER
+        Internal::TypeChecks.instance_mask(value, integer: integer)
       end
 
       private def integer?(value)
-        number?(value) && value.finite? && value.to_i == value
+        Internal::TypeChecks.integer?(value)
       end
 
       private def valid_number?(rules, value)
@@ -1024,7 +1016,7 @@ module Schemurai
       end
 
       private def number?(value)
-        value.is_a?(Numeric) && !value.is_a?(Complex)
+        Internal::TypeChecks.number?(value)
       end
 
       private def json_equal?(left, right)
