@@ -1,5 +1,6 @@
 //! Runner-owned search caches and observations requested outside Rust frames.
 use super::*;
+mod scopes;
 use regex_automata::{
     Input,
     meta::{Cache, Regex},
@@ -29,6 +30,7 @@ pub struct Caches {
     callback_checkpoints: std::cell::Cell<bool>,
     callbacks_allowed: std::cell::Cell<bool>,
     pending_contains: std::cell::Cell<Option<ContainsArguments>>,
+    scopes: scopes::Scopes,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -89,6 +91,7 @@ unsafe extern "C" {
 }
 impl Caches {
     fn reset_pass(&self) {
+        self.scopes.reset();
         self.pending.set(None);
         self.call_cursor.set(0);
         self.pending_pointer.set(None);
@@ -99,6 +102,27 @@ impl Caches {
         self.pending_rescue.set(None);
     }
 
+    pub(super) fn scope_guard(&self, resource: Value, enters: bool) -> scopes::Guard<'_> {
+        self.scopes.enter(resource, enters)
+    }
+    pub(super) fn reference_frame(&self, program: Value, instance: Value) -> scopes::Reference {
+        self.scopes.reference_frame(program, instance)
+    }
+    pub(super) fn reference_guard<'a>(
+        &'a self,
+        frame: &'a scopes::Reference,
+    ) -> scopes::ReferenceGuard<'a> {
+        self.scopes.reference_guard(frame)
+    }
+    pub(super) fn reference_active(&self, program: Value, instance: Value) -> bool {
+        self.scopes.reference_active(program, instance)
+    }
+    pub(super) fn scopes_enabled(&self) -> bool {
+        self.scopes.enabled()
+    }
+    pub(super) fn scope_at(&self, index: usize) -> Option<Value> {
+        self.scopes.at(index)
+    }
     pub(super) fn frame_error(&self, active: bool) {
         self.frame_error.set(active);
     }
@@ -360,6 +384,7 @@ impl Caches {
     ) -> bool {
         let key = (frame, ordinal, keyword);
         if self.rescued_strings.borrow().contains(&key) {
+            self.scopes.apply(scopes::Key::Rescue(key));
             return false;
         }
         self.pending_rescue.set(Some(key));
@@ -370,8 +395,10 @@ impl Caches {
     }
     fn message(&self, message: Message) -> Result<Value, Verdict> {
         if let Some(value) = self.messages.borrow_mut().entry(message).or_insert(None) {
+            self.scopes.apply(scopes::Key::Message(message));
             return Ok(*value);
         }
+        self.scopes.request(scopes::Key::Message(message));
         self.pending_message.set(Some(message));
         self.pending.set(Some((
             unsafe { sn_undefined() },
@@ -394,8 +421,10 @@ impl Caches {
             index
         };
         if let Some(value) = pointers.requests[index].result {
+            self.scopes.apply(scopes::Key::Pointer(index));
             return Ok(value);
         }
+        self.scopes.request(scopes::Key::Pointer(index));
         self.pending_pointer.set(Some(index));
         self.pending.set(Some((
             unsafe { sn_undefined() },
@@ -413,22 +442,33 @@ impl Caches {
     }
     pub(super) fn invalid_regexp(&self, source: Value, value: Value) -> bool {
         let matches = self.matches.get();
-        !matches.is_null()
+        let invalid = !matches.is_null()
             && unsafe { sn_cached_runtime(matches, RUNTIME_REGEXP_ASSERTION, source, value) }
-                == REGEXP_INVALID
+                == REGEXP_INVALID;
+        if invalid {
+            self.scopes
+                .apply(scopes::Key::Value(source, value, RUNTIME_REGEXP_ASSERTION));
+        }
+        invalid
     }
     fn observe(&self, source: Value, value: Value, operation: i32) -> Verdict {
         let matches = self.matches.get();
         if !matches.is_null() {
             let cached = unsafe { sn_cached_runtime(matches, operation, source, value) };
             if operation == RUNTIME_REGEXP_ASSERTION && cached == REGEXP_INVALID {
+                self.scopes
+                    .apply(scopes::Key::Value(source, value, operation));
                 return Invalid;
             }
             let result = decode(cached);
             if result != Unsupported {
+                self.scopes
+                    .apply(scopes::Key::Value(source, value, operation));
                 return result;
             }
         }
+        self.scopes
+            .request(scopes::Key::Value(source, value, operation));
         self.pending.set(Some((source, value, operation)));
         Unsupported
     }
@@ -523,6 +563,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         .try_borrow()
         .map_or(0, |set| set.capacity() * std::mem::size_of::<StringError>());
     std::mem::size_of::<Caches>()
+        + unsafe { &*caches_ptr }.scopes.size()
         + rescued
         + messages
         + pointers
@@ -555,6 +596,7 @@ pub unsafe extern "C" fn sn_caches_frame_error(caches: *const Caches) -> i32 {
 pub unsafe extern "C" fn sn_caches_rescue_regexp(caches: *const Caches) -> i32 {
     let caches = unsafe { &*caches };
     if let Some(key) = caches.pending_rescue.take() {
+        caches.scopes.rescue(key);
         caches.rescued_strings.borrow_mut().insert(key);
         1
     } else {
@@ -573,6 +615,7 @@ pub unsafe extern "C" fn sn_caches_take_reorder(caches: *const Caches) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
+    caches.scopes.clear();
     caches.reset_pass();
     caches.deadline.set(None);
     caches.runtime_order.set(false);
@@ -657,6 +700,7 @@ pub unsafe extern "C" fn sn_contains_arguments(
 /// Call from the owning runner's GC mark callback while caches are live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
+    unsafe { &*caches }.scopes.mark();
     if let Some(arguments) = unsafe { &*caches }.pending_contains.get() {
         unsafe {
             sn_pin(arguments.rules);

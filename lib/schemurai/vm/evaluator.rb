@@ -70,17 +70,18 @@ module Schemurai
 
       def backend = :vm
 
-      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil)
+      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil, dynamic_scope: nil, active_state: nil, native_references: nil)
         @graph = graph
         @compiler = compiler
         @root = root
         @validate_content = content
         @validate_format = format
         @regexps = regexps
-        @active = nil
+        @active = active_state
+        @native_references = native_references
         @resolved_references = nil
         @number_state = number_state
-        @dynamic_scope = nil
+        @dynamic_scope = dynamic_scope
         @instance_path_buffer = nil
         @schema_path_buffer = nil
         @evaluation_pool = nil
@@ -383,7 +384,7 @@ module Schemurai
 
       private def valid_reference?(source, target, instance)
         instances = active_instances(source)
-        return true if instances.key?(instance)
+        return true if instances.key?(instance) || @native_references&.reference_active?(source, instance)
 
         instances[instance] = true
         activated = true
@@ -418,7 +419,7 @@ module Schemurai
 
       private def evaluate_reference(source, target, instance, keyword)
         instances = active_instances(source)
-        return Evaluation.valid if instances.key?(instance)
+        return Evaluation.valid if instances.key?(instance) || @native_references&.reference_active?(source, instance)
 
         instances[instance] = true
         activated = true

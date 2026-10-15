@@ -385,6 +385,9 @@ impl Execution<'_> {
                 .or(self.metadata[node].primary_binding),
         };
         let active = self.enter_scope(node, active, &frame);
+        let _scope = self
+            .caches
+            .scope_guard(frame.resource, self.metadata[node].enters_scope);
         let tracked = ANNOTATIONS || self.tracks[node];
         let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
@@ -1087,7 +1090,11 @@ impl Execution<'_> {
                     }
                 }
                 Op::Ref(target) => {
-                    if RefFrame::contains(active.active, node, value) {
+                    let target = self.resolve_reference(*target, value, active)?;
+                    let program = self.programs[node];
+                    if RefFrame::contains(active.active, node, value)
+                        || self.caches.reference_active(program, value)
+                    {
                         continue;
                     }
                     let frame = RefFrame {
@@ -1096,7 +1103,8 @@ impl Execution<'_> {
                         parent: active.active,
                     };
                     let keyword = reference_keyword(source.0);
-                    let target = self.reference_target(*target, active);
+                    let reference = self.caches.reference_frame(program, value);
+                    let _guard = self.caches.reference_guard(&reference);
                     let active = scope::Context {
                         active: Some(&frame),
                         ..active

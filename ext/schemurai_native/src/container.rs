@@ -158,6 +158,12 @@ impl Engine {
     // Otherwise a later unsupported container could replay an already invoked
     // user block through the VM. Postorder leaves cycles unproven.
     pub(super) fn compile_scalar_callback_depths(&mut self) {
+        let count = self.nodes.len();
+        self.has_references = self
+            .nodes
+            .iter()
+            .flatten()
+            .any(|op| matches!(op, Op::Ref(_)));
         if !self.nodes.iter().flatten().any(|op| match op {
             Op::Array(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
             Op::Object(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
@@ -167,18 +173,24 @@ impl Engine {
             self.callback_child_depths.clear();
             return;
         }
-        let mut edges = vec![vec![]; self.nodes.len()];
-        let mut admitted = vec![true; self.nodes.len()];
-        let mut child_admitted = vec![true; self.nodes.len()];
-        let mut callbacks = vec![false; self.nodes.len()];
+        // One zero-depth dispatch vertex per name avoids repeating every
+        // possible binding edge for each dynamic reference.
+        let recursive = count + self.anchor_tables.len();
+        let mut edges = vec![vec![]; recursive + 1];
+        let mut admitted = vec![true; edges.len()];
+        let mut callbacks = vec![false; edges.len()];
+        for (name, bindings) in self.anchor_tables.iter().enumerate() {
+            edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
+        }
+        edges[recursive].extend(
+            self.resources
+                .values()
+                .copied()
+                .filter(|&root| self.metadata[root].recursive_anchor),
+        );
         for (node, ops) in self.nodes.iter().enumerate() {
             admitted[node] = !self.tracks[node];
-            for (index, op) in ops.iter().enumerate() {
-                // Simplified dynamic references still have VM scope polling;
-                // only original static references can enter an isolated child.
-                if matches!(op, Op::Ref(_)) && self.error_operands[node][index].0 != OP_REF {
-                    child_admitted[node] = false;
-                }
+            for op in ops {
                 match op {
                     Op::Boolean(_)
                     | Op::Type(..)
@@ -196,10 +208,15 @@ impl Engine {
                         callbacks[node] = true;
                         edges[node].extend(rules.callback_children().copied());
                     }
-                    Op::Ref(reference) => match reference.static_target() {
-                        Some(child) => edges[node].push(child),
-                        None => admitted[node] = false,
-                    },
+                    Op::Ref(reference) => {
+                        if let Some((name, fallback)) = reference.callback_dynamic_target() {
+                            edges[node].extend([fallback, count + name]);
+                        } else if let Some(fallback) = reference.recursive_target() {
+                            edges[node].extend([fallback, recursive]);
+                        } else {
+                            edges[node].push(reference.static_target().expect("static reference"));
+                        }
+                    }
                     Op::All(children) => edges[node].extend(children),
                     Op::Any(children) | Op::One(children) => {
                         edges[node].extend(children.iter().map(|&(child, _)| child))
@@ -217,38 +234,26 @@ impl Engine {
         }
         let order = graph::postorder(&edges, &mut vec![false; edges.len()]);
         let mut depths: Vec<Option<usize>> = vec![None; edges.len()];
-        let mut child_depths: Vec<Option<usize>> = vec![None; edges.len()];
         for node in order {
             callbacks[node] |= edges[node].iter().any(|&child| callbacks[child]);
-            let extend_depth = |depths: &[Option<usize>]| {
-                edges[node].iter().try_fold(0, |depth, &child| {
-                    Some(depth.max(depths[child]?.checked_add(1)?))
-                })
-            };
-            if admitted[node] && child_admitted[node] {
-                child_depths[node] = extend_depth(&child_depths);
-            }
-            let children_safe = self.nodes[node].iter().all(|op| match op {
-                Op::Array(_, rules) => rules
-                    .callback_children()
-                    .all(|&child| child_depths[child].is_some()),
-                Op::Object(_, rules) => rules
-                    .callback_children()
-                    .all(|&child| child_depths[child].is_some()),
-                _ => true,
-            });
-            if admitted[node] && children_safe {
-                depths[node] = extend_depth(&depths);
+            if admitted[node] {
+                depths[node] = edges[node].iter().try_fold(0, |depth, &child| {
+                    Some(depth.max(depths[child]?.checked_add(usize::from(node < count))?))
+                });
             }
         }
+        depths.truncate(count);
         self.scalar_callback_depths = depths
-            .into_iter()
+            .iter()
             .enumerate()
-            .map(|(node, depth)| if callbacks[node] { depth } else { None })
+            .map(|(node, &depth)| if callbacks[node] { depth } else { None })
             .collect();
-        self.callback_child_depths = child_depths;
+        self.callback_child_depths = depths;
     }
     pub(super) fn scalar_callback_kind(&self, child: usize) -> (i32, i32) {
+        if self.metadata[child].enters_scope {
+            return (CALLBACK_RUNTIME, 0);
+        }
         match self.nodes[child].as_slice() {
             [Op::Boolean(value)] => (CALLBACK_BOOLEAN, i32::from(*value)),
             [Op::Type(mask, union)] => (CALLBACK_TYPE, mask * 2 + i32::from(*union)),

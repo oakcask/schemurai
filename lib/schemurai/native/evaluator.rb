@@ -28,11 +28,15 @@ module Schemurai
         @compiled = compiled || Program.new(root, compiler, format, content)
         @number_state = Internal::NumberChecks::State.new
         @regexps = {}
+        @scope_state = []
+        @reference_state = []
+        @active_state = {}.compare_by_identity
         @program = @compiled.runner(root)
-        @program.share_scalar_state(@number_state, @regexps)
+        @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state)
         @unresolved = @compiled.unresolved_references?
         @vm = VM::Evaluator.new(graph, compiler, root, content: content, format: format,
-          number_state: @number_state, regexps: @regexps)
+          number_state: @number_state, regexps: @regexps, dynamic_scope: @scope_state,
+          active_state: @active_state, native_references: @program)
       end
 
       def valid?(instance, max_errors: nil, timeout: nil)
@@ -75,7 +79,7 @@ module Schemurai
           graph_size = @graph.nodes.length
           compiled = Program.new(@root, @compiler, @format, @content)
           @program = compiled.runner(@root)
-          @program.share_scalar_state(@number_state, @regexps)
+          @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state)
           @compiled = compiled
           @unresolved = @compiled.unresolved_references?
           @graph_size = graph_size

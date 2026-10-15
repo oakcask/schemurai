@@ -957,13 +957,13 @@ any?/count and each/each_key methods when no unevaluated-location traversal is
 required. Shared Ruby helpers preserve item/property selection, length snapshots,
 indexing, pattern matching, key names and dependency order. Native children are selected by compiled
 Program identity; Ruby never reads their instruction streams. The compiler proof
-admits scalar assertions, empty schemas, logical applicators, acyclic static
-references and Array/Object child traversal, including nested contains. Children need
-no inherited dynamic bindings or exported annotations. Original dynamic or
-recursive reference opcodes remain excluded from isolated children, even when
-the native compiler can simplify their target: VM scope polling is observable
-inside these callbacks. Iterative postorder analysis proves both child
-eligibility and whole-root coverage before kind demands are finalized.
+admits scalar assertions, empty schemas, logical applicators and Array/Object
+child traversal, including nested contains. Static, dynamic and recursive
+references are admitted when every possible target forms an acyclic graph and
+needs no exported annotations. One zero-depth dispatch vertex per anchor name,
+plus one for recursive resources, keeps binding edges shared and excludes cycles
+without increasing schema evaluation depth. Iterative postorder analysis proves
+child eligibility and whole-root coverage before kind demands are finalized.
 The whole-root proof requires every reachable instruction to have a runtime
 path and every reachable schema depth to remain within the native bound. Other roots retain the earlier guard before
 any new callback can run, preventing a later compatibility transfer from
@@ -976,6 +976,34 @@ each yield and a fresh runner on reentry. Bounded child entries, reached
 instructions and oneOf branches request Ruby checkpoints in evaluation order;
 unbounded children skip these requests. Shared Ruby scalar primitives
 preserve method dispatch even for ordinary yielded values.
+Callback scopes use an evaluator-owned live Ruby resource Array. Before each
+Ruby request, native execution publishes an owned scope snapshot after Rust
+unwinds. Changed scope contents are recorded with the request and replayed with
+its cached result, so public reentry can clear scopes without restoring stale
+bindings. Child callbacks inherit the Array's current contents, including when
+saved blocks run under another resource or after native program refresh.
+Bounded invocations own separate Arrays. Pending native scope-entry counts let
+C unwind the live Array when a Ruby request raises. Completed native calls
+publish their final scope contents. Reference context is enabled conservatively
+for programs containing references, including scalar and diagnostic paths:
+Ruby primitive methods can reenter saved schema blocks without any container
+callback. Programs without references skip context tracking. Publishing compares
+identity values first and avoids allocating a Ruby Array when contents match.
+
+Callbacks also inherit active reference guards by compiled Program identity and
+instance identity. Native stack guards are copied before a Ruby request and
+published as a flat Ruby Array; callback completion restores its incoming
+native guards even when Ruby raises. The remaining VM evaluator shares its
+identity Hashes with native readers and consults the native guard Array before
+entering a reference. Native never replaces VM identity Hashes or their entries,
+so VM ensure cleanup retains ownership of its guards. Bounded invocations keep
+private state. Both static and dynamic references need this bridge: user methods
+can invoke a saved block for the same reference and instance even when the
+compiled schema graph is acyclic. Stack records are borrowed only within native
+frames and copied before unwinding; no Rust stack pointer crosses into Ruby.
+Original dynamic names survive invariant-target simplification for callback
+scope polling. Scoped lookup walks outer to inner and shares binding predicates
+with the ordinary native lookup, while issuing the VM's per-resource checkpoints.
 The original Ruby method can rescue child exceptions and run ensure clauses.
 Children use the VM's scalar checkpoints, while the parent retains its native
 invocation deadline and polls it after successful scalar yields. A callback
@@ -998,8 +1026,8 @@ The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Special Arrays and Hashes, including subclasses, singleton methods and
-nonstandard keys, can still delegate when child graphs need inherited dynamic
-scope or evaluated-location export. Schema evaluation beyond the native
+nonstandard keys, can still delegate when child graphs are cyclic, unresolved or require
+evaluated-location export. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
