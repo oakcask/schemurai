@@ -1159,17 +1159,6 @@ RSpec.describe "native VALUE execution" do
     expect(program.diagnostics([left, right])).to be_nil
   end
 
-  it "retains unsupported cyclic equality without treating an active pair as equal" do
-    cycle = []
-    cycle << cycle
-    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
-    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(program.valid?([cycle, cycle])).to be_nil
-    expect(program.diagnostics([cycle, cycle])).to be_nil
-    expect(program.valid?([*Array.new(17) { |i| i }, cycle])).to be_nil
-    expect(program.diagnostics([*Array.new(17) { |i| i }, cycle])).to be_nil
-  end
-
   it "does not skip custom fingerprint exceptions when direct comparisons would see disjoint shapes" do
     special = Object.new
     special.define_singleton_method(:hash) { raise "custom fingerprint" }
@@ -1181,6 +1170,53 @@ RSpec.describe "native VALUE execution" do
       expect { validator.valid?(value) }.to raise_error(RuntimeError, "custom fingerprint")
       expect { validator.validate(value) }.to raise_error(RuntimeError, "custom fingerprint")
     end
+  end
+
+  it "raises cyclic equality stack errors after native unwinding without VM execution" do # rubocop:disable RSpec/ExampleLength
+    array = []
+    array << array
+    object = {}
+    object["self"] = object
+    datasets = [array, object].flat_map do |cycle|
+      padding = Array.new(17) { |i| i }
+      [[cycle, cycle], [*padding, cycle], [*padding, cycle, cycle]]
+    end
+    schema = {"uniqueItems" => true}
+    vm = Schemurai.compile(schema, backend: :vm)
+    datasets.each do |value|
+      expect { vm.valid?(value) }.to raise_error(SystemStackError, "stack level too deep")
+      expect { vm.validate(value) }.to raise_error(SystemStackError, "stack level too deep")
+    end
+    native = Schemurai.compile(schema, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@compiled)
+    expect { program.valid?(datasets.first) }.to raise_error(SystemStackError, "stack level too deep")
+    expect { program.diagnostics(datasets.first) }.to raise_error(SystemStackError, "stack level too deep")
+    datasets.each do |value|
+      expect { native.valid?(value) }.to raise_error(SystemStackError, "stack level too deep")
+      expect { native.validate(value) }.to raise_error(SystemStackError, "stack level too deep")
+      expect { native.valid?(value, timeout: 10) }.to raise_error(SystemStackError, "stack level too deep")
+      expect { native.validate(value, timeout: 10) }.to raise_error(SystemStackError, "stack level too deep")
+    end
+    expect(native.valid?([1, 2])).to be(true)
+    expect(native.validate([1, 1]).errors.map(&:keyword)).to eq(["uniqueItems"])
+    expect(native.valid?([array])).to be(true)
+    expect(native.valid?([0, 0, *Array.new(17) { |i| i }, array])).to be(false)
+  end
+
+  it "preserves conclusive validity and earlier limits before cyclic comparison errors" do
+    cycle = []
+    cycle << cycle
+    first_failure = Schemurai.compile({"allOf" => [false, {"uniqueItems" => true}]}, backend: :native)
+    first_success = Schemurai.compile({"anyOf" => [true, {"uniqueItems" => true}]}, backend: :native)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect(first_failure.valid?([cycle, cycle])).to be(false)
+    expect(first_success.valid?([cycle, cycle])).to be(true)
+    expect { first_failure.validate([cycle, cycle], max_errors: 0) }.to raise_error(Schemurai::LimitExceeded)
+    expect { first_failure.validate([cycle, cycle], max_errors: 1) }.to raise_error(SystemStackError)
+    expect { first_success.validate([cycle, cycle], timeout: 10) }.to raise_error(SystemStackError)
   end
 
   it "keeps enum comparisons native at the schema evaluation depth boundary" do # rubocop:disable RSpec/ExampleLength
