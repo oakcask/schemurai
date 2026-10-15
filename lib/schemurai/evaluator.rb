@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "decimal"
 require "json"
 require "base64"
 require_relative "evaluation"
@@ -786,7 +787,7 @@ module Schemurai
       private def decimal(value)
         return value if value.is_a?(Integer) || value.is_a?(Rational)
 
-        Rational(value.to_s)
+        Internal::Decimal.parse(value)
       end
 
       # Ruby and ECMA-262 differ in their ASCII character classes, anchors, and

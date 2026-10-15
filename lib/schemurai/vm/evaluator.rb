@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "../decimal"
 require "base64"
 require "json"
 require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ruby 3.4.
@@ -1060,7 +1061,7 @@ module Schemurai
         return decimals[value] if decimals.key?(value)
 
         decimals.clear if decimals.length >= DECIMAL_CACHE_LIMIT
-        decimals[value] = Rational(value.to_s)
+        decimals[value] = Internal::Decimal.parse(value)
       end
 
       private def ecma_regexp(pattern)

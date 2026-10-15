@@ -127,19 +127,28 @@ static int release_matches(st_data_t key, st_data_t value, st_data_t context) {
     st_free_table((st_table *)value);
     return ST_CONTINUE;
 }
+static int mark_operation(st_data_t key, st_data_t value, st_data_t context) {
+    st_foreach((st_table *)value, mark_pattern_matches, 0);
+    return ST_CONTINUE;
+}
+static int release_operation(st_data_t key, st_data_t value, st_data_t context) {
+    st_foreach((st_table *)value, release_matches, 0);
+    st_free_table((st_table *)value);
+    return ST_CONTINUE;
+}
 static void runner_mark(void *ptr) {
     runner_holder *r = ptr;
     rb_gc_mark(r->owner);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->pointers);
     if (r->caches) sn_caches_mark(r->caches);
-    if (r->matches) st_foreach(r->matches, mark_pattern_matches, 0);
+    if (r->matches) st_foreach(r->matches, mark_operation, 0);
 }
 static void runner_release(void *ptr) {
     runner_holder *h = ptr;
     if (h->caches) sn_caches_free(h->caches);
     if (h->matches) {
-        st_foreach(h->matches, release_matches, 0);
+        st_foreach(h->matches, release_operation, 0);
         st_free_table(h->matches);
     }
     xfree(h);
@@ -148,20 +157,26 @@ static int match_size(st_data_t key, st_data_t value, st_data_t context) {
     *(size_t *)context += st_memsize((st_table *)value);
     return ST_CONTINUE;
 }
+static int operation_size(st_data_t key, st_data_t value, st_data_t context) {
+    *(size_t *)context += st_memsize((st_table *)value);
+    st_foreach((st_table *)value, match_size, context);
+    return ST_CONTINUE;
+}
 static size_t runner_size(const void *ptr) {
     const runner_holder *h = ptr;
     size_t bytes = sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
     if (h->matches) {
         bytes += st_memsize(h->matches);
-        st_foreach(h->matches, match_size, (st_data_t)&bytes);
+        st_foreach(h->matches, operation_size, (st_data_t)&bytes);
     }
     return bytes;
 }
 /* Numeric-key lookups only: Rust calls this while borrowing instance storage.
  * Table mutations, Ruby calls and allocations happen after Rust returns. */
-int sn_cached_runtime(const void *matches, VALUE source, VALUE instance) {
-    st_data_t bucket, result;
-    if (st_lookup((st_table *)matches, (st_data_t)source, &bucket)
+int sn_cached_runtime(const void *matches, int operation, VALUE source, VALUE instance) {
+    st_data_t sources, bucket, result;
+    if (st_lookup((st_table *)matches, (st_data_t)operation, &sources)
+        && st_lookup((st_table *)sources, (st_data_t)source, &bucket)
         && st_lookup((st_table *)bucket, (st_data_t)instance, &result)) return (int)result;
     return SN_VERDICT_UNSUPPORTED;
 }
@@ -587,7 +602,7 @@ typedef struct {
 
 static VALUE clear_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
-    st_foreach(call->runner->matches, release_matches, 0);
+    st_foreach(call->runner->matches, release_operation, 0);
     st_clear(call->runner->matches);
     call->runner->pointers = Qnil;
     sn_caches_runtime(call->runner->caches, call->runner->matches);
@@ -642,6 +657,14 @@ static VALUE build_pointer(runner_holder *runner) {
     RB_GC_GUARD(helper);
     return output;
 }
+static VALUE null_numeric(VALUE instance, int operation) {
+    int selector = operation - SN_RUNTIME_NULL_NUMBER;
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE native = rb_const_get(schemurai, rb_intern_const("Native"));
+    VALUE helper = rb_const_get(native, rb_intern_const("NullNumeric"));
+    return rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
+        INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -649,6 +672,11 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind >= SN_RUNTIME_NULL_NUMBER) {
+        VALUE result = null_numeric(instance, operation->kind);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return result;
+    }
     if (operation->kind == SN_RUNTIME_IDENTITY_METHODS) {
         for (size_t index = 0; index < sizeof(identity_methods) / sizeof(*identity_methods); index++)
             if (!rb_method_basic_definition_p(source, identity_methods[index])) return Qfalse;
@@ -708,10 +736,14 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
         RB_GC_GUARD(result);
         return;
     }
-    st_data_t bucket;
-    if (!st_lookup(r->matches, (st_data_t)source, &bucket)) {
+    st_data_t sources, bucket;
+    if (!st_lookup(r->matches, (st_data_t)kind, &sources)) {
+        sources = (st_data_t)st_init_numtable();
+        st_insert(r->matches, (st_data_t)kind, sources);
+    }
+    if (!st_lookup((st_table *)sources, (st_data_t)source, &bucket)) {
         bucket = (st_data_t)st_init_numtable();
-        st_insert(r->matches, (st_data_t)source, bucket);
+        st_insert((st_table *)sources, (st_data_t)source, bucket);
     }
     st_insert((st_table *)bucket, (st_data_t)instance, verdict);
     RB_GC_GUARD(previous);

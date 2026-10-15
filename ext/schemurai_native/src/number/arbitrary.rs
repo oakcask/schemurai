@@ -59,10 +59,12 @@ impl Limit {
 }
 
 impl Rules {
-    pub(super) fn arbitrary_failures(
+    pub(super) fn arbitrary_check(
         &self,
+        caches: &runtime::Caches,
         value: Value,
         budget: &budget::Budget,
+        mut failure: impl FnMut(i32) -> bool,
     ) -> Result<i32, Verdict> {
         let float = unsafe { sn_is_float(value) } != 0;
         let n = if float {
@@ -102,33 +104,49 @@ impl Rules {
         };
         let mut bits = 0;
         for (bit, limit) in &self.limits {
-            let order = if let Some(actual) = &actual {
-                Some(actual.cmp(limit.fraction().as_ref()))
-            } else if !limit.integer {
-                n.partial_cmp(&limit.rounded)
-            } else if let Some(binary) = &binary {
-                Some(binary.cmp(limit.fraction().as_ref()))
-            } else if n.is_nan() {
-                None
-            } else {
-                Some(if n.is_sign_negative() {
-                    Ordering::Less
+            if !budget.checkpoint() {
+                return Err(Unsupported);
+            }
+            let violates = limit.violation(caches, value, *bit, self.multiple.is_some(), || {
+                let order = if let Some(actual) = &actual {
+                    Some(actual.cmp(limit.fraction().as_ref()))
+                } else if !limit.integer {
+                    n.partial_cmp(&limit.rounded)
+                } else if let Some(binary) = &binary {
+                    Some(binary.cmp(limit.fraction().as_ref()))
+                } else if n.is_nan() {
+                    None
                 } else {
-                    Ordering::Greater
-                })
-            };
-            if violates(*bit, order) {
+                    Some(if n.is_sign_negative() {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    })
+                };
+                violates(*bit, order)
+            })?;
+            if violates {
                 bits |= bit;
+                if failure(*bit) {
+                    return Ok(bits);
+                }
             }
         }
         if let Some(limit) = &self.multiple {
-            let divisor = limit.fraction();
-            let actual = actual.as_ref().expect("multipleOf decimal operand");
-            let valid = divisor.numer().sign() == Sign::Plus
-                && (actual.numer() % divisor.numer()).sign() == Sign::NoSign
-                && (divisor.denom() % actual.denom()).sign() == Sign::NoSign;
-            if !valid {
+            if !budget.checkpoint() {
+                return Err(Unsupported);
+            }
+            let violates = limit.violation(caches, value, MULTIPLE_OF, true, || {
+                let divisor = limit.fraction();
+                let actual = actual.as_ref().expect("multipleOf decimal operand");
+                let valid = divisor.numer().sign() == Sign::Plus
+                    && (actual.numer() % divisor.numer()).sign() == Sign::NoSign
+                    && (divisor.denom() % actual.denom()).sign() == Sign::NoSign;
+                !valid
+            })?;
+            if violates {
                 bits |= MULTIPLE_OF;
+                failure(MULTIPLE_OF);
             }
         }
         Ok(bits)

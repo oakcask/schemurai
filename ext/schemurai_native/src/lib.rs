@@ -1379,7 +1379,7 @@ impl Execution<'_> {
                 } else if kind & TYPE_NUMBER == 0 {
                     Valid
                 } else {
-                    rules.eval(value, &self.budget)
+                    rules.eval(self.caches, value, &self.budget)
                 }
             }
             Op::String(required, rules) => {
@@ -1558,7 +1558,7 @@ impl Execution<'_> {
                         return Unsupported;
                     }
                     let result = if let Some((required, rules)) = number {
-                        rules.eval_guarded(required, item, &self.budget)
+                        rules.eval_guarded(self.caches, required, item, &self.budget)
                     } else if let Some((required, rules)) = string {
                         if rules.pattern.is_some() {
                             rules.eval_guarded(self.caches, required, item)
@@ -1695,7 +1695,7 @@ impl Execution<'_> {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
-                rules.eval_guarded(required, value, &self.budget)
+                rules.eval_guarded(self.caches, required, value, &self.budget)
             } else {
                 self.eval(child, value, depth, active)
             };

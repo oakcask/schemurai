@@ -243,6 +243,31 @@ fn merge_bits(target: &mut Vec<u64>, source: Vec<u64>) {
     }
 }
 impl Execution<'_> {
+    // contains needs the trial outcome, not the child's exported annotations.
+    pub(super) fn trial_status(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+    ) -> Verdict {
+        if depth > MAX_EVALUATION_DEPTH || !self.budget.checkpoint() {
+            return Unsupported;
+        }
+        let kind = if value & self.fixnum_flag != 0 {
+            TYPE_INTEGRAL_NUMBER
+        } else {
+            unsafe { sn_kind(value) }
+        };
+        if kind == TYPE_UNSUPPORTED {
+            return Unsupported;
+        }
+        self.trial_scalar(node, value, depth, kind)
+            .unwrap_or_else(|| {
+                self.eval_tracked_kind(node, value, depth, active, kind)
+                    .status
+            })
+    }
     pub(super) fn eval_tracked(
         &self,
         node: usize,
@@ -277,6 +302,12 @@ impl Execution<'_> {
         if !self.budget.checkpoint() {
             return Tracked::new(Unsupported);
         }
+        if depth <= MAX_EVALUATION_DEPTH
+            && kind != TYPE_UNSUPPORTED
+            && let Some(status) = self.trial_scalar(node, value, depth, kind)
+        {
+            return Tracked::new(status);
+        }
         let Some(key) = self
             .memo
             .key(self, node, value, depth, active, &self.budget)
@@ -304,141 +335,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Tracked {
-        let frame = scope::ScopeFrame {
-            resource: self.metadata[node].resource,
-            parent: active.scope,
-            primary_binding: active
-                .scope
-                .and_then(|frame| frame.primary_binding)
-                .or(self.metadata[node].primary_binding),
-        };
-        let active = self.enter_scope(node, active, &frame);
-        if depth > MAX_EVALUATION_DEPTH {
-            return Tracked::new(Unsupported);
-        }
-        if kind == TYPE_UNSUPPORTED {
-            return Tracked::new(Unsupported);
-        }
-        let mut evaluation = Tracked::new(Valid);
-        for op in &self.nodes[node] {
-            if !self.budget.checkpoint() {
-                return Tracked::new(Unsupported);
-            }
-            let result = match op {
-                Op::Ref(target) => {
-                    if RefFrame::contains(active.active, node, value) {
-                        Valid
-                    } else {
-                        let frame = RefFrame {
-                            source: node,
-                            value,
-                            parent: active.active,
-                        };
-                        evaluation.merge(self.eval_tracked_kind(
-                            self.reference_target(*target, active),
-                            value,
-                            depth + 1,
-                            scope::Context {
-                                active: Some(&frame),
-                                ..active
-                            },
-                            kind,
-                        ))
-                    }
-                }
-                Op::All(nodes) => {
-                    let mut result = Valid;
-                    for &child in nodes {
-                        if !self.budget.checkpoint() {
-                            return Tracked::new(Unsupported);
-                        }
-                        result = evaluation.merge(self.eval_tracked_kind(
-                            child,
-                            value,
-                            depth + 1,
-                            active,
-                            kind,
-                        ));
-                        if result != Valid {
-                            break;
-                        }
-                    }
-                    result
-                }
-                Op::Any(nodes) | Op::One(nodes) => {
-                    let branch_kind = if matches!(op, Op::Any(_)) {
-                        evaluation::BranchKind::Any
-                    } else {
-                        evaluation::BranchKind::One
-                    };
-                    match evaluation::scan_branches(
-                        nodes,
-                        evaluation::BranchPolicy::Complete,
-                        |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
-                    ) {
-                        Err(status) => status,
-                        Ok(result) if !branch_kind.accepts(result.matches) => Invalid,
-                        Ok(result) => evaluation.merge(result.coverage),
-                    }
-                }
-                Op::Not(child) => match self.eval(*child, value, depth + 1, active) {
-                    Valid => Invalid,
-                    Invalid => Valid,
-                    Unsupported => Unsupported,
-                },
-                Op::Conditional(condition, yes, no) => {
-                    let condition =
-                        self.eval_tracked_kind(*condition, value, depth + 1, active, kind);
-                    let status = condition.status;
-                    if status == Unsupported {
-                        Unsupported
-                    } else {
-                        let branch = if status == Valid {
-                            evaluation.merge(condition);
-                            yes
-                        } else {
-                            no
-                        };
-                        if let Some(child) = branch {
-                            evaluation.merge(self.eval_tracked_kind(
-                                *child,
-                                value,
-                                depth + 1,
-                                active,
-                                kind,
-                            ))
-                        } else {
-                            Valid
-                        }
-                    }
-                }
-                Op::Array(required, rules) => {
-                    if *required != 0 && kind != TYPE_ARRAY {
-                        Invalid
-                    } else if kind != TYPE_ARRAY {
-                        Valid
-                    } else {
-                        self.array_tracked(rules, value, depth + 1, active, &mut evaluation)
-                    }
-                }
-                Op::Object(required, rules) => {
-                    if *required != 0 && kind != TYPE_OBJECT {
-                        Invalid
-                    } else if kind != TYPE_OBJECT {
-                        Valid
-                    } else {
-                        self.object_tracked(rules, value, depth + 1, active, &mut evaluation)
-                    }
-                }
-                _ => self.leaf(op, kind, value, depth),
-            };
-            if result != Valid {
-                return Tracked::new(result);
-            }
-        }
-        evaluation
+        self.collect_trial(node, value, depth, active, kind)
     }
-    fn array_tracked(
+    pub(super) fn array_tracked(
         &self,
         r: &Array,
         value: Value,
@@ -492,7 +391,7 @@ impl Execution<'_> {
             let count = match evaluation::scan_contains(
                 len,
                 evaluation::ContainsPolicy::AllMatches,
-                |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
+                |index| self.trial_status(child, unsafe { sn_entry(value, index) }, depth, active),
                 |index| evaluation.item(index),
             ) {
                 Ok(count) => count,
@@ -522,7 +421,7 @@ impl Execution<'_> {
         }
         Valid
     }
-    fn object_tracked(
+    pub(super) fn object_tracked(
         &self,
         r: &Object,
         value: Value,

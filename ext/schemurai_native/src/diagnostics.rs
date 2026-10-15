@@ -28,6 +28,7 @@ pub struct Report {
     // Explicit failure signal for the current evaluation, independent of the
     // number or rendering of diagnostic records. Child evaluations isolate it.
     failed: bool,
+    silent: bool,
     limits: budget::Limits,
     limit_hit: (u32, usize),
 }
@@ -40,6 +41,10 @@ impl Report {
         instance: Value,
         detail: usize,
     ) -> Result<(), Verdict> {
+        if self.silent {
+            self.failed = true;
+            return Ok(());
+        }
         if self.limits.enabled & 1 != 0 && self.errors.len() >= self.limits.max_errors {
             self.limit_hit = (1, self.errors.len().saturating_add(1));
             return Err(Unsupported);
@@ -69,6 +74,10 @@ impl Report {
         instance: Option<usize>,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
     ) -> Result<T, Verdict> {
+        if self.silent {
+            return visit(self);
+        }
+
         let schema_len = self.schema_path.checkpoint();
         let instance_len = self.instance_path.checkpoint();
         self.schema_path.push_str("/");
@@ -88,6 +97,10 @@ impl Report {
         schema_key: Option<Value>,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
     ) -> Result<T, Verdict> {
+        if self.silent {
+            return visit(self);
+        }
+
         let instance_len = self.instance_path.checkpoint();
         self.instance_path.name(key)?;
         let result = if let Some(key) = schema_key {
@@ -105,6 +118,10 @@ impl Report {
         key: Value,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
     ) -> Result<T, Verdict> {
+        if self.silent {
+            return visit(self);
+        }
+
         self.scoped(segment, None, |report| {
             report.schema_path.name(key)?;
             visit(report)
@@ -113,6 +130,65 @@ impl Report {
 }
 
 impl Execution<'_> {
+    // Scalar trials export no annotations and need no evaluation memo entry.
+    // Keep this before memo admission, especially for contains over scalar arrays.
+    pub(super) fn trial_scalar(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        kind: i32,
+    ) -> Option<Verdict> {
+        match self.nodes[node].as_slice() {
+            [Op::Number(required, rules)] if !rules.runtime_operands() => {
+                // A typed-integer failure still performs numeric conversion in
+                // a trial, so preserve nonfinite decimal exceptions as well.
+                let status = if kind & TYPE_NUMBER != 0 {
+                    let status = rules.eval(self.caches, value, &self.budget);
+                    if status != Unsupported && *required != 0 && kind & required == 0 {
+                        Invalid
+                    } else {
+                        status
+                    }
+                } else {
+                    verdict(*required == 0)
+                };
+                Some(status)
+            }
+            [op @ (Op::Boolean(_) | Op::Type(_))] => Some(self.leaf(op, kind, value, depth)),
+            [op @ Op::String(_, rules)]
+                if kind != TYPE_STRING
+                    || rules.length_only()
+                    || rules.pattern_only().is_some()
+                    || rules.format_only().is_some()
+                    || rules.content_only().is_some() =>
+            {
+                Some(self.leaf(op, kind, value, depth))
+            }
+            _ => None,
+        }
+    }
+    pub(super) fn collect_trial(
+        &self,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind: i32,
+    ) -> Tracked {
+        if depth > MAX_EVALUATION_DEPTH || kind == TYPE_UNSUPPORTED {
+            return Tracked::new(Unsupported);
+        }
+        if let [op @ (Op::Const(_) | Op::Enum(_))] = self.nodes[node].as_slice() {
+            return Tracked::new(self.leaf(op, kind, value, depth));
+        }
+        let mut report = Report {
+            silent: true,
+            ..Report::default()
+        };
+        self.collect_uncached::<true>(&mut report, node, value, depth, active, kind)
+            .unwrap_or_else(Tracked::new)
+    }
     fn collect<const ANNOTATIONS: bool>(
         &self,
         report: &mut Report,
@@ -142,6 +218,14 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind: i32,
     ) -> Result<Tracked, Verdict> {
+        if report.silent {
+            let result = self.eval_tracked_kind(node, value, depth, active, kind);
+            if result.status == Unsupported {
+                return Err(Unsupported);
+            }
+            report.failed |= result.status == Invalid;
+            return Ok(result);
+        }
         // A diagnostic success is established by complete traversal, never by
         // a short-circuit validity result. Keep exported annotations and the
         // collection policy separate; failures retain their path-specific errors.
@@ -234,21 +318,9 @@ impl Execution<'_> {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind & TYPE_NUMBER != 0 {
-                        let bits = rules.failures(value, &self.budget)?;
-                        for (bit, keyword) in [
-                            (MAXIMUM, "maximum"),
-                            (MINIMUM, "minimum"),
-                            (EXCLUSIVE_MAXIMUM, "exclusiveMaximum"),
-                            (EXCLUSIVE_MINIMUM, "exclusiveMinimum"),
-                            (MULTIPLE_OF, "multipleOf"),
-                        ] {
-                            if !self.budget.checkpoint() {
-                                return Err(Unsupported);
-                            }
-                            if bits & bit != 0 {
-                                report.add(self.caches, keyword, source, value, 0)?;
-                            }
-                        }
+                        rules.visit_failures(self.caches, value, &self.budget, |keyword| {
+                            report.add(self.caches, keyword, source, value, 0)
+                        })?;
                     }
                 }
                 Op::String(required, rules) => {
@@ -320,6 +392,18 @@ impl Execution<'_> {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind != TYPE_ARRAY {
+                        continue;
+                    }
+                    if report.silent {
+                        let status =
+                            self.array_tracked(rules, value, depth + 1, active, &mut prior);
+                        if status == Unsupported {
+                            return Err(Unsupported);
+                        }
+                        report.failed |= status == Invalid;
+                        if report.failed {
+                            break;
+                        }
                         continue;
                     }
                     let mut coverage = Tracked::new(Valid);
@@ -498,13 +582,18 @@ impl Execution<'_> {
                                         _ => n > limit,
                                     })
                                 } else if let Some((required, number)) = number {
-                                    match number.eval_guarded(required, item, &self.budget) {
+                                    match number.eval_guarded(
+                                        self.caches,
+                                        required,
+                                        item,
+                                        &self.budget,
+                                    ) {
                                         Valid => false,
                                         Invalid => true,
                                         Unsupported => return Err(Unsupported),
                                     }
                                 } else {
-                                    self.needs_diagnostics(child, item, depth + 1, active)?
+                                    self.needs_diagnostics(child, item, depth + 1)?
                                 };
                                 if !needs {
                                     continue;
@@ -524,15 +613,7 @@ impl Execution<'_> {
                         let matches = evaluation::scan_contains(
                             len,
                             evaluation::ContainsPolicy::AllMatches,
-                            |index| match self.needs_diagnostics(
-                                child,
-                                values[index],
-                                depth + 1,
-                                active,
-                            ) {
-                                Ok(needs) => verdict(!needs),
-                                Err(status) => status,
-                            },
+                            |index| self.trial_status(child, values[index], depth + 1, active),
                             |index| {
                                 if tracked {
                                     coverage.item(index);
@@ -579,6 +660,18 @@ impl Execution<'_> {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind != TYPE_OBJECT {
+                        continue;
+                    }
+                    if report.silent {
+                        let status =
+                            self.object_tracked(rules, value, depth + 1, active, &mut prior);
+                        if status == Unsupported {
+                            return Err(Unsupported);
+                        }
+                        report.failed |= status == Invalid;
+                        if report.failed {
+                            break;
+                        }
                         continue;
                     }
                     let mut coverage = Tracked::new(Valid);
@@ -670,12 +763,7 @@ impl Execution<'_> {
                                     if result.status == Valid {
                                         coverage.merge(result);
                                     }
-                                } else if self.needs_diagnostics(
-                                    *child,
-                                    value,
-                                    depth + 1,
-                                    active,
-                                )? {
+                                } else if self.needs_diagnostics(*child, value, depth + 1)? {
                                     report.schema_name(keyword, *name, |r| {
                                         self.collect::<false>(r, *child, value, depth + 1, active)
                                     })?;
@@ -741,27 +829,13 @@ impl Execution<'_> {
                     } else {
                         evaluation::BranchKind::One
                     };
-                    // Complete scanning preserves exact oneOf counts and VM
-                    // exceptions from branches after an anyOf success.
-                    let result = if tracked {
-                        evaluation::scan_branches(
-                            nodes,
-                            evaluation::BranchPolicy::Complete,
-                            |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
-                        )?
-                    } else {
-                        let result = evaluation::scan_branches(
-                            nodes,
-                            evaluation::BranchPolicy::Complete,
-                            |child| {
-                                self.eval_with_kind(child, value, depth + 1, active, Some(kind))
-                            },
-                        )?;
-                        evaluation::BranchMatches {
-                            matches: result.matches,
-                            coverage: Tracked::new(Valid),
-                        }
-                    };
+                    // Trials execute complete scalar checks without retaining
+                    // errors or paths; ordinary validity may stop earlier.
+                    let result = evaluation::scan_branches(
+                        nodes,
+                        evaluation::BranchPolicy::Complete,
+                        |child| self.eval_tracked_kind(child, value, depth + 1, active, kind),
+                    )?;
                     if !branch_kind.accepts(result.matches) {
                         report.add(
                             self.caches,
@@ -775,24 +849,18 @@ impl Execution<'_> {
                     }
                 }
                 Op::Not(child) => {
-                    match self.eval_with_kind(*child, value, depth + 1, active, Some(kind)) {
+                    match self
+                        .eval_tracked_kind(*child, value, depth + 1, active, kind)
+                        .status
+                    {
                         Unsupported => return Err(Unsupported),
                         Valid => report.add(self.caches, "not", source, value, 0)?,
                         Invalid => {}
                     }
                 }
                 Op::Conditional(condition, yes, no) => {
-                    let condition = if tracked {
-                        self.eval_tracked_kind(*condition, value, depth + 1, active, kind)
-                    } else {
-                        Tracked::new(self.eval_with_kind(
-                            *condition,
-                            value,
-                            depth + 1,
-                            active,
-                            Some(kind),
-                        ))
-                    };
+                    let condition =
+                        self.eval_tracked_kind(*condition, value, depth + 1, active, kind);
                     let mut coverage = Tracked::new(Valid);
                     let (child, segment) = match condition.status {
                         Unsupported => return Err(Unsupported),
@@ -854,6 +922,15 @@ impl Execution<'_> {
                     }
                 }
             }
+            if report.silent
+                && report.failed
+                && matches!(
+                    op,
+                    Op::All(_) | Op::Any(_) | Op::One(_) | Op::Not(_) | Op::Conditional(..)
+                )
+            {
+                break;
+            }
         }
         let failed = report.failed;
         report.failed |= parent_failed;
@@ -864,17 +941,29 @@ impl Execution<'_> {
 
     fn needs_diagnostics(
         &self,
-        node: usize,
+        mut node: usize,
         value: Value,
-        depth: usize,
-        active: scope::Context<'_>,
+        mut depth: usize,
     ) -> Result<bool, Verdict> {
-        if !self.budget.checkpoint() {
-            return Err(Unsupported);
+        loop {
+            if !self.budget.checkpoint() {
+                return Err(Unsupported);
+            }
+            if depth > MAX_EVALUATION_DEPTH {
+                return Ok(true);
+            }
+            let [Op::Ref(reference)] = self.nodes[node].as_slice() else {
+                break;
+            };
+            let Some(target) = reference.static_target() else {
+                break;
+            };
+            node = target;
+            depth += 1;
         }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
-                rules.eval_guarded(*required, value, &self.budget)
+                rules.eval_guarded(self.caches, *required, value, &self.budget)
             }
             [op @ (Op::Type(_) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_))]
                 if depth <= MAX_EVALUATION_DEPTH =>
@@ -890,7 +979,9 @@ impl Execution<'_> {
                     self.leaf(op, kind, value, depth)
                 }
             }
-            _ => self.eval(node, value, depth, active),
+            // A successful validity/trial scan can omit diagnostic-only work
+            // in descendants. Only complete collection proves their success.
+            _ => return Ok(true),
         };
         match status {
             Valid => Ok(false),
@@ -919,7 +1010,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
             return Unsupported as i32;
         }
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
-            if c.engine.needs_diagnostics(child, item, c.depth, c.active)? {
+            if c.engine.needs_diagnostics(child, item, c.depth)? {
                 report.property(segment, key, schema_key, |r| {
                     c.engine.collect::<false>(r, child, item, c.depth, c.active)
                 })?;

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../decimal"
+
 module Schemurai
   module VM
     NumberRules = Data.define(
@@ -407,7 +409,7 @@ module Schemurai
       private def compile_decimal(value)
         return value if value.nil? || value.is_a?(Integer) || value.is_a?(Rational)
 
-        Rational(value.to_s)
+        Internal::Decimal.parse(value)
       end
     end
   end
