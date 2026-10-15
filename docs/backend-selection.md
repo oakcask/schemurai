@@ -959,18 +959,15 @@ indexing, pattern matching, key names and dependency order. Native children are 
 Program identity; Ruby never reads their instruction streams. The compiler proof
 admits scalar assertions, empty schemas, logical applicators and Array/Object
 child traversal, including nested contains. Static, dynamic and recursive
-references are admitted when every possible target forms an acyclic graph and
-needs no exported annotations. Pure static-reference alias cycles are also
-admitted: every edge preserves instance identity, so the active source guard
-terminates after one circuit. A linear functional-graph pass seeds each cycle's
-length as its native depth bound before the remaining postorder proof. Prefixes
-retain their normal edge depth; no cycle changes the depth limit. Cycles with
-other instructions or scope-dependent dispatch still require a separate proof. One zero-depth dispatch vertex per anchor name,
-plus one for recursive resources, keeps binding edges shared and excludes cycles
-without increasing schema evaluation depth. Iterative postorder analysis proves
-child eligibility and whole-root coverage before kind demands are finalized.
+references are admitted when every possible target has an execution path and
+needs no exported annotations, including cycles and recursive input graphs.
+One shared dispatch vertex per anchor name, plus one for recursive resources,
+keeps binding edges shared. Reverse-edge propagation marks every ancestor of
+an unsupported instruction or annotation demand and every root that can reach
+container callbacks. This linear proof handles cycles without assuming a
+finite schema path depth. It shares flag propagation with memoization analysis.
 The whole-root proof requires every reachable instruction to have a runtime
-path and every reachable schema depth to remain within the native bound. Other roots retain the earlier guard before
+path. Other roots retain the earlier guard before
 any new callback can run, preventing a later compatibility transfer from
 replaying an already invoked block. Earlier type predicates join ordered
 runtime observations before the first callback can mutate their instance.
@@ -981,6 +978,21 @@ each yield and a fresh runner on reentry. Bounded child entries, reached
 instructions and oneOf branches request Ruby checkpoints in evaluation order;
 unbounded children skip these requests. Shared Ruby scalar primitives
 preserve method dispatch even for ordinary yielded values.
+
+Untracked validity suspends at a native stack depth of 256, before entering the
+next schema node. After all Rust frames and borrowed views unwind, C starts a
+fresh native runner for that node and instance and records its verdict as a
+runtime observation. Parent traversal resumes by replaying that observation.
+Container callbacks also start at native depth zero. These boundaries bound
+physical Rust recursion while preserving logical references through the shared
+active-source and resource context, including across long alias cycles.
+Continuation runners inherit the original absolute deadline, scalar/regexp
+state and callback execution mode. Ordinary validity continuations keep native
+budget polling; continuations within Ruby iteration blocks preserve those
+blocks' Ruby checkpoint boundaries. No extra schema-entry checkpoint is emitted
+before suspending. Saved callbacks retain their original cache/budget scope and
+start a fresh native stack when called later. Tracked validity and detailed
+error callbacks still need a separate continuation/result protocol.
 Callback scopes use an evaluator-owned live Ruby resource Array. Before each
 Ruby request, native execution publishes an owned scope snapshot after Rust
 unwinds. Changed scope contents are recorded with the request and replayed with
@@ -1031,9 +1043,9 @@ The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Special Arrays and Hashes, including subclasses, singleton methods and
-nonstandard keys, can still delegate when child graphs contain other cycles, unresolved references or require
-evaluated-location export. Schema evaluation beyond the native
-depth limit and defensive unsupported instructions also retain that path.
+nonstandard keys, can still delegate when child graphs contain unresolved references or require
+evaluated-location export. Tracked or detailed schema evaluation beyond the native
+stack bound and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
 outside Rust evaluation. Small records with up to eight declared keys and eight

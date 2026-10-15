@@ -24,10 +24,9 @@ impl Header {
         required: i32,
         value: Value,
         child: usize,
-        depth: usize,
         scalar: (i32, i32),
     ) -> Verdict {
-        caches.contains(self.source, value, child, depth, required, scalar)
+        caches.contains(self.source, value, child, required, scalar)
     }
     pub(super) fn children(
         &self,
@@ -35,9 +34,8 @@ impl Header {
         required: i32,
         value: Value,
         node: usize,
-        depth: usize,
     ) -> Verdict {
-        caches.container_children(self.source, value, node, depth, required, self.object)
+        caches.container_children(self.source, value, node, required, self.object)
     }
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
         !self.native_bounds
@@ -143,37 +141,23 @@ impl Header {
     }
 }
 impl Engine {
-    pub(super) fn scalar_callbacks_safe(&self, root: usize, depth: usize) -> bool {
-        self.scalar_callback_depths
-            .get(root)
-            .copied()
-            .flatten()
-            .is_some_and(|extra| {
-                depth
-                    .checked_add(extra)
-                    .is_some_and(|total| total <= MAX_EVALUATION_DEPTH)
-            })
+    pub(super) fn scalar_callbacks_safe(&self, root: usize) -> bool {
+        self.callback_roots.get(root) == Some(&true)
+    }
+    pub(super) fn native_continuations_safe(&self, root: usize) -> bool {
+        self.validity_supported.get(root) == Some(&true)
     }
     // Admit callbacks only when every reachable assertion has a runtime path.
     // Otherwise a later unsupported container could replay an already invoked
-    // user block through the VM. Pure static-alias cycles have a finite guard
-    // bound; other cycles remain unproven by postorder.
-    pub(super) fn compile_scalar_callback_depths(&mut self) {
+    // user block through the VM. Native continuations bound physical stack
+    // depth, so cycles need coverage propagation rather than a DAG proof.
+    pub(super) fn compile_native_validity_support(&mut self) {
         let count = self.nodes.len();
         self.has_references = self
             .nodes
             .iter()
             .flatten()
             .any(|op| matches!(op, Op::Ref(_)));
-        if !self.nodes.iter().flatten().any(|op| match op {
-            Op::Array(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
-            Op::Object(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
-            _ => false,
-        }) {
-            self.scalar_callback_depths.clear();
-            self.callback_child_depths.clear();
-            return;
-        }
         // One zero-depth dispatch vertex per name avoids repeating every
         // possible binding edge for each dynamic reference.
         let recursive = count + self.anchor_tables.len();
@@ -233,44 +217,19 @@ impl Engine {
                 }
             }
         }
-        let order = graph::postorder(&edges, &mut vec![false; edges.len()]);
-        // A static-alias cycle preserves the instance on every edge. Returning
-        // to its first source therefore hits the active-reference guard after
-        // exactly one circuit. Seed that finite depth before the ordinary DAG
-        // proof; cycles containing other instructions need a separate proof.
-        let aliases: Vec<_> = self
-            .nodes
+        let parents = graph::parents(&edges);
+        let mut unsupported: Vec<_> = admitted.into_iter().map(|allowed| !allowed).collect();
+        graph::propagate(&mut unsupported, &parents);
+        graph::propagate(&mut callbacks, &parents);
+        self.validity_supported = unsupported[..count]
             .iter()
-            .enumerate()
-            .map(|(node, ops)| {
-                if !self.tracks[node]
-                    && let [Op::Ref(reference)] = ops.as_slice()
-                {
-                    reference
-                        .static_target()
-                        .filter(|_| reference.callback_dynamic_target().is_none())
-                } else {
-                    None
-                }
-            })
+            .map(|&blocked| !blocked)
             .collect();
-        let mut depths = graph::functional_cycle_lengths(&aliases);
-        depths.resize(edges.len(), None);
-        for node in order {
-            callbacks[node] |= edges[node].iter().any(|&child| callbacks[child]);
-            if admitted[node] && depths[node].is_none() {
-                depths[node] = edges[node].iter().try_fold(0, |depth, &child| {
-                    Some(depth.max(depths[child]?.checked_add(usize::from(node < count))?))
-                });
-            }
-        }
-        depths.truncate(count);
-        self.scalar_callback_depths = depths
+        self.callback_roots = callbacks[..count]
             .iter()
-            .enumerate()
-            .map(|(node, &depth)| if callbacks[node] { depth } else { None })
+            .zip(&self.validity_supported)
+            .map(|(&callback, &supported)| callback && supported)
             .collect();
-        self.callback_child_depths = depths;
     }
     pub(super) fn scalar_callback_kind(&self, child: usize) -> (i32, i32) {
         if self.metadata[child].enters_scope {
@@ -289,7 +248,7 @@ impl Engine {
             _ => false,
         })
     }
-    // Children share no inherited dynamic binding or exported coverage.
+    // Runtime children inherit reference context but export validity only.
     pub(super) fn array_callbacks(&self, rules: &Array) -> bool {
         rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
     }
@@ -297,11 +256,7 @@ impl Engine {
         rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
     }
     fn callback_children_safe<'a>(&self, mut children: impl Iterator<Item = &'a usize>) -> bool {
-        children.all(|&child| {
-            self.callback_child_depths
-                .get(child)
-                .is_some_and(Option::is_some)
-        })
+        children.all(|&child| self.validity_supported.get(child) == Some(&true))
     }
     pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
         rules.has_no_item_schemas() && rules.contains.is_some() && self.array_callbacks(rules)

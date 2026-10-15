@@ -70,9 +70,10 @@ typedef struct {
 } message_arguments;
 extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
-typedef struct { VALUE rules, instance; size_t child, depth; int required, scalar_kind, scalar_flags; } contains_arguments;
+typedef struct { VALUE rules, instance; size_t child; int required, scalar_kind, scalar_flags; } contains_arguments;
 extern void sn_contains_arguments(const void *, contains_arguments *);
-extern void sn_caches_scalar_callback(const void *, const void *, int);
+extern void sn_caches_child(const void *, const void *, int, int);
+extern int sn_caches_is_scalar(const void *);
 extern int sn_caches_deadline_expired(const void *);
 typedef struct { VALUE ordinal, rules, instance; } scalar_arguments;
 extern void sn_scalar_arguments(const void *, scalar_arguments *);
@@ -153,10 +154,11 @@ typedef struct {
     VALUE owner, parent, active_budget, callback_scope, child_callbacks;
     VALUE scope_state, active_scope_state;
     VALUE ref_state, vm_active, active_ref_state, active_vm_state;
+    int continuation, scalar_mode;
     VALUE regexps, limited_regexps, pointers, messages, frames;
     VALUE number_state, limited_number_state, string_state, limited_string_state;
     void *caches;
-    size_t root, depth;
+    size_t root;
     int busy, callback_context, scope_owner, closed_limited;
     int callback_kind, callback_flags;
     native_limits active_limits;
@@ -315,9 +317,9 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->callback_kind = SN_CALLBACK_RUNTIME;
     r->callback_flags = 0;
     r->active_limits = (native_limits){0};
-    r->depth = 0;
     r->busy = 0;
     r->callback_context = 0;
+    r->continuation = r->scalar_mode = 0;
     r->regexps = Qnil;
     r->limited_regexps = Qnil;
     r->pointers = Qnil;
@@ -838,10 +840,10 @@ static void evaluate_native(evaluation_call *call) {
                 call->instance, &call->status, &call->limits, &outcome);
         }
     } else if (NIL_P(call->budget)) {
-        call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance, r->depth);
+        call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance, 0);
     } else {
         call->status = sn_valid_with_limits(call->engine->engine, r->caches, r->root,
-            call->instance, r->depth, &call->limits, &outcome);
+            call->instance, 0, &call->limits, &outcome);
     }
     active_caches = previous_caches;
     publish_scope(r);
@@ -877,7 +879,7 @@ static VALUE callback_scope(evaluation_call *call) {
         scope->active_budget = call->budget;
         scope->active_limits = call->limits;
         copy_states(scope, runner, 1, 0);
-        sn_caches_scalar_callback(scope->caches, runner->caches, !NIL_P(call->budget));
+        sn_caches_child(scope->caches, runner->caches, !NIL_P(call->budget), 1);
         runner->callback_scope = object;
     }
     return runner->callback_scope;
@@ -1032,12 +1034,28 @@ static VALUE call_runtime(VALUE context) {
      * Ruby exception. The native deadline continues across every retry. */
     int staged = (operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL)
         || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches)
-        || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
-        || operation->kind == SN_RUNTIME_ARRAY_CHILDREN || operation->kind == SN_RUNTIME_OBJECT_CHILDREN;
+        || (r->callback_context && (!r->continuation || r->scalar_mode))
+        || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
+        || operation->kind == SN_RUNTIME_ARRAY_CHILDREN || operation->kind == SN_RUNTIME_OBJECT_CHILDREN
+        || operation->kind == SN_RUNTIME_NATIVE_CHILD;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
         return Qtrue;
+    }
+    if (operation->kind == SN_RUNTIME_NATIVE_CHILD) {
+        contains_arguments arguments;
+        sn_contains_arguments(r->caches, &arguments);
+        VALUE callback = build_runner(r->owner, arguments.child);
+        runner_holder *child;
+        TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+        child->parent = callback_scope(call);
+        child->callback_context = child->continuation = 1;
+        child->scalar_mode = sn_caches_is_scalar(r->caches);
+        VALUE result = evaluate_runner(callback, instance, call->budget, 0);
+        if (NIL_P(result)) rb_raise(rb_eRuntimeError, "native continuation lost its coverage proof");
+        RB_GC_GUARD(callback);
+        return result;
     }
     if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS || operation->kind == SN_RUNTIME_ARRAY_CHILDREN
         || operation->kind == SN_RUNTIME_OBJECT_CHILDREN) {
@@ -1047,7 +1065,6 @@ static VALUE call_runtime(VALUE context) {
         runner_holder *child;
         TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
         child->parent = callback_scope(call);
-        child->depth = arguments.depth;
         child->callback_kind = arguments.scalar_kind;
         child->callback_flags = arguments.scalar_flags;
         child->callback_context = 1;
@@ -1242,7 +1259,7 @@ static VALUE evaluate_runner_body(VALUE context) {
         if (r->callback_context) {
             call.limits = parent->active_limits;
             call.limits_read = 1;
-            sn_caches_scalar_callback(r->caches, parent->caches, !NIL_P(budget));
+            sn_caches_child(r->caches, parent->caches, !NIL_P(budget), !r->continuation || r->scalar_mode);
         }
     }
     int scoped = sn_reference_context(call.engine->engine);
@@ -1328,8 +1345,9 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         runner_holder *child;
         TypedData_Get_Struct(nested, runner_holder, &runner_type, child);
         child->parent = self;
-        child->depth = runner->depth;
         child->callback_context = runner->callback_context;
+        child->continuation = runner->continuation;
+        child->scalar_mode = runner->scalar_mode;
         child->scope_state = runner->scope_state;
         child->ref_state = runner->ref_state;
         child->vm_active = runner->vm_active;
@@ -1392,7 +1410,6 @@ static VALUE runner_evaluate_child(VALUE self, VALUE program, VALUE instance) {
         runner_holder *child;
         TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
         child->parent = factory->parent;
-        child->depth = factory->depth;
         child->callback_context = 1;
         child->callback_kind = sn_callback_kind(owner->engine, index, &child->callback_flags);
         rb_hash_aset(factory->child_callbacks, program, callback);

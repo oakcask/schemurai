@@ -29,6 +29,7 @@ pub struct Caches {
     scalar_callback: std::cell::Cell<bool>,
     callback_checkpoints: std::cell::Cell<bool>,
     callbacks_allowed: std::cell::Cell<bool>,
+    continuations_allowed: std::cell::Cell<bool>,
     pending_contains: std::cell::Cell<Option<ContainsArguments>>,
     scopes: scopes::Scopes,
 }
@@ -38,7 +39,6 @@ pub struct ContainsArguments {
     rules: Value,
     instance: Value,
     child: usize,
-    depth: usize,
     required: i32,
     scalar_kind: i32,
     scalar_flags: i32,
@@ -135,12 +135,30 @@ impl Caches {
     pub(super) fn allow_callbacks(&self, allowed: bool) {
         self.callbacks_allowed.set(allowed);
     }
+    pub(super) fn allow_continuations(&self, allowed: bool) {
+        self.continuations_allowed.set(allowed);
+    }
+    pub(super) fn continuations_allowed(&self) -> bool {
+        self.continuations_allowed.get()
+    }
+    pub(super) fn native_child(&self, child: usize, instance: Value) -> Verdict {
+        self.children_request(
+            ContainsArguments {
+                rules: unsafe { sn_nil() },
+                instance,
+                child,
+                required: 0,
+                scalar_kind: CALLBACK_RUNTIME,
+                scalar_flags: 0,
+            },
+            RUNTIME_NATIVE_CHILD,
+        )
+    }
     pub(super) fn contains(
         &self,
         rules: Value,
         instance: Value,
         child: usize,
-        depth: usize,
         required: i32,
         scalar: (i32, i32),
     ) -> Verdict {
@@ -149,7 +167,6 @@ impl Caches {
                 rules,
                 instance,
                 child,
-                depth,
                 required,
                 scalar_kind: scalar.0,
                 scalar_flags: scalar.1,
@@ -162,7 +179,6 @@ impl Caches {
         rules: Value,
         instance: Value,
         node: usize,
-        depth: usize,
         required: i32,
         object: bool,
     ) -> Verdict {
@@ -171,7 +187,6 @@ impl Caches {
                 rules,
                 instance,
                 child: node,
-                depth,
                 required,
                 scalar_kind: CALLBACK_RUNTIME,
                 scalar_flags: 0,
@@ -623,6 +638,7 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     caches.scalar_callback.set(false);
     caches.callback_checkpoints.set(false);
     caches.callbacks_allowed.set(false);
+    caches.continuations_allowed.set(false);
     caches.reorder.set(false);
     caches.rescued_strings.borrow_mut().clear();
     *caches.pointers.borrow_mut() = Pointers::default();
@@ -659,17 +675,24 @@ pub unsafe extern "C" fn sn_caches_pending(
 /// # Safety
 /// Both caches must be live and idle under the GVL. The parent has unwound.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_caches_scalar_callback(
+pub unsafe extern "C" fn sn_caches_child(
     caches: *const Caches,
     parent: *const Caches,
     limited: i32,
+    scalar: i32,
 ) {
     let caches = unsafe { &*caches };
     caches.deadline.set(unsafe { &*parent }.deadline.get());
-    caches.scalar_callback.set(true);
-    caches.callback_checkpoints.set(limited != 0);
+    caches.scalar_callback.set(scalar != 0);
+    caches.callback_checkpoints.set(scalar != 0 && limited != 0);
     caches.dynamic_calls.set(true);
     caches.runtime_order.set(true);
+}
+/// # Safety
+/// Caches must be live and idle under the GVL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_is_scalar(caches: *const Caches) -> i32 {
+    i32::from(unsafe { &*caches }.scalar_callback())
 }
 /// # Safety
 /// Caches must be live and idle under the GVL, after a Ruby scalar has returned.
@@ -839,6 +862,24 @@ pub unsafe extern "C" fn sn_scalar_arguments(caches: *const Caches, output: *mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn child_modes_inherit_deadlines_without_adding_normal_scalar_checkpoints() {
+        let parent = Caches::default();
+        let child = Caches::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        parent.deadline.set(Some(deadline));
+        unsafe { sn_caches_child(&child, &parent, 1, 0) };
+        assert_eq!(child.deadline.get(), Some(deadline));
+        assert!(!child.scalar_callback());
+        assert!(!child.callback_checkpoints.get());
+        assert!(child.dynamic_calls());
+        assert!(child.runtime_order());
+        unsafe { sn_caches_child(&child, &parent, 1, 1) };
+        assert_eq!(child.deadline.get(), Some(deadline));
+        assert!(child.scalar_callback());
+        assert!(child.callback_checkpoints.get());
+    }
+
     #[test]
     fn reports_memory_when_a_search_cache_is_borrowed() {
         let caches = Caches::default();

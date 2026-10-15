@@ -696,8 +696,8 @@ pub struct Engine {
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
     kind_demand: Vec<KindDemand>,
-    scalar_callback_depths: Vec<Option<usize>>,
-    callback_child_depths: Vec<Option<usize>>,
+    callback_roots: Vec<bool>,
+    validity_supported: Vec<bool>,
     has_references: bool,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
@@ -1373,6 +1373,11 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         known_kind: Option<&InstanceKind>,
     ) -> Verdict {
+        // Suspend before entering the next node. C runs a fresh native stack
+        // only after these frames and their borrowed views have unwound.
+        if depth >= MAX_EVALUATION_DEPTH && self.caches.continuations_allowed() {
+            return self.caches.native_child(node, value);
+        }
         if self.caches.callback_checkpoint(value) != Valid || !self.budget.checkpoint() {
             return Unsupported;
         }
@@ -1548,15 +1553,11 @@ impl Execution<'_> {
                         && rules.header.runtime_required(self.caches, kind)
                         && self.scalar_contains(rules)
                     {
-                        if depth >= MAX_EVALUATION_DEPTH {
-                            return Unsupported;
-                        }
                         rules.header.contains(
                             self.caches,
                             *required,
                             value,
                             rules.contains.expect("scalar contains child"),
-                            depth + 1,
                             self.scalar_callback_kind(
                                 rules.contains.expect("scalar contains child"),
                             ),
@@ -1565,12 +1566,7 @@ impl Execution<'_> {
                         && rules.header.runtime_required(self.caches, kind)
                         && self.array_callbacks(rules)
                     {
-                        if depth >= MAX_EVALUATION_DEPTH {
-                            return Unsupported;
-                        }
-                        rules
-                            .header
-                            .children(self.caches, *required, value, node, depth + 1)
+                        rules.header.children(self.caches, *required, value, node)
                     } else if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
                     } else if kind != TYPE_ARRAY {
@@ -1586,12 +1582,7 @@ impl Execution<'_> {
                         && rules.header.runtime_required(self.caches, kind)
                         && self.object_callbacks(rules)
                     {
-                        if depth >= MAX_EVALUATION_DEPTH {
-                            return Unsupported;
-                        }
-                        rules
-                            .header
-                            .children(self.caches, *required, value, node, depth + 1)
+                        rules.header.children(self.caches, *required, value, node)
                     } else if *required != 0 && kind != TYPE_OBJECT {
                         Invalid
                     } else if kind != TYPE_OBJECT {
@@ -1604,9 +1595,7 @@ impl Execution<'_> {
                             && self.caches.callbacks_allowed()
                             && self.object_callbacks(rules)
                         {
-                            rules
-                                .header
-                                .children(self.caches, *required, value, node, depth + 1)
+                            rules.header.children(self.caches, *required, value, node)
                         } else {
                             result
                         }
@@ -2062,9 +2051,7 @@ impl Execution<'_> {
                 && self.caches.callbacks_allowed()
                 && self.object_callbacks(rules)
             {
-                rules
-                    .header
-                    .children(self.caches, required, value, node, depth)
+                rules.header.children(self.caches, required, value, node)
             } else if header_only && !runtime && self.can_call_runtime(result) {
                 // A declined record guard has not invoked instance methods.
                 // Preserve the fast record walk while handing special values
@@ -3493,7 +3480,7 @@ pub unsafe extern "C" fn sn_compile(
         e.bind_dynamic_anchors()?;
         e.simplify_dynamic_references();
         e.compile_memoization();
-        e.compile_scalar_callback_depths();
+        e.compile_native_validity_support();
         e.compile_kind_demands();
         Ok::<_, Value>(())
     })) {
@@ -3580,7 +3567,8 @@ pub unsafe extern "C" fn sn_valid(
         let e = unsafe { &*engine };
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
-        caches.allow_callbacks(e.scalar_callbacks_safe(root, depth));
+        caches.allow_callbacks(e.scalar_callbacks_safe(root));
+        caches.allow_continuations(e.native_continuations_safe(root));
         let execution = Execution {
             engine: e,
             caches,
@@ -3608,7 +3596,8 @@ pub unsafe extern "C" fn sn_valid_with_limits(
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let e = unsafe { &*engine };
-        caches.allow_callbacks(e.scalar_callbacks_safe(root, depth));
+        caches.allow_callbacks(e.scalar_callbacks_safe(root));
+        caches.allow_continuations(e.native_continuations_safe(root));
         let execution = Execution {
             engine: unsafe { &*engine },
             caches,
@@ -3680,8 +3669,8 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let programs = unsafe { &*std::ptr::addr_of!((*engine).programs) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
-    let callback_depths = unsafe { &*std::ptr::addr_of!((*engine).scalar_callback_depths) };
-    let child_depths = unsafe { &*std::ptr::addr_of!((*engine).callback_child_depths) };
+    let callback_roots = unsafe { &*std::ptr::addr_of!((*engine).callback_roots) };
+    let validity_supported = unsafe { &*std::ptr::addr_of!((*engine).validity_supported) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3691,8 +3680,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
-        + (callback_depths.capacity() + child_depths.capacity())
-            * std::mem::size_of::<Option<usize>>()
+        + (callback_roots.capacity() + validity_supported.capacity()) * std::mem::size_of::<bool>()
         + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()
