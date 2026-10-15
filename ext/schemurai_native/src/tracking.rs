@@ -436,7 +436,7 @@ impl Execution<'_> {
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
-        let status = r.check_required(value, self.undefined, &self.budget);
+        let status = r.check_required(self.caches, value, self.undefined, &self.budget);
         if status != Valid {
             return status;
         }
@@ -477,7 +477,7 @@ impl Execution<'_> {
                 return status;
             }
         }
-        let status = r.check_dependent_required(value, self.undefined, &self.budget);
+        let status = r.check_dependent_required(self.caches, value, self.undefined, &self.budget);
         if status != Valid {
             return status;
         }

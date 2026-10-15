@@ -19,6 +19,7 @@ struct Error {
     operand: Value,
     instance: Value,
     detail: usize,
+    message: Value,
 }
 #[derive(Default)]
 pub struct Report {
@@ -29,6 +30,7 @@ pub struct Report {
     // number or rendering of diagnostic records. Child evaluations isolate it.
     failed: bool,
     silent: bool,
+    render_messages: bool,
     limits: budget::Limits,
     limit_hit: (u32, usize),
 }
@@ -57,6 +59,11 @@ impl Report {
         ))
         .then_some(keyword);
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
+        let message = if self.render_messages {
+            caches.error_message(keyword, source, instance, detail)?
+        } else {
+            unsafe { sn_nil() }
+        };
         self.errors.push(Error {
             keyword,
             instance_path,
@@ -65,6 +72,7 @@ impl Report {
             operand: source.1,
             instance,
             detail,
+            message,
         });
         Ok(())
     }
@@ -686,8 +694,8 @@ impl Execution<'_> {
                         if !self.budget.checkpoint() {
                             return Err(Unsupported);
                         }
-                        if missing(value, name, self.undefined) {
-                            report.add(self.caches, "required", source, name, 0)?;
+                        if name.missing(self.caches, value, self.undefined)? {
+                            report.add(self.caches, "required", source, name.name, 0)?;
                         }
                     }
                     let mut context = ObjectDiagnostics {
@@ -741,12 +749,12 @@ impl Execution<'_> {
                                     if !self.budget.checkpoint() {
                                         return Err(Unsupported);
                                     }
-                                    if missing(value, required, self.undefined) {
+                                    if required.missing(self.caches, value, self.undefined)? {
                                         report.add(
                                             self.caches,
                                             keyword,
                                             (source.0, *name),
-                                            required,
+                                            required.name,
                                             0,
                                         )?;
                                     }
@@ -1075,6 +1083,7 @@ pub struct Record {
     operand: Value,
     instance: Value,
     detail: usize,
+    message: Value,
 }
 fn report_outcome(result: std::thread::Result<Result<*mut Report, i32>>) -> (*mut Report, i32) {
     match result {
@@ -1104,7 +1113,10 @@ pub unsafe extern "C" fn sn_diagnose(
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
         };
-        let mut report = Report::default();
+        let mut report = Report {
+            render_messages: engine.runtime_messages,
+            ..Report::default()
+        };
         execution
             .collect::<false>(&mut report, root, instance, 0, scope::Context::default())
             .map_err(|verdict| execution.budget.status(verdict))?;
@@ -1138,6 +1150,7 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
         };
         let mut report = Report {
             limits,
+            render_messages: execution.runtime_messages,
             ..Report::default()
         };
         let result = if execution.budget.check_deadline() {
@@ -1209,6 +1222,7 @@ pub unsafe extern "C" fn sn_report_record(
             operand: e.operand,
             instance: e.instance,
             detail: e.detail,
+            message: e.message,
         }
     };
 }
@@ -1222,6 +1236,7 @@ pub unsafe extern "C" fn sn_report_mark(report: *const Report) {
             sn_pin(error.schema_path.value());
             sn_pin(error.operand);
             sn_pin(error.instance);
+            sn_pin(error.message);
         }
     }
 }

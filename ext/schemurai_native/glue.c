@@ -41,6 +41,15 @@ extern void sn_caches_observe(const void *);
 extern size_t sn_pointer_parts(const void *);
 extern void sn_pointer_part(const void *, size_t, const unsigned char **, size_t *, VALUE *);
 extern void sn_pointer_result(const void *, VALUE);
+typedef struct {
+    const unsigned char *keyword;
+    size_t keyword_len;
+    int opcode;
+    VALUE operand, instance;
+    size_t detail;
+} message_arguments;
+extern void sn_message_arguments(const void *, message_arguments *);
+extern void sn_message_result(const void *, VALUE);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -113,7 +122,7 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps, pointers; void *caches; size_t root; st_table *matches; } runner_holder;
+typedef struct { VALUE owner, regexps, pointers, messages; void *caches; size_t root; st_table *matches; } runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -141,6 +150,7 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->owner);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->pointers);
+    rb_gc_mark(r->messages);
     if (r->caches) sn_caches_mark(r->caches);
     if (r->matches) st_foreach(r->matches, mark_operation, 0);
 }
@@ -216,6 +226,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->owner = self;
     r->regexps = Qnil;
     r->pointers = Qnil;
+    r->messages = Qnil;
     r->root = index;
     r->caches = NULL;
     r->matches = NULL;
@@ -566,6 +577,7 @@ typedef struct {
     int opcode;
     VALUE operand, instance;
     size_t detail;
+    VALUE message;
 } diagnostic_record;
 typedef struct { void *report; } report_holder;
 extern void *sn_diagnose(const void *, const void *, size_t, VALUE, int *);
@@ -605,6 +617,7 @@ static VALUE clear_runtime(VALUE context) {
     st_foreach(call->runner->matches, release_operation, 0);
     st_clear(call->runner->matches);
     call->runner->pointers = Qnil;
+    call->runner->messages = Qnil;
     sn_caches_runtime(call->runner->caches, call->runner->matches);
     sn_caches_begin(call->runner->caches);
     return Qnil;
@@ -665,6 +678,19 @@ static VALUE null_numeric(VALUE instance, int operation) {
     return rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
         INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
 }
+static VALUE build_message(runner_holder *runner) {
+    message_arguments arguments;
+    sn_message_arguments(runner->caches, &arguments);
+    VALUE keyword = rb_utf8_str_new((const char *)arguments.keyword, arguments.keyword_len);
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE native = rb_const_get(schemurai, rb_intern_const("Native"));
+    VALUE helper = rb_const_get(native, rb_intern_const("Diagnostics"));
+    VALUE result = rb_funcall(helper, rb_intern_const("message"), 5, keyword,
+        INT2NUM(arguments.opcode), arguments.operand, arguments.instance, SIZET2NUM(arguments.detail));
+    RB_GC_GUARD(keyword);
+    RB_GC_GUARD(helper);
+    return result;
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -672,6 +698,16 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_DIAGNOSTIC_MESSAGE) {
+        VALUE message = build_message(r);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return message;
+    }
+    if (operation->kind == SN_RUNTIME_REQUIRED_MISSING) {
+        VALUE present = rb_funcallv_public(instance, rb_intern_const("key?"), 1, &source);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return RTEST(present) ? Qfalse : Qtrue;
+    }
     if (operation->kind >= SN_RUNTIME_NULL_NUMBER) {
         VALUE result = null_numeric(instance, operation->kind);
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
@@ -729,6 +765,15 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
         verdict = RTEST(result) ? SN_VERDICT_VALID : SN_VERDICT_INVALID;
     }
     runner_holder *r = call->runner;
+    if (kind == SN_RUNTIME_DIAGNOSTIC_MESSAGE) {
+        /* Keep results rooted even if another Ractor stops Rust while its
+         * message table has an active mutable RefCell borrow. */
+        if (NIL_P(r->messages)) r->messages = rb_ary_new();
+        rb_ary_push(r->messages, result);
+        sn_message_result(r->caches, result);
+        RB_GC_GUARD(result);
+        return;
+    }
     if (kind == SN_RUNTIME_POINTER) {
         if (NIL_P(r->pointers)) r->pointers = rb_ary_new();
         rb_ary_push(r->pointers, result);
@@ -801,7 +846,7 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         if (!NIL_P(budget) && index % 256 == 0) rb_funcall(budget, rb_intern("check_deadline!"), 0);
         diagnostic_record r;
         sn_report_record(h->report, index, &r);
-        VALUE row = rb_ary_new_capa(7);
+        VALUE row = rb_ary_new_capa(NIL_P(r.message) ? 7 : 8);
         rb_ary_push(output, row);
         rb_ary_push(row, rb_utf8_str_new((const char *)r.keyword, r.keyword_len));
         rb_ary_push(row, NIL_P(r.instance_pointer) ? rb_utf8_str_new((const char *)r.instance_path, r.instance_len) : rb_str_dup(r.instance_pointer));
@@ -810,6 +855,7 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         rb_ary_push(row, r.operand);
         rb_ary_push(row, r.instance);
         rb_ary_push(row, SIZET2NUM(r.detail));
+        if (!NIL_P(r.message)) rb_ary_push(row, rb_str_dup(r.message));
     }
     RB_GC_GUARD(owner);
     RB_GC_GUARD(instance);

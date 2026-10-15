@@ -801,6 +801,19 @@ preserving Ruby exceptions and operator visibility. Native traversal interleaves
 those observations with ordered failures so earlier error limits and diagnostic
 path exceptions retain priority. Runtime observations distinguish operation,
 source and instance, and are cleared after each invocation.
+Required and dependency operands retain a compiled flag for ordinary String
+keys. Those keys use the native lookup and property-mask paths. Other operands
+use public Ruby `Hash#key?` dispatch through libruby after Rust returns, because
+even a key absent from a string-keyed object can invoke a Ruby `hash` method
+that raises. This also handles String operands with singleton methods without
+executing the VM. Original operand values and duplicates remain available for
+ordered diagnostics. Record masks and String fingerprints only receive ordinary
+String operands; other keys use the general native object traversal.
+Programs containing such runtime keys render diagnostic messages through libruby
+at their original evaluation positions as well. This preserves an earlier
+message-rendering exception before a later key lookup. Invocation-local message
+results and completed reports are GC-marked, and each output error receives an
+independent message String. Trials still discard errors without rendering them.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required

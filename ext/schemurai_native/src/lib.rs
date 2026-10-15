@@ -262,8 +262,33 @@ impl StringRules {
 }
 #[derive(Debug)]
 enum DiagnosticDependency {
-    Required(Value, Vec<Value>, &'static str),
+    Required(Value, Vec<RequiredKey>, &'static str),
     Schema(Value, usize, &'static str),
+}
+// Keep ordinary String lookups native; other operands may dispatch Ruby hash
+// methods. Retain the original value for runtime lookup and ordered rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RequiredKey {
+    name: Value,
+    ordinary_string: bool,
+}
+impl RequiredKey {
+    fn missing(
+        self,
+        caches: &runtime::Caches,
+        value: Value,
+        undefined: Value,
+    ) -> Result<bool, Verdict> {
+        if self.ordinary_string {
+            Ok(missing(value, self.name, undefined))
+        } else {
+            match caches.required_missing(self.name, value) {
+                Valid => Ok(true),
+                Invalid => Ok(false),
+                Unsupported => Err(Unsupported),
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, Debug)]
 struct PropertyTarget {
@@ -276,8 +301,8 @@ struct Object {
     record: Option<RecordObject>,
     min: Option<usize>,
     max: Option<usize>,
-    required: Vec<Value>,
-    required_order: Vec<Value>,
+    required: Vec<RequiredKey>,
+    required_order: Vec<RequiredKey>,
     properties: Vec<(Value, usize)>,
     property_targets: HashMap<tracking::JsonKey, PropertyTarget, BuildHasherDefault<BucketHasher>>,
     patterns: Vec<(pattern::Pattern, usize)>,
@@ -289,7 +314,7 @@ struct Object {
     property_indices: Vec<usize>,
     additional: Option<usize>,
     names: Option<usize>,
-    dependent_required: Vec<(Value, Vec<Value>)>,
+    dependent_required: Vec<(Value, Vec<RequiredKey>)>,
     dependent_schemas: Vec<(Value, usize)>,
     diagnostic_dependencies: Vec<DiagnosticDependency>,
     unevaluated: Option<usize>,
@@ -358,11 +383,18 @@ impl RecordShortIndex {
 impl Object {
     // Keep these calls at their original evaluation positions: property
     // failures and unsupported children must retain their ordering.
-    fn check_required(&self, value: Value, undefined: Value, budget: &budget::Budget) -> Verdict {
-        Self::check_keys(&self.required, value, undefined, budget)
+    fn check_required(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        undefined: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
+        Self::check_keys(&self.required, caches, value, undefined, budget)
     }
     fn check_keys(
-        keys: &[Value],
+        keys: &[RequiredKey],
+        caches: &runtime::Caches,
         value: Value,
         undefined: Value,
         budget: &budget::Budget,
@@ -371,14 +403,17 @@ impl Object {
             if !budget.checkpoint() {
                 return Unsupported;
             }
-            if missing(value, key, undefined) {
-                return Invalid;
+            match key.missing(caches, value, undefined) {
+                Ok(false) => {}
+                Ok(true) => return Invalid,
+                Err(status) => return status,
             }
         }
         Valid
     }
     fn check_dependent_required(
         &self,
+        caches: &runtime::Caches,
         value: Value,
         undefined: Value,
         budget: &budget::Budget,
@@ -388,7 +423,7 @@ impl Object {
                 return Unsupported;
             }
             if !missing(value, *name, undefined) {
-                let status = Self::check_keys(required, value, undefined, budget);
+                let status = Self::check_keys(required, caches, value, undefined, budget);
                 if status != Valid {
                     return status;
                 }
@@ -553,6 +588,7 @@ impl Object {
 
     fn with_record(mut self) -> Self {
         if self.required_order.len() > 64
+            || self.required_order.iter().any(|key| !key.ordinary_string)
             || !self.patterns.is_empty()
             || self.names.is_some()
             || !self.diagnostic_dependencies.is_empty()
@@ -577,7 +613,8 @@ impl Object {
                 )
             })
             .collect();
-        for &name in &self.required_order {
+        for key in &self.required_order {
+            let name = key.name;
             fields
                 .entry(tracking::JsonKey::new(name))
                 .or_insert(RecordField {
@@ -597,8 +634,8 @@ impl Object {
         }
         // Required names share the field bits already used for duplicate-key
         // detection. Repeated required names therefore need no extra state.
-        let required = self.required_order.iter().fold(0, |bits, &name| {
-            bits | fields[&tracking::JsonKey::new(name)].bit
+        let required = self.required_order.iter().fold(0, |bits, key| {
+            bits | fields[&tracking::JsonKey::new(key.name)].bit
         });
         let fields: Vec<_> = fields.into_values().collect();
         let short_index = RecordShortIndex::compile(&fields);
@@ -642,6 +679,7 @@ pub struct Engine {
     root: usize,
     fixnum_flag: Value,
     compiler: Value,
+    runtime_messages: bool,
     validate_format: bool,
     validate_content: bool,
     undefined: Value,
@@ -660,6 +698,19 @@ impl Engine {
             return Err(result);
         }
         Ok(self.retain(result))
+    }
+    fn required_keys(&mut self, value: Value) -> Vec<RequiredKey> {
+        self.values(value)
+            .into_iter()
+            .map(|name| {
+                let ordinary_string = unsafe { sn_kind(name) } == TYPE_STRING;
+                self.runtime_messages |= !ordinary_string;
+                RequiredKey {
+                    name,
+                    ordinary_string,
+                }
+            })
+            .collect()
     }
     fn values(&mut self, value: Value) -> Vec<Value> {
         if unsafe { sn_same(value, sn_nil()) } != 0 {
@@ -951,14 +1002,18 @@ impl Engine {
                         let pattern_group =
                             pattern::PatternGroup::compile(&pattern_names, &patterns);
                         let required = self.field(operand, b"required\0")?;
-                        let required = self.values(required);
+                        let required = self.required_keys(required);
                         let required_order = required.clone();
+                        let required_strings: Vec<_> = required
+                            .iter()
+                            .filter(|key| key.ordinary_string)
+                            .map(|key| key.name)
+                            .collect();
                         let properties = self.field(operand, b"properties\0")?;
                         let properties = self.compile_map(properties)?;
-                        if required
+                        if properties
                             .iter()
-                            .chain(properties.iter().map(|(key, _)| key))
-                            .any(|&key| unsafe { sn_kind(key) } != TYPE_STRING)
+                            .any(|&(key, _)| unsafe { sn_kind(key) } != TYPE_STRING)
                         {
                             ops.push(Op::Unsupported);
                             continue;
@@ -990,7 +1045,7 @@ impl Engine {
                         // content-keyed sets and the already compiled property index.
                         let indexed_required = properties.len().saturating_mul(required.len()) > 64;
                         let required_keys: Option<tracking::KeySet> = indexed_required.then(|| {
-                            required
+                            required_strings
                                 .iter()
                                 .map(|&name| tracking::JsonKey::new(name))
                                 .collect()
@@ -1000,7 +1055,7 @@ impl Engine {
                             .map(|key| {
                                 required_keys.as_ref().map_or_else(
                                     || {
-                                        required.iter().any(
+                                        required_strings.iter().any(
                                             |&name| unsafe { sn_string_equal(key.0, name) } != 0,
                                         )
                                     },
@@ -1015,7 +1070,11 @@ impl Engine {
                             .collect();
                         let required = required
                             .into_iter()
-                            .filter(|&name| {
+                            .filter(|key| {
+                                if !key.ordinary_string {
+                                    return true;
+                                }
+                                let name = key.name;
                                 if indexed_required {
                                     !property_targets.contains_key(&tracking::JsonKey::new(name))
                                 } else {
@@ -1033,7 +1092,7 @@ impl Engine {
                             let name = self.retain(unsafe { sn_entry(pair, 0) });
                             let dependency = self.retain(unsafe { sn_entry(pair, 1) });
                             if unsafe { sn_kind(dependency) } == TYPE_ARRAY {
-                                let names = self.values(dependency);
+                                let names = self.required_keys(dependency);
                                 diagnostic_dependencies.push(DiagnosticDependency::Required(
                                     name,
                                     names.clone(),
@@ -1052,7 +1111,7 @@ impl Engine {
                         }
                         for pair in self.values(dependent) {
                             let name = self.retain(unsafe { sn_entry(pair, 0) });
-                            let names = self.values(unsafe { sn_entry(pair, 1) });
+                            let names = self.required_keys(unsafe { sn_entry(pair, 1) });
                             diagnostic_dependencies.push(DiagnosticDependency::Required(
                                 name,
                                 names.clone(),
@@ -1066,14 +1125,12 @@ impl Engine {
                             DiagnosticDependency::Schema(name, child, "dependentSchemas")
                         }));
                         dependent_schemas.extend(schemas);
-                        if dependent_required.iter().any(|(name, keys)| {
-                            (unsafe { sn_kind(*name) }) != TYPE_STRING
-                                || keys
-                                    .iter()
-                                    .any(|&key| unsafe { sn_kind(key) } != TYPE_STRING)
-                        }) || dependent_schemas
+                        if dependent_required
                             .iter()
-                            .any(|&(key, _)| unsafe { sn_kind(key) } != TYPE_STRING)
+                            .any(|(name, _)| unsafe { sn_kind(*name) } != TYPE_STRING)
+                            || dependent_schemas
+                                .iter()
+                                .any(|&(key, _)| unsafe { sn_kind(key) } != TYPE_STRING)
                         {
                             ops.push(Op::Unsupported);
                             continue;
@@ -1829,7 +1886,7 @@ impl Execution<'_> {
         if bounds(len, r.min, r.max) == Invalid {
             return Invalid;
         }
-        let status = r.check_required(value, self.undefined, &self.budget);
+        let status = r.check_required(self.caches, value, self.undefined, &self.budget);
         if status != Valid {
             return status;
         }
@@ -1872,7 +1929,7 @@ impl Execution<'_> {
                 return status;
             }
         }
-        let status = r.check_dependent_required(value, self.undefined, &self.budget);
+        let status = r.check_dependent_required(self.caches, value, self.undefined, &self.budget);
         if status != Valid {
             return status;
         }
