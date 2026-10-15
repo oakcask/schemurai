@@ -254,17 +254,14 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH || !self.budget.checkpoint() {
             return Unsupported;
         }
-        let kind = if value & self.fixnum_flag != 0 {
-            TYPE_INTEGRAL_NUMBER
-        } else {
-            unsafe { sn_kind(value) }
-        };
+        let kind_state = InstanceKind::new(TYPE_UNCHECKED);
+        let kind = self.diagnostic_kind(node, value, &kind_state);
         if kind == TYPE_UNSUPPORTED {
             return Unsupported;
         }
         self.trial_scalar(node, value, depth, kind)
             .unwrap_or_else(|| {
-                self.eval_tracked_kind(node, value, depth, active, kind)
+                self.eval_tracked_kind(node, value, depth, active, &kind_state)
                     .status
             })
     }
@@ -281,12 +278,8 @@ impl Execution<'_> {
         if !self.budget.checkpoint() {
             return Tracked::new(Unsupported);
         }
-        let kind = if value & self.fixnum_flag != 0 {
-            TYPE_INTEGRAL_NUMBER
-        } else {
-            unsafe { sn_kind(value) }
-        };
-        self.eval_tracked_kind(node, value, depth, active, kind)
+        let kind = InstanceKind::new(TYPE_UNCHECKED);
+        self.eval_tracked_kind(node, value, depth, active, &kind)
     }
     // Applicator branches evaluate the same borrowed instance under the GVL.
     // No Ruby callback can mutate it, so its guarded kind can be reused while
@@ -297,8 +290,9 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        kind: i32,
+        kind_state: &InstanceKind,
     ) -> Tracked {
+        let kind = self.diagnostic_kind(node, value, kind_state);
         if !self.budget.checkpoint() {
             return Tracked::new(Unsupported);
         }
@@ -315,7 +309,7 @@ impl Execution<'_> {
             if self.budget.hit.get().0 != 0 {
                 return Tracked::new(Unsupported);
             }
-            return self.eval_tracked_uncached(node, value, depth, active, kind);
+            return self.eval_tracked_uncached(node, value, depth, active, kind_state);
         };
         if self.budget.hit.get().0 != 0 || !self.budget.checkpoint() {
             return Tracked::new(Unsupported);
@@ -323,7 +317,7 @@ impl Execution<'_> {
         if let Some(result) = self.memo.tracked(key) {
             return result;
         }
-        let result = self.eval_tracked_uncached(node, value, depth, active, kind);
+        let result = self.eval_tracked_uncached(node, value, depth, active, kind_state);
         self.memo.record_tracked(key, &result);
         result
     }
@@ -333,9 +327,9 @@ impl Execution<'_> {
         value: Value,
         depth: usize,
         active: scope::Context<'_>,
-        kind: i32,
+        kind_state: &InstanceKind,
     ) -> Tracked {
-        self.collect_trial(node, value, depth, active, kind)
+        self.collect_trial(node, value, depth, active, kind_state)
     }
     pub(super) fn array_tracked(
         &self,

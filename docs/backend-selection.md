@@ -814,6 +814,22 @@ at their original evaluation positions as well. This preserves an earlier
 message-rendering exception before a later key lookup. Invocation-local message
 results and completed reports are GC-marked, and each output error receives an
 independent message String. Trials still discard errors without rendering them.
+Boolean instructions, empty schemas, references and applicators defer instance
+classification until they reach a node that examines the instance. Their native
+control flow therefore accepts arbitrary Ruby values, including BasicObject,
+builtin subclasses, non-string-keyed Hashes and cyclic containers, whenever the
+reached assertions do not need to inspect them. A compiled per-node flag uses an
+exhaustive opcode match so new instruction types must declare that requirement.
+Diagnostic and trial branches retain their full traversal policy: a later
+instance-dependent branch still performs its guard even when validity could
+have stopped earlier. Same-instance branches share a lazy classification cell,
+so the first full guard supplies later siblings without rescanning Hash keys.
+This proof lasts only while Rust borrows that instance; runtime retries start
+with a fresh cell. A record's shallow class guard is never exported to siblings.
+Immediate Integer tags can still supply their kind without Ruby inspection.
+Pure boolean children also avoid unnecessary guards in
+array, property, contains and small-record traversal. Existing depth and budget
+checks continue to apply.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
