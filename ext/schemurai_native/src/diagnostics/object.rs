@@ -156,6 +156,24 @@ pub unsafe extern "C" fn sn_property_locations_free(locations: *mut tracking::Pr
 mod tests {
     use super::*;
     #[test]
+    fn silent_child_failure_marks_the_live_collection_without_reserving_an_error() {
+        let mut report = Report {
+            silent: true,
+            ..Report::default()
+        };
+        unsafe {
+            sn_report_child_validity(&mut report, 1);
+        }
+        assert!(!report.failed);
+        unsafe {
+            sn_report_child_validity(&mut report, 0);
+        }
+        assert!(report.failed);
+        assert_eq!(report.attempts, 0);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
     fn child_adoption_exports_child_properties_without_overwriting_parent_locations() {
         let mut parent = Report::default().container_continuation(true, &Tracked::new(Valid));
         parent.evaluation.as_mut().unwrap().set_properties(11, 2);
@@ -175,4 +193,11 @@ mod tests {
         assert_eq!(empty.properties_set(), None);
         assert_eq!(empty.property_count(), 0);
     }
+}
+
+/// # Safety
+/// Report is the idle current collection and C guards this exclusive mutation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_child_validity(report: *mut Report, valid: i32) {
+    unsafe { &mut *report }.failed |= valid == 0;
 }

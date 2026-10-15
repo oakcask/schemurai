@@ -1068,8 +1068,12 @@ snapshots. Native branch merges request Ruby Set merging after Rust unwinds,
 retaining key hash/equality semantics while ordinary native property bitsets
 keep their existing fast path. Owned export snapshots keep native property
 handles and opaque sets rooted across Ruby allocation and compaction. Retained
-Object diagnostic iterator blocks still need to follow the current collection;
-that remaining ownership case is under validation.
+Object iterator blocks follow the active collection while preserving their
+original program and budget owner. Silent failures still affect the current
+trial's verdict even when a Ruby caller rescues a retained block's nonlocal
+return or a later primitive exception. Silent children share the active failure
+collection; only explicit trials isolate it. Sharing reused evaluated-location
+buffers with these retained blocks remains under validation.
 The remaining VM compatibility evaluator exposes only its active collection
 state to retained native blocks. Those blocks execute native programs and append
 their completed errors/counts to that collection without interpreting VM code.

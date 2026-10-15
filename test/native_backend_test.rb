@@ -2422,6 +2422,128 @@ RSpec.describe "native VALUE execution" do
     expect(run.call(:native)).to eq(expected)
   end
 
+  it "retains object block paths and the owning evaluator across bounded invocations" do # rubocop:disable RSpec/ExampleLength
+    hash = Class.new(Hash) do
+      def each(&block)
+        @saved = block
+        super
+      end
+
+      def length
+        @saved&.call("a", "bad")
+        super
+      end
+    end
+    rule = {"maxProperties" => 100, "properties" => {"a" => {"type" => "integer"}}}
+    schemas = [rule, {"allOf" => [rule]}, {"properties" => {"v" => rule}}]
+    run = lambda do |backend, schema, first_method, first_options, method, options|
+      validator = Schemurai.compile(schema, backend: backend)
+      value = hash["a", 1]
+      input = schema.dig("properties", "v") ? {"v" => value} : value
+      validator.public_send(first_method, input, **first_options)
+      capture_validation(validator, method, input, **options)
+    end
+    cases = schemas.product([:valid?, :validate], [{}, {timeout: 10}], [:valid?, :validate], [{}, {timeout: 10}])
+    expected = cases.map { |schema, first_method, first_options, method, options| run.call(:vm, schema, first_method, first_options, method, options) }
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.zip(expected).each do |(schema, first_method, first_options, method, options), result|
+      expect(run.call(:native, schema, first_method, first_options, method, options)).to eq(result)
+    end
+  end
+
+  it "counts failures from retained object blocks rescued inside a contains trial" do # rubocop:disable RSpec/ExampleLength
+    hash = Class.new(Hash) do
+      def each(&block)
+        @saved = block
+        super
+      end
+
+      def length
+        begin
+          @saved&.call("a", "bad")
+        rescue LocalJumpError
+          nil
+        end
+        super
+      end
+    end
+    schema = {"contains" => {"maxProperties" => 100, "properties" => {"a" => {"type" => "integer"}}}}
+    run = lambda do |backend|
+      validator = Schemurai.compile(schema, backend: backend)
+      input = [hash["a", 1]]
+      expect(validator.validate(input).valid?).to be(true)
+      capture_validation(validator, :validate, input)
+    end
+    expected = run.call(:vm)
+    expect(expected.last.map(&:keyword)).to eq(["contains"])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(run.call(:native)).to eq(expected)
+  end
+
+  it "retains silent failures before a rescued exception in an old object diagnostic block" do # rubocop:disable RSpec/ExampleLength
+    bomb = Object.new
+    bomb.define_singleton_method(:is_a?) { |type| type == String }
+    bomb.define_singleton_method(:length) { raise "interrupted string" }
+    hash = Class.new(Hash) do
+      def each(&block)
+        @saved = block
+        super
+      end
+
+      define_method(:length) do
+        begin
+          @saved&.call("a", bomb)
+        rescue RuntimeError
+          nil
+        end
+        super()
+      end
+    end
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {
+      "maxProperties" => 100, "properties" => {"a" => {"type" => "array", "pattern" => "a", "unevaluatedProperties" => true}}
+    }}
+    run = lambda do |backend|
+      validator = Schemurai.compile(schema, backend: backend)
+      input = [hash["a", []]]
+      expect(validator.validate(input).valid?).to be(true)
+      capture_validation(validator, :validate, input)
+    end
+    expected = run.call(:vm)
+    expect(expected.last.map(&:keyword)).to eq(["contains"])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(run.call(:native)).to eq(expected)
+  end
+
+  it "shares reused evaluated-property buffers with retained object iteration blocks" do # rubocop:disable RSpec/ExampleLength
+    hash = Class.new(Hash) do
+      def each(&block)
+        @first ||= block
+        @iteration = (@iteration || 0) + 1
+        super do |name, value|
+          next if @iteration > 1 && name == "b"
+
+          block.call(name, value)
+          @first.call("b", 2) if @iteration > 1 && name == "a"
+        end
+      end
+    end
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+              "properties" => {"a" => true, "b" => true}, "unevaluatedProperties" => false}
+    run = lambda do |backend|
+      validator = Schemurai.compile(schema, backend: backend)
+      value = hash["a", 1]
+      expect(validator.validate(value).valid?).to be(true)
+      value["b"] = 2
+      capture_validation(validator, :validate, value)
+    end
+    expected = run.call(:vm)
+    expect(expected).to eq([:result, []])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(run.call(:native)).to eq(expected)
+  end
+
   it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength
     string = Class.new(String) do
       attr_reader :calls

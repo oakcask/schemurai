@@ -618,14 +618,9 @@ impl Execution<'_> {
         if self.unsupported_kind(node, kind) {
             return Err(Unsupported);
         }
-        if report.silent {
-            let result = self.eval_tracked_kind(node, value, depth, active, kind_state);
-            if result.status == Unsupported {
-                return Err(Unsupported);
-            }
-            report.failed |= result.status == Invalid;
-            return Ok(result);
-        }
+        // Silent children share this collection's failure state. Only actual
+        // trials create a fresh report in collect_trial; another isolated trial
+        // here would discard earlier failures when a Ruby caller rescues a raise.
         // A diagnostic success is established by complete traversal, never by
         // a short-circuit validity result. Keep exported annotations and the
         // collection policy separate; failures retain their path-specific errors.
