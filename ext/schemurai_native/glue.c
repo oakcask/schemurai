@@ -44,6 +44,7 @@ extern void sn_caches_begin(const void *);
 extern void sn_caches_observe(const void *);
 extern int sn_caches_take_reorder(const void *);
 extern int sn_caches_rescue_regexp(const void *);
+extern int sn_caches_frame_error(const void *);
 extern size_t sn_pointer_parts(const void *);
 extern void sn_pointer_part(const void *, size_t, const unsigned char **, size_t *, VALUE *);
 extern void sn_pointer_result(const void *, VALUE);
@@ -719,7 +720,7 @@ static VALUE build_message(runner_holder *runner) {
     VALUE keyword = rb_utf8_str_new((const char *)arguments.keyword, arguments.keyword_len);
     if (arguments.frame != Qundef) {
         st_data_t index;
-        if (!st_lookup(runner->frame_indices, (st_data_t)arguments.frame, &index)) rb_raise(rb_eRuntimeError, "missing string frame");
+        if (!st_lookup(runner->frame_indices, (st_data_t)arguments.frame, &index)) rb_raise(rb_eRuntimeError, "missing runtime frame");
         VALUE frame = rb_ary_entry(runner->frames, (long)index);
         VALUE result = rb_funcall(frame, rb_intern_const("message"), 2, keyword, arguments.detail ? Qtrue : Qfalse);
         RB_GC_GUARD(frame);
@@ -736,8 +737,12 @@ static VALUE build_message(runner_holder *runner) {
     return result;
 }
 static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
-    int string = operation >= SN_RUNTIME_STRING;
-    int selector = operation - (string ? SN_RUNTIME_STRING : SN_RUNTIME_NUMBER);
+    int container = operation >= SN_RUNTIME_ARRAY_HEADER;
+    int object = operation >= SN_RUNTIME_OBJECT_HEADER;
+    int string = !container && operation >= SN_RUNTIME_STRING;
+    int base = container ? (object ? SN_RUNTIME_OBJECT_HEADER : SN_RUNTIME_ARRAY_HEADER)
+        : (string ? SN_RUNTIME_STRING : SN_RUNTIME_NUMBER);
+    int selector = operation - base;
     int flags = selector & (string ? 255 : 63);
     scalar_arguments arguments;
     sn_scalar_arguments(runner->caches, &arguments);
@@ -748,25 +753,31 @@ static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
     } else {
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
         VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
-        VALUE checks = rb_const_get(internal, rb_intern_const(string ? "StringChecks" : "NumberChecks"));
-        VALUE *state_slot = string
-            ? (NIL_P(budget) ? &runner->string_state : &runner->limited_string_state)
-            : (NIL_P(budget) ? &runner->number_state : &runner->limited_number_state);
-        if (NIL_P(*state_slot)) {
-            VALUE state = rb_const_get(checks, rb_intern_const("State"));
-            if (string) {
-                VALUE *regexps = NIL_P(budget) ? &runner->regexps : &runner->limited_regexps;
-                if (NIL_P(*regexps)) *regexps = rb_hash_new();
-                VALUE args[] = {*regexps, budget};
-                *state_slot = rb_class_new_instance(2, args, state);
-            } else {
-                *state_slot = rb_class_new_instance(0, NULL, state);
-                if (!NIL_P(budget)) rb_funcall(*state_slot, rb_intern_const("budget="), 1, budget);
+        VALUE checks = rb_const_get(internal, rb_intern_const(container ? "ContainerChecks" : (string ? "StringChecks" : "NumberChecks")));
+        VALUE state = budget;
+        if (!container) {
+            VALUE *state_slot = string
+                ? (NIL_P(budget) ? &runner->string_state : &runner->limited_string_state)
+                : (NIL_P(budget) ? &runner->number_state : &runner->limited_number_state);
+            if (NIL_P(*state_slot)) {
+                VALUE state_class = rb_const_get(checks, rb_intern_const("State"));
+                if (string) {
+                    VALUE *regexps = NIL_P(budget) ? &runner->regexps : &runner->limited_regexps;
+                    if (NIL_P(*regexps)) *regexps = rb_hash_new();
+                    VALUE args[] = {*regexps, budget};
+                    *state_slot = rb_class_new_instance(2, args, state_class);
+                } else {
+                    *state_slot = rb_class_new_instance(0, NULL, state_class);
+                    if (!NIL_P(budget)) rb_funcall(*state_slot, rb_intern_const("budget="), 1, budget);
+                }
             }
+            state = *state_slot;
         }
-        VALUE klass = rb_const_get(checks, rb_intern_const("Frame"));
-        VALUE args[] = {arguments.rules, arguments.instance, *state_slot, INT2FIX(flags)};
-        frame = rb_class_new_instance(string ? 4 : 3, args, klass);
+        const char *name = "Frame";
+        if (container) name = object ? "ObjectFrame" : (NIL_P(budget) ? "ArrayFrame" : "LimitedArrayFrame");
+        VALUE klass = rb_const_get(checks, rb_intern_const(name));
+        VALUE args[] = {arguments.rules, arguments.instance, state, INT2FIX(flags)};
+        frame = rb_class_new_instance((container || string) ? 4 : 3, args, klass);
         if (NIL_P(runner->frames)) runner->frames = rb_ary_new();
         size_t index = RARRAY_LEN(runner->frames);
         rb_ary_push(runner->frames, frame);
@@ -775,7 +786,13 @@ static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
     }
     int step = selector >> (string ? 8 : 6);
     VALUE result;
-    if (string) {
+    if (container) {
+        switch (step) {
+            case 0: result = rb_funcall(frame, rb_intern_const("valid?"), 0); break;
+            case 1: result = rb_funcall(frame, rb_intern_const("container?"), 0); break;
+            default: result = rb_funcall(frame, rb_intern_const("check"), 1, INT2FIX(step)); break;
+        }
+    } else if (string) {
         switch (step) {
             case 0: result = rb_funcall(frame, rb_intern_const("valid?"), 0); break;
             case 1: result = rb_funcall(frame, rb_intern_const("string?"), 0); break;
@@ -802,10 +819,18 @@ static VALUE call_runtime(VALUE context) {
     evaluation_call *call = operation->call;
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
-    /* String frames check at the VM's method boundaries. Checking after each
-     * yield would let a timeout overtake a later Ruby comparison exception. */
-    int string_stage = operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL;
-    if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    /* Staged frames keep Ruby checks at their VM method boundaries. An extra
+     * check between assertions or error-rendering steps could overtake a later
+     * Ruby exception. The native deadline continues across every retry. */
+    int staged = (operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL)
+        || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches);
+    if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind >= SN_RUNTIME_ARRAY_HEADER ||
+        (operation->kind >= SN_RUNTIME_NUMBER && operation->kind < SN_RUNTIME_EQUAL)) {
+        VALUE result = scalar_step(r, operation->kind, operation->call->budget);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return result;
+    }
     if (operation->kind >= SN_RUNTIME_EQUAL) {
         scalar_arguments arguments;
         sn_scalar_arguments(r->caches, &arguments);
@@ -816,13 +841,8 @@ static VALUE call_runtime(VALUE context) {
         VALUE runtime = rb_class_new_instance(1, &call->budget, klass);
         VALUE result = rb_funcall(runtime, rb_intern_const("evaluate"), 3,
             INT2FIX(operation->kind - SN_RUNTIME_EQUAL), arguments.rules, arguments.instance);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         RB_GC_GUARD(runtime);
-        return result;
-    }
-    if (operation->kind >= SN_RUNTIME_NUMBER) {
-        VALUE result = scalar_step(r, operation->kind, operation->call->budget);
-        if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
     if (operation->kind >= SN_RUNTIME_TYPE) {
@@ -832,22 +852,22 @@ static VALUE call_runtime(VALUE context) {
         VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
         VALUE result = rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
             INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
     if (operation->kind == SN_RUNTIME_DIAGNOSTIC_MESSAGE) {
         VALUE message = build_message(r);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return message;
     }
     if (operation->kind == SN_RUNTIME_REQUIRED_MISSING) {
         VALUE present = rb_funcallv_public(instance, rb_intern_const("key?"), 1, &source);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return RTEST(present) ? Qfalse : Qtrue;
     }
     if (operation->kind >= SN_RUNTIME_NULL_NUMBER) {
         VALUE result = null_numeric(instance, operation->kind);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
     if (operation->kind == SN_RUNTIME_IDENTITY_METHODS) {
@@ -857,13 +877,13 @@ static VALUE call_runtime(VALUE context) {
     }
     if (operation->kind == SN_RUNTIME_POINTER) {
         VALUE pointer = build_pointer(r);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return pointer;
     }
     if (operation->kind == SN_RUNTIME_JSON) {
         VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
         rb_funcall(json, rb_intern_const("parse"), 1, instance);
-        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return Qtrue;
     }
     VALUE *regexps = NIL_P(call->budget) ? &r->regexps : &r->limited_regexps;
@@ -877,7 +897,7 @@ static VALUE call_runtime(VALUE context) {
         rb_hash_aset(*regexps, source, regexp);
     }
     VALUE result = rb_funcall(regexp, rb_intern_const("match?"), 1, instance);
-    if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     RB_GC_GUARD(regexp);
     return result;
 }
