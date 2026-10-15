@@ -122,7 +122,7 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps, pointers; void *caches; size_t root; st_table *matches; } runner_holder;
+typedef struct { VALUE owner, regexps, pointers, messages; void *caches; size_t root; st_table *matches; } runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -150,6 +150,7 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->owner);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->pointers);
+    rb_gc_mark(r->messages);
     if (r->caches) sn_caches_mark(r->caches);
     if (r->matches) st_foreach(r->matches, mark_operation, 0);
 }
@@ -225,6 +226,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->owner = self;
     r->regexps = Qnil;
     r->pointers = Qnil;
+    r->messages = Qnil;
     r->root = index;
     r->caches = NULL;
     r->matches = NULL;
@@ -615,6 +617,7 @@ static VALUE clear_runtime(VALUE context) {
     st_foreach(call->runner->matches, release_operation, 0);
     st_clear(call->runner->matches);
     call->runner->pointers = Qnil;
+    call->runner->messages = Qnil;
     sn_caches_runtime(call->runner->caches, call->runner->matches);
     sn_caches_begin(call->runner->caches);
     return Qnil;
@@ -763,6 +766,10 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     }
     runner_holder *r = call->runner;
     if (kind == SN_RUNTIME_DIAGNOSTIC_MESSAGE) {
+        /* Keep results rooted even if another Ractor stops Rust while its
+         * message table has an active mutable RefCell borrow. */
+        if (NIL_P(r->messages)) r->messages = rb_ary_new();
+        rb_ary_push(r->messages, result);
         sn_message_result(r->caches, result);
         RB_GC_GUARD(result);
         return;
