@@ -37,6 +37,8 @@ pub struct ContainsArguments {
     child: usize,
     depth: usize,
     required: i32,
+    scalar_kind: i32,
+    scalar_flags: i32,
 }
 type StringError = (Value, usize, &'static str);
 #[repr(C)]
@@ -115,6 +117,7 @@ impl Caches {
         child: usize,
         depth: usize,
         required: i32,
+        scalar: (i32, i32),
     ) -> Verdict {
         let Ok(ordinal) = self.next_call() else {
             return Unsupported;
@@ -127,6 +130,8 @@ impl Caches {
                 child,
                 depth,
                 required,
+                scalar_kind: scalar.0,
+                scalar_flags: scalar.1,
             }));
         }
         result

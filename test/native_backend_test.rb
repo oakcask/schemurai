@@ -1232,6 +1232,7 @@ RSpec.describe "native VALUE execution" do
     values = [Class.new(Array).new([1, "a", [1]]), Class.new(Array).new, rescuing.new([BasicObject.new, 1]),
       fake, BasicObject.new, [1, "a"], nil, {Object.new => 1}]
     children = [true, false, {"type" => "integer"}, {"type" => %w[number string]}, {"type" => "array"},
+      {"type" => "null"}, {"type" => "boolean"}, {"type" => "number"}, {"type" => "string"}, {"type" => "object"},
       {"maximum" => 0}, {"type" => "number", "multipleOf" => 0.1},
       {"minLength" => 2, "pattern" => "^a", "format" => "ipv4"},
       {"contentEncoding" => "base64", "contentMediaType" => "application/json"}, {"const" => [1]}, {"enum" => [1, "a"]}]

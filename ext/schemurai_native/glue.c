@@ -58,7 +58,7 @@ typedef struct {
 } message_arguments;
 extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
-typedef struct { VALUE rules, instance; size_t child, depth; int required; } contains_arguments;
+typedef struct { VALUE rules, instance; size_t child, depth; int required, scalar_kind, scalar_flags; } contains_arguments;
 extern void sn_contains_arguments(const void *, contains_arguments *);
 extern void sn_caches_scalar_callback(const void *, const void *);
 extern int sn_caches_deadline_expired(const void *);
@@ -144,6 +144,7 @@ typedef struct {
     void *caches;
     size_t root, depth;
     int busy, callback_context, scope_owner, closed_limited;
+    int callback_kind, callback_flags;
     native_limits active_limits;
     st_table *matches, *frame_indices;
 } runner_holder;
@@ -286,6 +287,8 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->callback_scope = Qnil;
     r->scope_owner = 0;
     r->closed_limited = 0;
+    r->callback_kind = SN_CALLBACK_RUNTIME;
+    r->callback_flags = 0;
     r->active_limits = (native_limits){0};
     r->depth = 0;
     r->busy = 0;
@@ -908,6 +911,15 @@ static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
     RB_GC_GUARD(frame);
     return result;
 }
+/* Share Ruby type dispatch with ordinary runtime requests. Boolean and type
+ * callbacks have no per-yield observations or scalar cache writes. */
+static VALUE type_predicate(VALUE instance, int selector) {
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+    VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
+    return rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
+        INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -929,6 +941,8 @@ static VALUE call_runtime(VALUE context) {
         TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
         child->parent = callback_scope(call);
         child->depth = arguments.depth;
+        child->callback_kind = arguments.scalar_kind;
+        child->callback_flags = arguments.scalar_flags;
         child->callback_context = 1;
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
         VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
@@ -962,12 +976,7 @@ static VALUE call_runtime(VALUE context) {
         return result;
     }
     if (operation->kind >= SN_RUNTIME_TYPE) {
-        int selector = operation->kind - SN_RUNTIME_TYPE;
-        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
-        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
-        VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
-        VALUE result = rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
-            INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+        VALUE result = type_predicate(instance, operation->kind - SN_RUNTIME_TYPE);
         if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
@@ -1209,7 +1218,12 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
         rb_funcall(budget, rb_intern_const("checkpoint"), 0);
         rb_funcall(budget, rb_intern_const("checkpoint"), 0);
     }
-    VALUE result = evaluate_runner(self, instance, budget, 0);
+    VALUE result;
+    switch (recipe->callback_kind) {
+        case SN_CALLBACK_BOOLEAN: result = recipe->callback_flags ? Qtrue : Qfalse; break;
+        case SN_CALLBACK_TYPE: result = RTEST(type_predicate(instance, recipe->callback_flags)) ? Qtrue : Qfalse; break;
+        default: result = evaluate_runner(self, instance, budget, 0); break;
+    }
     if (NIL_P(result)) rb_raise(rb_eRuntimeError, "scalar callback lost its native coverage proof");
     if (!NIL_P(budget) && sn_caches_deadline_expired(parent->caches))
         rb_funcall(budget, rb_intern_const("raise_native_limit"), 2, INT2FIX(2), INT2FIX(0));

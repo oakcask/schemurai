@@ -962,8 +962,10 @@ a depth within the native bound. Other roots retain the earlier guard before
 any new callback can run, preventing a later compatibility transfer from
 replaying an already invoked block. Earlier type predicates join ordered
 runtime observations before the first callback can mutate their instance.
-After Rust unwinds, C creates the callback. Each yield owns separate
-observations, with a fresh runner on reentry. Shared Ruby scalar primitives
+After Rust unwinds, C creates the callback. Boolean and type children dispatch
+in C, sharing the ordinary runtime type helper without allocating per-yield
+observations. Other scalar children reuse a runner with separate observations
+for each yield and a fresh runner on reentry. Shared Ruby scalar primitives
 preserve method dispatch even for ordinary yielded values.
 The original Ruby method can rescue child exceptions and run ensure clauses.
 Children use the VM's scalar checkpoints, while the parent retains its native

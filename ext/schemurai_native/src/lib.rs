@@ -1520,6 +1520,9 @@ impl Execution<'_> {
                             value,
                             rules.contains.expect("scalar contains child"),
                             depth + 1,
+                            self.scalar_callback_kind(
+                                rules.contains.expect("scalar contains child"),
+                            ),
                         )
                     } else if *required != 0 && kind != TYPE_ARRAY {
                         Invalid

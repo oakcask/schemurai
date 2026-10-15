@@ -25,8 +25,9 @@ impl Header {
         value: Value,
         child: usize,
         depth: usize,
+        scalar: (i32, i32),
     ) -> Verdict {
-        caches.contains(self.source, value, child, depth, required)
+        caches.contains(self.source, value, child, depth, required, scalar)
     }
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
         !self.native_bounds
@@ -204,6 +205,13 @@ impl Engine {
             .enumerate()
             .map(|(node, depth)| if contains[node] { depth } else { None })
             .collect();
+    }
+    pub(super) fn scalar_callback_kind(&self, child: usize) -> (i32, i32) {
+        match self.nodes[child].as_slice() {
+            [Op::Boolean(value)] => (CALLBACK_BOOLEAN, i32::from(*value)),
+            [Op::Type(mask, union)] => (CALLBACK_TYPE, mask * 2 + i32::from(*union)),
+            _ => (CALLBACK_RUNTIME, 0),
+        }
     }
     pub(super) fn scalar_contains_node(&self, node: usize) -> bool {
         self.nodes[node]
