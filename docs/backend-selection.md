@@ -960,7 +960,12 @@ Program identity; Ruby never reads their instruction streams. The compiler proof
 admits scalar assertions, empty schemas, logical applicators and Array/Object
 child traversal, including nested contains. Static, dynamic and recursive
 references are admitted when every possible target forms an acyclic graph and
-needs no exported annotations. One zero-depth dispatch vertex per anchor name,
+needs no exported annotations. Pure static-reference alias cycles are also
+admitted: every edge preserves instance identity, so the active source guard
+terminates after one circuit. A linear functional-graph pass seeds each cycle's
+length as its native depth bound before the remaining postorder proof. Prefixes
+retain their normal edge depth; no cycle changes the depth limit. Cycles with
+other instructions or scope-dependent dispatch still require a separate proof. One zero-depth dispatch vertex per anchor name,
 plus one for recursive resources, keeps binding edges shared and excludes cycles
 without increasing schema evaluation depth. Iterative postorder analysis proves
 child eligibility and whole-root coverage before kind demands are finalized.
@@ -1026,7 +1031,7 @@ The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Special Arrays and Hashes, including subclasses, singleton methods and
-nonstandard keys, can still delegate when child graphs are cyclic, unresolved or require
+nonstandard keys, can still delegate when child graphs contain other cycles, unresolved references or require
 evaluated-location export. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
