@@ -30,6 +30,17 @@ shared NaN containers and in-place string encoding changes. A current isolated
 source-gem installation was verified on Linux with CRuby 4.0.6; its extension
 was rebuilt from the packaged Rust/C sources rather than a checkout binary.
 
+Native validation does not load or construct a VM evaluator and has no execution
+fallback to that backend, with or without invocation limits. It reuses only the
+VM compiler's immutable instruction format. The native compiler rejects an
+unknown instruction or unsupported internal operand before publishing a program.
+An unresolved reference is a supported failing assertion, including inside Ruby
+container callbacks; later registry registration rebuilds the native program.
+Ruby-sensitive behavior uses shared primitive/traversal helpers through libruby
+after Rust unwinds. If execution ever exhausts those paths without a pending
+runtime request, it raises an internal coverage error instead of replaying the
+instance through another evaluator.
+
 The current complete benchmark audit on Ruby 4.0.6/YJIT, Rust 1.99 and
 x86_64 Linux reached the 10× VM target in all 168 measured cases (minimum
 10.039×, median 25.136×). It used arrays of 1,000 elements, 31 samples and
@@ -330,8 +341,9 @@ dependent assertions (including Draft 7 dependencies), `$ref`, `$dynamicRef`, `$
 equality, `uniqueItems`, `unevaluatedItems`, and `unevaluatedProperties`.
 Resolved static references become native node indices. A stack of source/instance
 pairs preserves the VM's cycle guard without allocating Ruby tracking objects.
-Unresolved references keep a VM compatibility path so adding a resource to a
-mutable registry can still make an existing validator succeed later.
+Unresolved references use native failures and diagnostics. Adding a resource to a
+mutable registry rebuilds affected native programs so an existing validator can
+succeed later.
 
 Numeric rules retain the VM's two comparison modes: ordinary Float bounds use
 Ruby-compatible Float/Integer and Float/Rational comparisons; `multipleOf`
@@ -358,7 +370,7 @@ the Float scalar value in one C adapter call. Ruby Integers are compared directl
 from that metadata; Float instances use the same exact comparison rules without
 repeating type and scalar queries. Float Integer-membership checks are only
 performed when the required type mask needs them. Fractional schema bounds
-retain the existing array scan. Required masks, special-object fallback and
+retain the existing array scan. Required masks, special-object runtime requests and
 non-finite Float behavior are checked against VM.
 For a single Integer bound outside i128, Bignum array items compare the original
 rooted handles directly through the checked nonallocating Big/Big comparator.
@@ -459,7 +471,7 @@ byte pointer/length and encoding metadata in one C call. Base64 retains an
 encoding-independent String view. JSON's encoding adapter uses CRuby's public
 inline encoding query, including its fallback for extended indices. The guarded
 plain-JSON view enters the Rust syntax scan directly; US-ASCII inputs still
-require ASCII bytes, while other unsupported encodings retain VM fallback.
+require ASCII bytes, while other encodings use Ruby transcoding and JSON parsing.
 Diagnostics use the same
 scan and collect full errors for invalid items, preserving prefix offsets and
 attempted-item coverage. Length, pattern, or format siblings retain their
@@ -608,7 +620,7 @@ combine ordinary-kind checks and borrowed storage metadata in one C call.
 Strings provide their original byte pointer and length, arrays their original
 VALUE storage and length, and hashes their size. Floats provide one scalar;
 booleans provide their truth value. Rust reads only fields initialized for the
-returned kind. Subclasses and unsupported values retain VM fallback. Structural
+returned kind. Subclasses and unusual values use the shared Ruby value primitives. Structural
 hashes directly borrow Ruby strings and traverse Ruby arrays and hashes.
 The Hash fingerprint iterator checks
 each key's exact String class in C and passes its original byte pointer and
@@ -641,7 +653,7 @@ checks or boolean schemas. Pattern, additional-property, dependency, name and
 unevaluated rules exclude this optimization. A successful group contributes its
 full match count but merges evaluated locations once. Original operands remain
 available for diagnostics. Nonadjacent branches retain their evaluation order,
-including unsupported branches that must trigger the VM compatibility path.
+including unusual values that require ordered Ruby runtime requests.
 This groups compiled schema operations; it does not cache or copy instances.
 
 Small-record field lookup caches every byte, the length and the encoding index
@@ -719,7 +731,7 @@ Character counts read the existing byte length for binary strings and for
 UTF-8/US-ASCII strings whose ASCII coderange is already cached. Other strings
 use CRuby's existing character-length API. Encoding and coderange are checked
 on each call, preserving in-place mutations and encoding changes. This path
-creates no byte copy and preserves subclass and unusual-value fallback.
+creates no byte copy and preserves subclass and unusual-value runtime requests.
 
 Patterns use `regex-automata`, with parsing supplied by `regex-syntax`;
 the native backend contains no matching engine of its own. Patterns that must
@@ -749,7 +761,7 @@ fields combine the ordinary String class check and byte loan in one C adapter
 call. The same borrowed slice goes straight to the
 crate matcher, without a second metadata query or an instance copy. Length
 bounds keep their original precedence, and non-string or subclass instances
-retain the existing classification and fallback behavior.
+retain the existing classification and Ruby runtime behavior.
 For array item rules containing only pattern and an optional type, the native
 scan selects the crate matcher once for the array. Detailed validation uses
 the same scan and generates diagnostics only for invalid elements, preserving
@@ -793,9 +805,10 @@ schema graph grows, including growth during lazy external-resource indexing.
 Resolved validators keep their existing program. Shareable registries continue
 to require successful reference resolution before sharing.
 
-Unsupported instructions or storage representations return an internal
-unsupported result and delegate to the existing Ruby VM. Numeric assertions on
-unusual Numeric objects use staged libruby calls instead. Null numeric operands execute the original Ruby
+Unknown instructions and unsupported internal operands are rejected during
+native compilation. A native storage optimization can return an internal
+unsupported result to select an ordered runtime request. Numeric assertions on
+unusual Numeric objects use staged libruby calls. Null numeric operands execute the original Ruby
 comparisons or divisibility methods through libruby after Rust has returned,
 preserving Ruby exceptions and operator visibility. Native traversal interleaves
 those observations with ordered failures so earlier error limits and diagnostic
@@ -856,8 +869,8 @@ numbers keep native arithmetic until a dynamic call requires ordered replay;
 that replay also routes earlier numeric assertions through Ruby to preserve
 current-invocation cache observations. Pure native calls do not populate Ruby
 caches. Successful runtime predicates never authorize native storage access;
-mixed schemas can still encounter another unsupported storage assertion and
-transfer to the VM. Numeric runtime frames and results are rooted outside Rust,
+mixed schemas route later storage-sensitive assertions through their own runtime
+requests when necessary. Numeric runtime frames and results are rooted outside Rust,
 and separate Ractors own separate frames and caches.
 String assertions on builtin subclasses, singleton-method strings and values
 with custom string applicability now use libruby frames as well. Frames retain
@@ -911,7 +924,7 @@ variables do not participate in that comparison. Method-definition metadata is
 checked through libruby after Rust returns, because callable-method lookup may
 allocate. That observation lasts only for the current invocation; class-wide
 changes to type, equality or hash methods request Ruby predicates/value primitives
-or retain the VM compatibility path for unsupported container operations. The active
+or Ruby traversal helpers for container operations. The active
 runner is selected through thread-local C state only while Rust evaluates,
 keeping recursive C entry and separate Ractors isolated. Ordinary JSON values
 need no method-definition request. These inputs can be nested in
@@ -967,9 +980,8 @@ an unsupported instruction or annotation demand and every root that can reach
 container callbacks. This linear proof handles cycles without assuming a
 finite schema path depth. It shares flag propagation with memoization analysis.
 The whole-root proof requires every reachable instruction to have a runtime
-path. Other roots retain the earlier guard before
-any new callback can run, preventing a later compatibility transfer from
-replaying an already invoked block. Earlier type predicates join ordered
+path. Unsupported internal instructions are rejected during compilation; the
+graph guard remains a defensive check before user callbacks can run. Earlier type predicates join ordered
 runtime observations before the first callback can mutate their instance.
 After Rust unwinds, C creates the callback. Boolean and type children dispatch
 in C, sharing the ordinary runtime type helper without allocating per-yield
@@ -1081,27 +1093,22 @@ nonlocal return or a later primitive exception. Silent children share the active
 failure collection; only explicit trials isolate it. Validity and diagnostic
 entrypoints share graph admission, including validity children reached from
 silent diagnostic trials beyond the native physical stack bound.
-The remaining VM compatibility evaluator exposes only its active collection
-state to retained native blocks. Those blocks execute native programs and append
-their completed errors/counts to that collection without interpreting VM code.
-Their guards run before other scalar methods in the same node.
 Object pattern matching uses the shared Ruby regexp cache and deadline wrapper.
 Frames read the invocation's current budget when retained each blocks run, so
 limited blocks observe the VM's cleared budget after the public call returns.
-The native evaluator owns unbounded number/regexp state and shares it with
-the remaining VM compatibility evaluator. Alternating validity and detailed
-validation, or recompiling after reference registration, therefore retains
+The native evaluator owns unbounded number/regexp state. Alternating validity
+and detailed validation, or recompiling after reference registration, retains
 the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Unresolved reference children use native failure and diagnostic paths, including
 special containers and native continuations. Later registry additions rebuild
-the native program before execution. Special containers can still delegate when
-child graphs contain unsupported operands/instructions. Object report callbacks export
+the native program before execution. Unsupported internal operands/instructions
+are rejected before a native program is published. Object report callbacks export
 evaluated property sets through owned results. Tracked or detailed continuations
 require every reachable operation to have a native report path;
-defensive unsupported instructions also retain the VM path.
+defensive graph guards continue to reject unsupported instructions.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
 outside Rust evaluation. Small records with up to eight declared keys and eight
@@ -1143,10 +1150,10 @@ checks are selected once during compilation, avoiding repeated child-opcode
 and rule classification on each record. No Ruby Hash, String, or numeric value is
 converted into a Rust representation. Distinct schema lookup keys are retained
 at compilation to distinguish identity-key Hashes; ambiguous matching keys
-delegate to the VM. Larger records and annotation
+use Ruby key lookup. Larger records and annotation
 rules use the general native path. Schema lookup keys are checked at compilation
-as well. Unsupported leaves and unsupported path encodings still
-delegate to the VM. Arrays scan supported scalar items first and
+as well. Unusual leaves use Ruby runtime helpers, while unusual path encodings
+use the shared Ruby JSON Pointer escaping helper. Arrays scan supported scalar items first and
 only construct diagnostic paths for failing items.
 Detailed validation uses the native diagnostic traversal directly instead of a
 separate validity pass. Fully covered containers skip unevaluated scans. Object

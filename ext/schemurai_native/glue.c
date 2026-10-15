@@ -125,11 +125,12 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
     int status = sn_compile(h->engine, program, compiler, RTEST(format), RTEST(content),
         RB_TYPE_P(program, T_ARRAY), &error);
     h->compiling = 0;
-    if (status < 0) {
+    if (status != SN_VERDICT_VALID) {
         sn_free(h->engine);
         h->engine = NULL;
         h->roots = NULL;
         if (status == SN_STATUS_EXCEPTION) rb_exc_raise(error);
+        if (status == SN_VERDICT_UNSUPPORTED) rb_raise(rb_eRuntimeError, "native compiler encountered an unsupported instruction or operand");
         rb_raise(rb_eRuntimeError, "native compiler panicked");
     }
     return self;
@@ -446,7 +447,7 @@ int sn_shallow_kind(VALUE value) {
      * retain runtime dispatch, including custom equality/hash/type methods. */
     if ((RB_SYMBOL_P(value) && CLASS_OF(value) == rb_cSymbol) || CLASS_OF(value) == rb_cObject)
         return sn_identity_kind(active_caches, CLASS_OF(value));
-    return SN_TYPE_UNSUPPORTED; /* Out-of-domain objects are handled by the Ruby VM. */
+    return SN_TYPE_UNSUPPORTED; /* Unusual objects request Ruby predicates or value primitives. */
 }
 int sn_kind(VALUE value) {
     int kind = sn_shallow_kind(value);
@@ -1886,7 +1887,9 @@ static VALUE evaluate_runner_body(VALUE context) {
         sn_caches_pending(r->caches, &source, &requested, &operation)) {
         retry_runtime((VALUE)&call);
     }
-    if (call.status == SN_VERDICT_UNSUPPORTED || !diagnostics) {
+    if (call.status == SN_VERDICT_UNSUPPORTED)
+        rb_raise(rb_eRuntimeError, "native execution lost its coverage proof");
+    if (!diagnostics) {
         if (call.status != SN_VERDICT_UNSUPPORTED && !NIL_P(r->report_sink)) {
             VALUE completed = collector_report_object();
             report_holder *h;
@@ -1896,7 +1899,7 @@ static VALUE evaluate_runner_body(VALUE context) {
             r->report_sink_done = 1;
             RB_GC_GUARD(completed);
         }
-        VALUE result = call.status == SN_VERDICT_UNSUPPORTED ? Qnil : (call.status ? Qtrue : Qfalse);
+        VALUE result = call.status ? Qtrue : Qfalse;
         RB_GC_GUARD(owner);
         RB_GC_GUARD(instance);
         RB_GC_GUARD(self);

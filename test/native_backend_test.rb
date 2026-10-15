@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "spec_helper"
+require_relative "../lib/schemurai/vm/limited_evaluator"
 require "base64"
 require "objspace"
 require "open3"
@@ -8,6 +9,56 @@ require "rbconfig"
 require_relative "../oracle/lib/case_catalog"
 
 RSpec.describe "native VALUE execution" do
+  it "does not construct VM execution state for any native entrypoint" do # rubocop:disable RSpec/ExampleLength
+    allow(Schemurai.const_get(:VM)::Evaluator).to receive(:new).and_raise("VM evaluator constructed")
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("limited VM evaluator constructed")
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "properties" => {"x" => {"$ref" => "urn:late-no-vm"}},
+              "unevaluatedProperties" => false}
+    registry = Schemurai::SchemaRegistry.new(backend: :native)
+    validator = registry.compile(schema)
+    value = Class.new(Hash)["x", 1]
+    [{}, {timeout: 10}, {max_errors: 1}].each do |options|
+      expect(validator.valid?(value, **options)).to be(false)
+      expect(validator.validate(value, **options).errors.first.keyword).to eq("$ref")
+    end
+    registry.compile({"$id" => "urn:late-no-vm", "type" => "integer"})
+    [{}, {timeout: 10}, {max_errors: 0}].each do |options|
+      expect(validator.valid?(value, **options)).to be(true)
+      expect(validator.validate(value, **options).valid?).to be(true)
+    end
+  end
+
+  it "loads the native compiler and helpers without loading VM execution" do
+    script = <<~RUBY
+      require "schemurai"
+      validator = Schemurai.compile({"items" => {"type" => "integer"}}, backend: :native)
+      [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 1}]).each do |method, options|
+        validator.public_send(method, [1], **options)
+      end
+      vm = Schemurai.const_get(:VM)
+      abort "VM execution loaded" if vm.const_defined?(:Evaluator, false) || vm.const_defined?(:LimitedEvaluator, false)
+    RUBY
+    output, status = Open3.capture2e(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect([status.success?, output]).to eq([true, ""])
+  end
+
+  it "rejects unknown internal instructions before evaluation and permits initialization retry" do # rubocop:disable RSpec/ExampleLength
+    Schemurai.compile(true, backend: :native)
+    graph = Schemurai.const_get(:Internal)::SchemaGraph.new
+    compiler = Schemurai.const_get(:VM)::Compiler.new(graph)
+    node = graph.compile(true)
+    root = Schemurai.const_get(:VM)::Program.new(node)
+    root.finish([0, :unknown_native_instruction, nil])
+    program = Schemurai.const_get(:Native)::Program.allocate
+    expect { program.send(:initialize, root, compiler, false, false) }
+      .to raise_error(RuntimeError, "native compiler encountered an unsupported instruction or operand")
+    expect { program.valid?(1) }.to raise_error(RuntimeError, "uninitialized native program")
+    root = compiler.compile(node)
+    program.send(:initialize, root, compiler, false, false)
+    expect(program.valid?(1)).to be(true)
+    expect(program.diagnostics(1)).to eq([])
+  end
+
   it "stops native evaluation and diagnostics cooperatively without VM delegation" do # rubocop:disable RSpec/ExampleLength
     validator = Schemurai.compile({"items" => {"type" => "integer"}}, backend: :native)
     # Keep Ruby's clock fixed so the exhaustion assertion specifically tests Rust.
@@ -1374,37 +1425,23 @@ RSpec.describe "native VALUE execution" do
         true
       end
     end
-    run = lambda do |backend, keyword, options, bridge = nil|
+    run = lambda do |backend, keyword, options|
       schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
                 "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "string"}},
                 "contains" => {keyword => "#/$defs/x"}}
       validator = Schemurai.compile(schema, backend: backend)
       input = array.new(["seed"])
-      compatibility = if backend == :native
-        validator.instance_variable_get(:@evaluator).instance_variable_get(:@vm)
-      else
-        validator
-      end
-      first = (bridge == :vm_to_native) ? compatibility : validator
-      expect(first.valid?(input)).to be(true)
+      expect(validator.valid?(input)).to be(true)
       value = string.new("a")
       value.saved = input.saved
       input[0] = value
-      second = (bridge == :native_to_vm) ? compatibility : validator
-      result = capture_validation(second, :valid?, input, **options)
+      result = capture_validation(validator, :valid?, input, **options)
       [result, value.calls, capture_validation(input.saved, :call, "after")]
     end
     cases = ["$ref", "$dynamicRef"].product([{}, {timeout: 10}]).map do |keyword, options|
       [keyword, options, run.call(:vm, keyword, options)]
     end
     expect(cases.map { |entry| entry.last[1] }).to eq([1, 2, 1, 2])
-    # Exercise both directions of the shared compatibility state before
-    # forbidding VM execution for the entirely native cases below.
-    [:vm_to_native, :native_to_vm].product(["$ref", "$dynamicRef"]).each do |bridge, keyword|
-      expected = run.call(:vm, keyword, {}, bridge)
-      expect(expected[1]).to eq(1)
-      expect(run.call(:native, keyword, {}, bridge)).to eq(expected)
-    end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
     cases.each { |keyword, options, expected| expect(run.call(:native, keyword, options)).to eq(expected) }
@@ -1428,15 +1465,16 @@ RSpec.describe "native VALUE execution" do
               "$ref" => "#/$defs/use"}
     run = lambda do |backend, method|
       validator = Schemurai.compile(schema, backend: backend)
-      compatibility = (backend == :native) ? validator.instance_variable_get(:@evaluator).instance_variable_get(:@vm) : validator
-      expect(compatibility.valid?("seed")).to be(true)
-      evaluator = (backend == :native) ? compatibility : compatibility.instance_variable_get(:@evaluator)
+      expect(validator.valid?("seed")).to be(true)
+      evaluator = validator.instance_variable_get(:@evaluator)
       compiler = evaluator.instance_variable_get(:@compiler)
       source = compiler.resolve(evaluator.instance_variable_get(:@root), "#/$defs/use")
       value = string.new("a")
-      value.saved = ->(item) { evaluator.send(:evaluate_valid, source, item) }
-      allow(compatibility).to receive(:valid?).and_raise("VM execution") if backend == :native
-      allow(compatibility).to receive(:validate).and_raise("VM execution") if backend == :native
+      value.saved = if backend == :native
+        ->(item) { expect(evaluator.instance_variable_get(:@program).reference_active?(source, item)).to be(true) }
+      else
+        ->(item) { evaluator.send(:evaluate_valid, source, item) }
+      end
       result = capture_validation(validator, method, value)
       [result, value.calls]
     end
@@ -2634,8 +2672,7 @@ RSpec.describe "native VALUE execution" do
     definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? {"type" => "integer"} : {"$ref" => "#/$defs/n#{index + 1}"}] }
     schema = {"$defs" => definitions, "allOf" => [{"$ref" => "#/$defs/n0"}, {"properties" => {"v" => {"$ref" => "urn:missing-child"}}}]}
     native = Schemurai.compile(schema, backend: :native)
-    evaluator = native.instance_variable_get(:@evaluator)
-    allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+    native.instance_variable_get(:@evaluator)
     results = [:vm, :native].map do |backend|
       value = string.new("a")
       validator = (backend == :native) ? native : Schemurai.compile(schema, backend: backend)
@@ -2762,10 +2799,7 @@ RSpec.describe "native VALUE execution" do
     cases.each do |schema, wrap|
       schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema)
       native = Schemurai.compile(schema, backend: :native)
-      evaluator = native.instance_variable_get(:@evaluator)
-      allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
-      allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-      allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+      native.instance_variable_get(:@evaluator)
       [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}]).each do |method, options|
         value = klass.new
         expected_value = klass.new
@@ -3353,10 +3387,7 @@ RSpec.describe "native VALUE execution" do
         [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
           vm = Schemurai.compile(schema, backend: :vm)
           native = Schemurai.compile(schema, backend: :native)
-          evaluator = native.instance_variable_get(:@evaluator)
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
-          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          native.instance_variable_get(:@evaluator)
           values = Array.new(2) do
             value = klass.new
             (base == Array) ? value.concat([1, 1]) : value.merge!("x" => 1)
@@ -3560,10 +3591,7 @@ RSpec.describe "native VALUE execution" do
         [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}]).each do |method, options|
           vm = Schemurai.compile(schema, backend: :vm)
           native = Schemurai.compile(schema, backend: :native)
-          evaluator = native.instance_variable_get(:@evaluator)
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
-          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          native.instance_variable_get(:@evaluator)
           values = [proxy.new, proxy.new]
           inputs = values.map { |value| schema.key?("items") ? [value, value] : value }
           2.times do
@@ -3619,10 +3647,7 @@ RSpec.describe "native VALUE execution" do
       [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
         vm = Schemurai.compile(schema, backend: :vm)
         native = Schemurai.compile(schema, backend: :native)
-        evaluator = native.instance_variable_get(:@evaluator)
-        allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-        allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
-        allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+        native.instance_variable_get(:@evaluator)
         events = [[], []]
         inputs = events.map do |calls|
           value = Array.new(count) { |index| index } + [klass.new(calls, :left), klass.new(calls, :right)]
@@ -3730,9 +3755,7 @@ RSpec.describe "native VALUE execution" do
       values = Array.new(40) { |i| 2**200 + i }.shuffle(random: Random.new(9571))
       Integer.define_method(:hash) { raise "Ruby Integer#hash callback" }
       Integer.define_method(:to_int) { raise "Ruby Integer#to_int callback" }
-      vm = Schemurai.const_get(:VM)::Evaluator
-      vm.define_method(:valid?) { |_| raise "VM execution" }
-      vm.define_method(:validate) { |_| raise "VM execution" }
+      abort "VM execution loaded" if Schemurai.const_get(:VM).const_defined?(:Evaluator, false)
       abort "expected unique integers" unless validator.valid?(values)
       abort "expected duplicate integers" if validator.valid?(values + [2**200 + 17])
       abort "expected Float duplicate" if validator.valid?(values + [(2**200).to_f])
@@ -4482,10 +4505,7 @@ RSpec.describe "native VALUE execution" do
         [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
           vm = Schemurai.compile(schema, backend: :vm, format: true, content: true)
           native = Schemurai.compile(schema, backend: :native, format: true, content: true)
-          evaluator = native.instance_variable_get(:@evaluator)
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
-          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          native.instance_variable_get(:@evaluator)
           values = [klass.new("aaa"), klass.new("aaa")]
           inputs = values.map do |value|
             if schema.key?("items")
@@ -4547,9 +4567,7 @@ RSpec.describe "native VALUE execution" do
       outcomes = [:vm, :native].map do |backend|
         validator = Schemurai.compile(schema, backend: backend)
         if backend == :native
-          evaluator = validator.instance_variable_get(:@evaluator)
-          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
-          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          validator.instance_variable_get(:@evaluator)
         end
         calls = 0
         allow(helper).to receive(:escape).and_wrap_original do |original, segment|
@@ -4825,11 +4843,6 @@ RSpec.describe "native VALUE execution" do
         {"dependencies"=>{"present"=>[{}]}},
         {"$schema"=>"https://json-schema.org/draft/2020-12/schema", "dependentRequired"=>{"present"=>[[]]}}]
       pairs = rules.map { |rule| [Schemurai.compile(rule,backend: :vm),Schemurai.compile(rule,backend: :native)] }
-      pairs.each do |_vm,native|
-        evaluator = native.instance_variable_get(:@evaluator).instance_variable_get(:@vm)
-        evaluator.define_singleton_method(:valid?) { |*| raise "VM execution" }
-        evaluator.define_singleton_method(:validate) { |*| raise "VM execution" }
-      end
       original_array_hash = Array.instance_method(:hash)
       original_hash_hash = Hash.instance_method(:hash)
       original_key = Hash.instance_method(:key?)
@@ -6059,11 +6072,7 @@ RSpec.describe "native VALUE execution" do
       [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
         vm = Schemurai.compile(schema, backend: :vm)
         native = Schemurai.compile(schema, backend: :native)
-        evaluator = native.instance_variable_get(:@evaluator)
-        allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
-        fallback = evaluator.instance_variable_get(:@vm)
-        allow(fallback).to receive(:valid?).and_raise("VM execution")
-        allow(fallback).to receive(:validate).and_raise("VM execution")
+        native.instance_variable_get(:@evaluator)
         values = [klass.new, klass.new]
         inputs = values.map { |value| schema.key?("items") ? [0.5, value, value] : value }
         2.times do
@@ -6790,10 +6799,7 @@ RSpec.describe "native VALUE execution" do
       cases = schemas.map do |schema|
         vm = Schemurai.compile(schema, backend: :vm)
         native = Schemurai.compile(schema, backend: :native)
-        evaluator = native.instance_variable_get(:@evaluator)
-        allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
-        allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-        allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+        native.instance_variable_get(:@evaluator)
         [native, values.product([:valid?, :validate]).map do |value, method|
           [value, method, capture_validation(vm, method, value, **options)]
         end]
@@ -6839,10 +6845,7 @@ RSpec.describe "native VALUE execution" do
     schemas.each do |schema|
       registries = [:vm, :native].map { |backend| Schemurai::SchemaRegistry.new(backend: backend) }
       validators = registries.map { |registry| registry.compile(schema) }
-      evaluator = validators.last.instance_variable_get(:@evaluator)
-      allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
-      allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
-      allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+      validators.last.instance_variable_get(:@evaluator)
       values = [Class.new(Array).new([1, "bad"]), Class.new(Hash)["x", 1], Class.new(Hash)["x", "bad"]]
       2.times do |phase|
         if phase == 1
