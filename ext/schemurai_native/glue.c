@@ -766,6 +766,18 @@ static void evaluate_native(evaluation_call *call) {
 }
 static VALUE callback_scope(evaluation_call *call) {
     runner_holder *runner = call->runner;
+    /* Nested callbacks share the original public invocation's budget lifetime.
+     * Returning from one child must not close a block its caller retained. */
+    if (runner->callback_context) {
+        VALUE object = runner->parent;
+        while (!NIL_P(object)) {
+            runner_holder *scope;
+            TypedData_Get_Struct(object, runner_holder, &runner_type, scope);
+            if (scope->scope_owner) return object;
+            object = scope->parent;
+        }
+        rb_raise(rb_eRuntimeError, "native callback lost its invocation scope");
+    }
     if (NIL_P(runner->callback_scope)) {
         VALUE object = build_runner(runner->owner, runner->root);
         runner_holder *scope;

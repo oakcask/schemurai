@@ -1497,7 +1497,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "retains independent nested contains callback scopes through compaction" do # rubocop:disable RSpec/ExampleLength
+  it "retains nested contains callbacks in their original scope through compaction" do # rubocop:disable RSpec/ExampleLength
     array = Class.new(Array) do
       attr_reader :saved
 
@@ -1515,6 +1515,45 @@ RSpec.describe "native VALUE execution" do
       GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
       [result, capture_validation(inner.saved, :call, 2), capture_validation(inner.saved, :call, "bad"),
         capture_validation(outer.saved, :call, array.new([3])), capture_validation(inner.saved, :call, 4)]
+    end
+    cases = [{}, {timeout: 10}].map { |options| [options, run.call(:vm, options)] }
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |options, expected| expect(run.call(:native, options)).to eq(expected) }
+  end
+
+  it "keeps nested saved contains blocks active until the outer invocation returns" do # rubocop:disable RSpec/ExampleLength
+    inner_class = Class.new(Array) do
+      attr_reader :saved
+
+      def any?(&block)
+        @saved = block
+        super
+      end
+    end
+    outer_class = Class.new(Array) do
+      def initialize(inner, calls)
+        super([inner])
+        @calls = calls
+      end
+
+      def any?
+        result = yield first
+        GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+        @calls << first.saved.call(2)
+        result
+      rescue NoMethodError => error
+        @calls << error.class
+        false
+      end
+    end
+    schema = {"contains" => {"contains" => {"type" => "integer"}}}
+    run = lambda do |backend, options|
+      calls = []
+      inner = inner_class.new([1])
+      value = outer_class.new(inner, calls)
+      result = capture_validation(Schemurai.compile(schema, backend: backend), :valid?, value, **options)
+      [result, calls, capture_validation(inner.saved, :call, 3)]
     end
     cases = [{}, {timeout: 10}].map { |options| [options, run.call(:vm, options)] }
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
