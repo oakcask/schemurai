@@ -1750,16 +1750,20 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "keeps native contains callbacks private to independent Ractor runners" do
-    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:contains" => {"contains" => {"type" => "integer"}}}, backend: :native).make_shareable
+    schemas = {"urn:contains" => {"contains" => {"type" => "integer"}},
+               "urn:composite-contains" => {"contains" => {"allOf" => [{"type" => "integer"}, {"minimum" => 0}]}}}
+    registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
     workers = Array.new(2) do
       Ractor.new(registry) do |shared|
-        runner = shared.validator_for("urn:contains").instance_variable_get(:@evaluator).instance_variable_get(:@program)
-        klass = Class.new(Array)
-        GC.start
-        [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+        %w[urn:contains urn:composite-contains].map do |uri|
+          runner = shared.validator_for(uri).instance_variable_get(:@evaluator).instance_variable_get(:@program)
+          klass = Class.new(Array)
+          GC.start
+          [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+        end
       end
     end
-    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, true]) }
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([[true, false, true], [true, false, true]]) }
   end
 
   it "preserves dependency triggers, key occurrences and message exceptions" do # rubocop:disable RSpec/ExampleLength
