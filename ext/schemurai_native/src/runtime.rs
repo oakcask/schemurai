@@ -68,6 +68,9 @@ impl Caches {
         // Qundef cannot be a Ruby pattern operand, including malformed schemas.
         self.observe(unsafe { sn_undefined() }, value, RUNTIME_JSON)
     }
+    pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
+        self.observe(name, value, RUNTIME_REQUIRED_MISSING)
+    }
     pub(super) fn pointer(&self, path: &pointer::Path) -> Result<Value, Verdict> {
         let mut pointers = self.pointers.borrow_mut();
         let index = if let Some(&index) = pointers.indices.get(path) {

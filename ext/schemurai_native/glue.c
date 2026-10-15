@@ -672,6 +672,11 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_REQUIRED_MISSING) {
+        VALUE present = rb_funcallv_public(instance, rb_intern_const("key?"), 1, &source);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return RTEST(present) ? Qfalse : Qtrue;
+    }
     if (operation->kind >= SN_RUNTIME_NULL_NUMBER) {
         VALUE result = null_numeric(instance, operation->kind);
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);

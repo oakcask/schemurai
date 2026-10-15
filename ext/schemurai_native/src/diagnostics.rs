@@ -686,8 +686,8 @@ impl Execution<'_> {
                         if !self.budget.checkpoint() {
                             return Err(Unsupported);
                         }
-                        if missing(value, name, self.undefined) {
-                            report.add(self.caches, "required", source, name, 0)?;
+                        if name.missing(self.caches, value, self.undefined)? {
+                            report.add(self.caches, "required", source, name.name, 0)?;
                         }
                     }
                     let mut context = ObjectDiagnostics {
@@ -741,12 +741,12 @@ impl Execution<'_> {
                                     if !self.budget.checkpoint() {
                                         return Err(Unsupported);
                                     }
-                                    if missing(value, required, self.undefined) {
+                                    if required.missing(self.caches, value, self.undefined)? {
                                         report.add(
                                             self.caches,
                                             keyword,
                                             (source.0, *name),
-                                            required,
+                                            required.name,
                                             0,
                                         )?;
                                     }

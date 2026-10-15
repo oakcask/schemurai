@@ -1649,6 +1649,133 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "evaluates non-string required and dependency operands without VM execution" do # rubocop:disable RSpec/ExampleLength
+    names = [nil, false, true, 1, 0.5, 2**200, [], [1], {}, {"key" => ["value"]}]
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rules = names.flat_map do |name|
+      [{"required" => [name]}, {"dependencies" => {"present" => [name]}},
+        dialect.merge("dependentRequired" => {"present" => [name]})]
+    end
+    rules << {"required" => ["present", *names, "missing", nil]}
+    [0, 8, 9, 64, 70].each do |count|
+      properties = count.times.to_h { |i| ["p#{i}", {"type" => "integer"}] }
+      [0, 1, 2].each do |position|
+        required = %w[p0 missing p0].insert(position, {"key" => 1})
+        rules << {"properties" => properties, "required" => required}
+      end
+    end
+    schemas = rules.flat_map { |rule| [rule, {"items" => rule}, {"properties" => {"value" => rule}}] }
+    objects = [{}, {"present" => 1}, {"present" => "bad", "missing" => nil},
+      70.times.to_h { |i| ["p#{i}", i] }]
+    values = [nil, false, 1, "value", *objects, objects, *objects.map { |value| {"value" => value} }]
+    expect_native_policy_results(schemas, values)
+  end
+
+  it "preserves non-string required error order, annotations and limits" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    required = {"required" => ["present", nil, "missing", nil], "properties" => {"present" => {"type" => "integer"}}}
+    dependency = dialect.merge("dependentRequired" => {"present" => [true, "missing", true]},
+      "dependentSchemas" => {"schema2" => {"required" => [{}]}})
+    legacy = {"dependencies" => {"schema1" => false, "present" => [[], "missing", []], "schema2" => {"required" => [1]}}}
+    schemas = [required, dependency, legacy].flat_map do |rule|
+      [rule, {"items" => rule}, {"additionalProperties" => rule}, {"allOf" => [rule, false]},
+        {"anyOf" => [true, rule]}, {"oneOf" => [true, rule]}, {"not" => rule},
+        {"if" => rule, "then" => false, "else" => {"required" => [false]}},
+        dialect.merge("allOf" => [rule], "unevaluatedProperties" => false)]
+    end
+    object = {"present" => "bad", "schema1" => 1, "schema2" => 2}
+    values = [nil, 1, {}, object, {"present" => 1, "extra" => 2}, [object],
+      {"a/b~" => object}, {"x".encode(Encoding::UTF_16LE) => object}]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}])
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |value, method, options|
+        capture_validation(vm, method, value, **options)
+      end]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      combinations.zip(expected).each do |(value, method, options), result|
+        expect(capture_validation(native, method, value, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "uses libruby for required String operands with singleton methods" do
+    name = String.new("present")
+    name.define_singleton_method(:hash) { super() }
+    name.freeze
+    schemas = [{"required" => [name]}, {"dependencies" => {"present" => [name]}},
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentRequired" => {"present" => [name]}}]
+    expect_native_policy_results(schemas, [{}, {"present" => 1}])
+  end
+
+  it "preserves Ruby key lookup exceptions and observes method changes between calls" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      rules = [{"required"=>[[]]}, {"required"=>["missing",[]]}, {"required"=>[[],"missing"]},
+        {"dependencies"=>{"present"=>[{}]}},
+        {"$schema"=>"https://json-schema.org/draft/2020-12/schema", "dependentRequired"=>{"present"=>[[]]}}]
+      pairs = rules.map { |rule| [Schemurai.compile(rule,backend: :vm),Schemurai.compile(rule,backend: :native)] }
+      pairs.each do |_vm,native|
+        evaluator = native.instance_variable_get(:@evaluator).instance_variable_get(:@vm)
+        evaluator.define_singleton_method(:valid?) { |*| raise "VM execution" }
+        evaluator.define_singleton_method(:validate) { |*| raise "VM execution" }
+      end
+      original_array_hash = Array.instance_method(:hash)
+      original_hash_hash = Hash.instance_method(:hash)
+      original_key = Hash.instance_method(:key?)
+      Array.define_method(:hash) do
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        raise "array key hash"
+      end
+      Hash.define_method(:hash) { raise "hash key hash" }
+      capture = lambda do |validator,method,options|
+        result = validator.public_send(method,{"present"=>1},**options)
+        method == :validate ? result.errors : result
+      rescue => error
+        [error.class.name,error.message]
+      end
+      compare = lambda do
+        pairs.each do |vm,native|
+          [:valid?,:validate].product([{}, {max_errors: 0}, {max_errors: 1}, {timeout: 10}]).each do |method,options|
+            abort "different lookup behavior" unless capture.call(vm,method,options) == capture.call(native,method,options)
+          end
+        end
+      end
+      compare.call
+      Array.define_method(:hash,original_array_hash)
+      Hash.define_method(:hash,original_hash_hash)
+      compare.call
+      Hash.define_method(:key?) { |key| key.is_a?(Array) || original_key.bind_call(self,key) }
+      compare.call
+      puts "ok"
+    RUBY
+    output, errors, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect(status.success?).to be(true), errors
+    expect(output).to eq("ok\n")
+  end
+
+  it "keeps required operand runtime lookups isolated in Ractor runners" do
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentRequired" => {"present" => [[], {}]}}
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:required" => schema}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:required")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        value = {}
+        first = runner.valid?(value)
+        value["present"] = true
+        GC.start
+        [first, runner.valid?(value), runner.diagnostics(value).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, %w[dependentRequired dependentRequired]]) }
+  end
+
   it "diagnoses every official dependency case without VM evaluation" do # rubocop:disable RSpec/ExampleLength
     cases = %w[draft7 draft2019-09 draft2020-12].flat_map do |draft|
       %w[dependencies dependentRequired dependentSchemas].flat_map do |keyword|
