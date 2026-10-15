@@ -491,6 +491,7 @@ impl Execution<'_> {
         if let Some(child) = r.contains {
             let count = match evaluation::scan_contains(
                 len,
+                evaluation::ContainsPolicy::AllMatches,
                 |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
                 |index| evaluation.item(index),
             ) {

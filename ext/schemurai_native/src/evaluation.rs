@@ -95,10 +95,17 @@ pub(super) fn scan_branches<R: BranchResult>(
     Ok(result)
 }
 
-// Diagnostic counts and annotations need every match. Keep the same complete
-// traversal for ordinary validity so unsupported later items retain fallback.
+#[derive(Clone, Copy)]
+pub(super) enum ContainsPolicy {
+    FirstMatch,
+    AllMatches,
+}
+
+// Older dialects use any? for untracked validity; counted validity,
+// diagnostic counts and annotations need every match.
 pub(super) fn scan_contains(
     len: usize,
+    policy: ContainsPolicy,
     mut evaluate: impl FnMut(usize) -> Verdict,
     mut record: impl FnMut(usize),
 ) -> Result<usize, Verdict> {
@@ -110,6 +117,9 @@ pub(super) fn scan_contains(
             Valid => {
                 matches += 1;
                 record(index);
+                if matches!(policy, ContainsPolicy::FirstMatch) {
+                    break;
+                }
             }
         }
     }
@@ -202,6 +212,7 @@ mod tests {
         let mut recorded = vec![];
         let result = scan_contains(
             4,
+            ContainsPolicy::AllMatches,
             |index| verdict(index % 2 == 0),
             |index| recorded.push(index),
         );
@@ -210,6 +221,16 @@ mod tests {
         assert_eq!(
             scan_contains(
                 2,
+                ContainsPolicy::FirstMatch,
+                |index| if index == 0 { Valid } else { Unsupported },
+                |_| {}
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            scan_contains(
+                2,
+                ContainsPolicy::AllMatches,
                 |index| if index == 0 { Valid } else { Unsupported },
                 |_| {}
             ),

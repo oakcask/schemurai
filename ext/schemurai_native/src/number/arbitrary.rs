@@ -59,7 +59,11 @@ impl Limit {
 }
 
 impl Rules {
-    pub(super) fn arbitrary_failures(&self, value: Value) -> Result<i32, Verdict> {
+    pub(super) fn arbitrary_failures(
+        &self,
+        value: Value,
+        budget: &budget::Budget,
+    ) -> Result<i32, Verdict> {
         let float = unsafe { sn_is_float(value) } != 0;
         let n = if float {
             unsafe { sn_float(value) }
@@ -68,6 +72,16 @@ impl Rules {
         };
         let actual = if float {
             if self.multiple.is_some() {
+                if !n.is_finite() {
+                    budget.failure.set(if n.is_nan() {
+                        STATUS_DECIMAL_NAN
+                    } else if n.is_sign_negative() {
+                        STATUS_DECIMAL_NEGATIVE_INFINITY
+                    } else {
+                        STATUS_DECIMAL_POSITIVE_INFINITY
+                    });
+                    return Err(Unsupported);
+                }
                 Some(decimal(n).ok_or(Unsupported)?)
             } else {
                 None

@@ -86,6 +86,13 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
     return self;
 }
 static void check_evaluation_status(int status, const char *panic_message) {
+    const char *decimal = NULL;
+    switch (status) {
+        case SN_STATUS_DECIMAL_NAN: decimal = "NaN"; break;
+        case SN_STATUS_DECIMAL_POSITIVE_INFINITY: decimal = "Infinity"; break;
+        case SN_STATUS_DECIMAL_NEGATIVE_INFINITY: decimal = "-Infinity"; break;
+    }
+    if (decimal) rb_raise(rb_eArgError, "invalid value for convert(): \"%s\"", decimal);
     if (status == SN_STATUS_STACK_ERROR) rb_raise(rb_eSysStackError, "stack level too deep");
     if (status < 0) rb_raise(rb_eRuntimeError, "%s", panic_message);
 }
