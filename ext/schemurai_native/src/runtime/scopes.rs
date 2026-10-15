@@ -12,6 +12,10 @@ pub(super) enum Key {
 #[derive(Default)]
 pub(super) struct Scopes {
     enabled: Cell<bool>,
+    initial_references: RefCell<Vec<(Value, Value)>>,
+    vm_references: RefCell<Vec<(Value, Value)>>,
+    pending_references: RefCell<Vec<(Value, Value)>>,
+    reference: Cell<*const Reference>,
     initial: RefCell<Vec<Value>>,
     stack: RefCell<Vec<Value>>,
     pending: RefCell<Vec<Value>>,
@@ -23,6 +27,21 @@ pub(super) struct Scopes {
 pub(crate) struct Guard<'a> {
     scopes: &'a Scopes,
     entered: bool,
+}
+// Stack records are read only while their guards are live. No pointer survives
+// native unwinding: requests copy the pairs before returning to C/Ruby.
+pub(crate) struct Reference {
+    pair: (Value, Value),
+    parent: *const Reference,
+}
+pub(crate) struct ReferenceGuard<'a> {
+    scopes: &'a Scopes,
+    frame: &'a Reference,
+}
+impl Drop for ReferenceGuard<'_> {
+    fn drop(&mut self) {
+        self.scopes.reference.set(self.frame.parent);
+    }
 }
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
@@ -38,6 +57,10 @@ impl Scopes {
     }
     pub(super) fn clear(&self) {
         self.enabled.set(false);
+        self.initial_references.borrow_mut().clear();
+        self.vm_references.borrow_mut().clear();
+        self.pending_references.borrow_mut().clear();
+        self.reference.set(std::ptr::null());
         self.initial.borrow_mut().clear();
         self.stack.borrow_mut().clear();
         self.pending.borrow_mut().clear();
@@ -55,6 +78,8 @@ impl Scopes {
         if self.enabled() {
             self.stack.borrow_mut().clone_from(&self.initial.borrow());
         }
+        self.reference.set(std::ptr::null());
+        self.pending_references.borrow_mut().clear();
         self.key.set(None);
         self.unwind.set(0);
         self.entered.set(0);
@@ -73,9 +98,48 @@ impl Scopes {
     pub(super) fn at(&self, index: usize) -> Option<Value> {
         self.stack.borrow().get(index).copied()
     }
+    pub(super) fn reference_frame(&self, program: Value, instance: Value) -> Reference {
+        Reference {
+            pair: (program, instance),
+            parent: self.reference.get(),
+        }
+    }
+    pub(super) fn reference_guard<'a>(&'a self, frame: &'a Reference) -> ReferenceGuard<'a> {
+        if self.enabled() {
+            self.reference.set(frame);
+        }
+        ReferenceGuard {
+            scopes: self,
+            frame,
+        }
+    }
+    pub(super) fn reference_active(&self, program: Value, instance: Value) -> bool {
+        self.enabled()
+            && (self
+                .initial_references
+                .borrow()
+                .contains(&(program, instance))
+                || self.vm_references.borrow().contains(&(program, instance)))
+    }
+    fn references(&self, initial: bool) -> std::cell::Ref<'_, Vec<(Value, Value)>> {
+        if !initial && self.key.get().is_some() {
+            self.pending_references.borrow()
+        } else {
+            self.initial_references.borrow()
+        }
+    }
     pub(super) fn request(&self, key: Key) {
         if self.enabled() {
             self.pending.borrow_mut().clone_from(&self.stack.borrow());
+            let mut pairs = self.pending_references.borrow_mut();
+            pairs.clone_from(&self.initial_references.borrow());
+            let mut reference = self.reference.get();
+            while !reference.is_null() {
+                // Each pointer belongs to a stack record borrowed by a live guard.
+                let frame = unsafe { &*reference };
+                pairs.push(frame.pair);
+                reference = frame.parent;
+            }
             self.key.set(Some(key));
             self.unwind.set(self.entered.get());
         }
@@ -129,7 +193,19 @@ impl Scopes {
                     .map_or(0, |v| v.capacity() * std::mem::size_of::<Value>())
             })
             .sum::<usize>();
+        let references = [
+            &self.initial_references,
+            &self.vm_references,
+            &self.pending_references,
+        ]
+        .iter()
+        .map(|v| {
+            v.try_borrow()
+                .map_or(0, |v| v.capacity() * std::mem::size_of::<(Value, Value)>())
+        })
+        .sum::<usize>();
         vectors
+            + references
             + self.effects.try_borrow().map_or(0, |effects| {
                 effects.capacity() * std::mem::size_of::<(Key, Vec<Value>)>()
                     + effects
@@ -145,6 +221,20 @@ impl Scopes {
             if let Ok(values) = values.try_borrow() {
                 for &value in values.iter() {
                     unsafe { sn_pin(value) };
+                }
+            }
+        }
+        for pairs in [
+            &self.initial_references,
+            &self.vm_references,
+            &self.pending_references,
+        ] {
+            if let Ok(pairs) = pairs.try_borrow() {
+                for &(program, instance) in pairs.iter() {
+                    unsafe {
+                        sn_pin(program);
+                        sn_pin(instance);
+                    }
                 }
             }
         }
@@ -178,13 +268,62 @@ fn values(array: Value) -> Vec<Value> {
         .collect()
 }
 /// # Safety
-/// Caches must be idle and array must be a live Array rooted by the runner.
+/// Caches must be idle. Arrays must be live and runner-rooted; active must be
+/// nil or the library-owned program/instance identity Hashes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_scopes_inherit(caches: *const Caches, array: Value, enabled: i32) {
+pub unsafe extern "C" fn sn_scopes_inherit(
+    caches: *const Caches,
+    array: Value,
+    references: Value,
+    active: Value,
+    enabled: i32,
+) {
     unsafe { &*caches }.scopes.inherit(
         if enabled != 0 { values(array) } else { vec![] },
         enabled != 0,
     );
+    if enabled != 0 {
+        let scopes = &unsafe { &*caches }.scopes;
+        *scopes.initial_references.borrow_mut() = (0..unsafe { sn_len(references) } / 2)
+            .map(|i| unsafe { (sn_entry(references, i * 2), sn_entry(references, i * 2 + 1)) })
+            .collect();
+        let mut pairs = scopes.vm_references.borrow_mut();
+        unsafe {
+            sn_references_read(active, (&mut *pairs as *mut Vec<(Value, Value)>).cast());
+        }
+    }
+}
+unsafe extern "C" {
+    fn sn_references_read(active: Value, pairs: *mut c_void);
+}
+/// # Safety
+/// Pairs must be an exclusively borrowed reference vector; called by C's
+/// allocation-free walk of library-owned identity Hashes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_reference_pair(pairs: *mut c_void, program: Value, instance: Value) {
+    unsafe { &mut *pairs.cast::<Vec<(Value, Value)>>() }.push((program, instance));
+}
+/// # Safety
+/// Caches must be idle and live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_references_len(caches: *const Caches, initial: i32) -> usize {
+    unsafe { &*caches }.scopes.references(initial != 0).len() * 2
+}
+/// # Safety
+/// Caches must be idle and index in range of sn_references_len.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_references_at(
+    caches: *const Caches,
+    index: usize,
+    initial: i32,
+) -> Value {
+    let pairs = unsafe { &*caches }.scopes.references(initial != 0);
+    let pair = pairs[index / 2];
+    if index.is_multiple_of(2) {
+        pair.0
+    } else {
+        pair.1
+    }
 }
 /// # Safety
 /// Caches must be idle and live.
@@ -245,6 +384,36 @@ mod tests {
             assert_eq!(scopes.at(0), None);
         }
         assert_eq!(scopes.at(0), None);
+    }
+
+    #[test]
+    fn reference_requests_copy_live_guards_and_keep_vm_ancestors_separate() {
+        let scopes = Scopes::default();
+        scopes.inherit(vec![], true);
+        scopes.initial_references.borrow_mut().push((10, 11));
+        scopes.vm_references.borrow_mut().push((20, 21));
+        assert!(scopes.reference_active(10, 11));
+        assert!(scopes.reference_active(20, 21));
+        assert!(!scopes.reference_active(10, 21));
+        {
+            let outer = scopes.reference_frame(30, 31);
+            let _outer = scopes.reference_guard(&outer);
+            {
+                let inner = scopes.reference_frame(40, 41);
+                let _inner = scopes.reference_guard(&inner);
+                scopes.request(Key::Value(2, 3, RUNTIME_TYPE));
+            }
+            assert_eq!(
+                *scopes.references(false),
+                vec![(10, 11), (40, 41), (30, 31)]
+            );
+        }
+        assert!(scopes.reference.get().is_null());
+        assert_eq!(*scopes.references(true), vec![(10, 11)]);
+        scopes.reset();
+        assert_eq!(*scopes.references(false), vec![(10, 11)]);
+        scopes.clear();
+        assert!(!scopes.reference_active(20, 21));
     }
 
     #[test]

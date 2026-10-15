@@ -1090,7 +1090,11 @@ impl Execution<'_> {
                     }
                 }
                 Op::Ref(target) => {
-                    if RefFrame::contains(active.active, node, value) {
+                    let target = self.resolve_reference(*target, value, active)?;
+                    let program = self.programs[node];
+                    if RefFrame::contains(active.active, node, value)
+                        || self.caches.reference_active(program, value)
+                    {
                         continue;
                     }
                     let frame = RefFrame {
@@ -1099,7 +1103,8 @@ impl Execution<'_> {
                         parent: active.active,
                     };
                     let keyword = reference_keyword(source.0);
-                    let target = self.resolve_reference(*target, value, active)?;
+                    let reference = self.caches.reference_frame(program, value);
+                    let _guard = self.caches.reference_guard(&reference);
                     let active = scope::Context {
                         active: Some(&frame),
                         ..active

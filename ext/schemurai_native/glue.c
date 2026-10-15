@@ -31,8 +31,11 @@ extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
 extern int sn_valid(const void *, const void *, size_t, VALUE, size_t);
 extern size_t sn_node_index(const void *, VALUE);
 extern int sn_callback_kind(const void *, size_t, int *);
-extern int sn_scoped_callbacks(const void *, size_t, int);
-extern void sn_scopes_inherit(const void *, VALUE, int);
+extern int sn_reference_context(const void *);
+extern void sn_scopes_inherit(const void *, VALUE, VALUE, VALUE, int);
+extern size_t sn_references_len(const void *, int);
+extern VALUE sn_references_at(const void *, size_t, int);
+extern void sn_reference_pair(void *, VALUE, VALUE);
 extern int sn_scopes_enabled(const void *);
 extern size_t sn_scopes_len(const void *);
 extern VALUE sn_scopes_at(const void *, size_t);
@@ -149,6 +152,7 @@ typedef struct { size_t max_errors; uint32_t enabled; double timeout; } native_l
 typedef struct {
     VALUE owner, parent, active_budget, callback_scope, child_callbacks;
     VALUE scope_state, active_scope_state;
+    VALUE ref_state, vm_active, active_ref_state, active_vm_state;
     VALUE regexps, limited_regexps, pointers, messages, frames;
     VALUE number_state, limited_number_state, string_state, limited_string_state;
     void *caches;
@@ -189,6 +193,10 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->child_callbacks);
     rb_gc_mark(r->scope_state);
     rb_gc_mark(r->active_scope_state);
+    rb_gc_mark(r->ref_state);
+    rb_gc_mark(r->vm_active);
+    rb_gc_mark(r->active_ref_state);
+    rb_gc_mark(r->active_vm_state);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->limited_regexps);
     rb_gc_mark(r->pointers);
@@ -301,6 +309,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->child_callbacks = Qnil;
     r->scope_state = Qnil;
     r->active_scope_state = Qnil;
+    r->ref_state = r->vm_active = r->active_ref_state = r->active_vm_state = Qnil;
     r->scope_owner = 0;
     r->closed_limited = 0;
     r->callback_kind = SN_CALLBACK_RUNTIME;
@@ -349,16 +358,45 @@ static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) 
 static VALUE runner_valid(VALUE self, VALUE instance) {
     return evaluate_runner(self, instance, Qnil, 0);
 }
-static VALUE runner_share_scalar_state(VALUE self, VALUE number_state, VALUE regexps, VALUE scopes) {
+static VALUE runner_share_scalar_state(VALUE self, VALUE number_state, VALUE regexps, VALUE scopes, VALUE references, VALUE active) {
     runner_holder *runner;
     TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
     if (runner->busy) rb_raise(rb_eRuntimeError, "cannot replace active scalar state");
     Check_Type(scopes, T_ARRAY);
     runner->scope_state = scopes;
+    Check_Type(references, T_ARRAY);
+    Check_Type(active, T_HASH);
+    runner->ref_state = references;
+    runner->vm_active = active;
     runner->number_state = number_state;
     runner->regexps = regexps;
     runner->string_state = Qnil;
     return self;
+}
+/* Library-owned identity maps: these callbacks only copy VALUE pairs to Rust.
+ * No Ruby allocation, dispatch or mutation occurs while Rust borrows its Vec. */
+typedef struct { void *pairs; VALUE program; } reference_walk;
+static int reference_instance(VALUE instance, VALUE unused, VALUE context) {
+    reference_walk *walk = (reference_walk *)context;
+    sn_reference_pair(walk->pairs, walk->program, instance);
+    return ST_CONTINUE;
+}
+static int reference_program(VALUE program, VALUE instances, VALUE context) {
+    reference_walk walk = {(void *)context, program};
+    rb_hash_foreach(instances, reference_instance, (VALUE)&walk);
+    return ST_CONTINUE;
+}
+void sn_references_read(VALUE active, void *pairs) {
+    if (!NIL_P(active)) rb_hash_foreach(active, reference_program, (VALUE)pairs);
+}
+static VALUE runner_reference_active(VALUE self, VALUE program, VALUE instance) {
+    runner_holder *runner;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
+    if (NIL_P(runner->ref_state)) return Qfalse;
+    for (long i = 0; i < RARRAY_LEN(runner->ref_state); i += 2)
+        if (rb_ary_entry(runner->ref_state, i) == program &&
+            rb_ary_entry(runner->ref_state, i + 1) == instance) return Qtrue;
+    return Qfalse;
 }
 static VALUE valid(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
@@ -758,9 +796,27 @@ static VALUE clear_runtime(VALUE context) {
 static void publish_scope(runner_holder *runner) {
     if (!sn_scopes_enabled(runner->caches)) return;
     size_t count = sn_scopes_len(runner->caches);
+    int same = (size_t)RARRAY_LEN(runner->active_scope_state) == count;
+    for (size_t i = 0; same && i < count; i++)
+        same = rb_ary_entry(runner->active_scope_state, i) == sn_scopes_at(runner->caches, i);
+    if (same) return;
+    if (!count) { rb_ary_clear(runner->active_scope_state); return; }
     VALUE state = rb_ary_new_capa(count);
     for (size_t i = 0; i < count; i++) rb_ary_push(state, sn_scopes_at(runner->caches, i));
     rb_ary_replace(runner->active_scope_state, state);
+    RB_GC_GUARD(state);
+}
+static void publish_references(runner_holder *runner, int initial) {
+    if (!sn_scopes_enabled(runner->caches)) return;
+    size_t count = sn_references_len(runner->caches, initial);
+    int same = (size_t)RARRAY_LEN(runner->active_ref_state) == count;
+    for (size_t i = 0; same && i < count; i++)
+        same = rb_ary_entry(runner->active_ref_state, i) == sn_references_at(runner->caches, i, initial);
+    if (same) return;
+    if (!count) { rb_ary_clear(runner->active_ref_state); return; }
+    VALUE state = rb_ary_new_capa(count);
+    for (size_t i = 0; i < count; i++) rb_ary_push(state, sn_references_at(runner->caches, i, initial));
+    rb_ary_replace(runner->active_ref_state, state);
     RB_GC_GUARD(state);
 }
 static void evaluate_native(evaluation_call *call) {
@@ -789,6 +845,7 @@ static void evaluate_native(evaluation_call *call) {
     }
     active_caches = previous_caches;
     publish_scope(r);
+    publish_references(r, 0);
     check_evaluation_status(call->status,
         call->report ? "native diagnostics panicked" : "native evaluator panicked");
     if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
@@ -814,6 +871,8 @@ static VALUE callback_scope(evaluation_call *call) {
         scope->parent = call->self;
         scope->scope_owner = 1;
         scope->scope_state = runner->active_scope_state;
+        scope->ref_state = runner->active_ref_state;
+        scope->vm_active = runner->active_vm_state;
         scope->callback_context = 1;
         scope->active_budget = call->budget;
         scope->active_limits = call->limits;
@@ -1186,21 +1245,29 @@ static VALUE evaluate_runner_body(VALUE context) {
             sn_caches_scalar_callback(r->caches, parent->caches, !NIL_P(budget));
         }
     }
-    int scoped = sn_scoped_callbacks(call.engine->engine, r->root, r->callback_context);
+    int scoped = sn_reference_context(call.engine->engine);
     if (r->callback_context) {
         runner_holder *scope;
         VALUE object = callback_scope(&call);
         TypedData_Get_Struct(object, runner_holder, &runner_type, scope);
         if (scoped && NIL_P(scope->scope_state)) scope->scope_state = rb_ary_new();
         r->active_scope_state = scope->scope_state;
+        if (scoped && NIL_P(scope->ref_state)) scope->ref_state = rb_ary_new();
+        r->active_ref_state = scope->ref_state;
+        r->active_vm_state = scope->vm_active;
     } else if (NIL_P(budget)) {
         if (scoped && NIL_P(r->scope_state)) r->scope_state = rb_ary_new();
         r->active_scope_state = r->scope_state;
+        if (scoped && NIL_P(r->ref_state)) r->ref_state = rb_ary_new();
+        r->active_ref_state = r->ref_state;
+        r->active_vm_state = r->vm_active;
         if (!NIL_P(r->active_scope_state)) rb_ary_clear(r->active_scope_state);
     } else {
         r->active_scope_state = scoped ? rb_ary_new() : Qnil;
+        r->active_ref_state = scoped ? rb_ary_new() : Qnil;
+        r->active_vm_state = Qnil;
     }
-    sn_scopes_inherit(r->caches, r->active_scope_state, scoped);
+    sn_scopes_inherit(r->caches, r->active_scope_state, r->active_ref_state, r->active_vm_state, scoped);
     evaluate_native(&call);
     VALUE source = Qnil, requested = Qnil;
     int operation = 0;
@@ -1240,6 +1307,7 @@ static VALUE evaluate_runner_body(VALUE context) {
 static VALUE finish_evaluation(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     runner_holder *runner = call->runner;
+    publish_references(runner, 1);
     size_t unwind = sn_scopes_unwind(runner->caches);
     while (unwind-- > 0) rb_ary_pop(runner->active_scope_state);
     publish_states(runner);
@@ -1247,6 +1315,7 @@ static VALUE finish_evaluation(VALUE context) {
     clear_runtime(context);
     runner->active_budget = Qnil;
     runner->active_scope_state = Qnil;
+    runner->active_ref_state = runner->active_vm_state = Qnil;
     runner->active_limits = (native_limits){0};
     runner->busy = 0;
     return Qnil;
@@ -1262,6 +1331,8 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         child->depth = runner->depth;
         child->callback_context = runner->callback_context;
         child->scope_state = runner->scope_state;
+        child->ref_state = runner->ref_state;
+        child->vm_active = runner->vm_active;
         VALUE result = evaluate_runner(nested, instance, budget, diagnostics);
         RB_GC_GUARD(nested);
         return result;
@@ -1403,7 +1474,8 @@ void Init_schemurai_native(void) {
     rb_define_method(runner_class, "evaluate_child", runner_evaluate_child, 2);
     rb_define_method(runner_class, "invocation_budget", runner_invocation_budget, 0);
     rb_define_method(runner_class, "regexp_cache", runner_regexp_cache, 0);
-    rb_define_method(runner_class, "share_scalar_state", runner_share_scalar_state, 3);
+    rb_define_method(runner_class, "share_scalar_state", runner_share_scalar_state, 5);
+    rb_define_method(runner_class, "reference_active?", runner_reference_active, 2);
     rb_define_method(runner_class, "valid?", runner_valid, 1);
     rb_define_method(runner_class, "valid_with_budget", runner_valid_with_budget, 2);
     rb_define_method(runner_class, "diagnostics", runner_diagnostics, 1);

@@ -105,6 +105,18 @@ impl Caches {
     pub(super) fn scope_guard(&self, resource: Value, enters: bool) -> scopes::Guard<'_> {
         self.scopes.enter(resource, enters)
     }
+    pub(super) fn reference_frame(&self, program: Value, instance: Value) -> scopes::Reference {
+        self.scopes.reference_frame(program, instance)
+    }
+    pub(super) fn reference_guard<'a>(
+        &'a self,
+        frame: &'a scopes::Reference,
+    ) -> scopes::ReferenceGuard<'a> {
+        self.scopes.reference_guard(frame)
+    }
+    pub(super) fn reference_active(&self, program: Value, instance: Value) -> bool {
+        self.scopes.reference_active(program, instance)
+    }
     pub(super) fn scopes_enabled(&self) -> bool {
         self.scopes.enabled()
     }

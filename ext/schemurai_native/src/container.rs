@@ -159,6 +159,11 @@ impl Engine {
     // user block through the VM. Postorder leaves cycles unproven.
     pub(super) fn compile_scalar_callback_depths(&mut self) {
         let count = self.nodes.len();
+        self.has_references = self
+            .nodes
+            .iter()
+            .flatten()
+            .any(|op| matches!(op, Op::Ref(_)));
         if !self.nodes.iter().flatten().any(|op| match op {
             Op::Array(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
             Op::Object(_, rules) => rules.unevaluated.is_none() && !rules.header_only(),
@@ -166,8 +171,6 @@ impl Engine {
         }) {
             self.scalar_callback_depths.clear();
             self.callback_child_depths.clear();
-            self.callback_scope_demands.clear();
-            self.has_scoped_callbacks = false;
             return;
         }
         // One zero-depth dispatch vertex per name avoids repeating every
@@ -176,7 +179,6 @@ impl Engine {
         let mut edges = vec![vec![]; recursive + 1];
         let mut admitted = vec![true; edges.len()];
         let mut callbacks = vec![false; edges.len()];
-        let mut scopes = vec![false; edges.len()];
         for (name, bindings) in self.anchor_tables.iter().enumerate() {
             edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
         }
@@ -188,9 +190,6 @@ impl Engine {
         );
         for (node, ops) in self.nodes.iter().enumerate() {
             admitted[node] = !self.tracks[node];
-            scopes[node] = self.error_operands[node]
-                .iter()
-                .any(|&(opcode, _)| opcode == OP_DYNAMIC_REF || opcode == OP_RECURSIVE_REF);
             for op in ops {
                 match op {
                     Op::Boolean(_)
@@ -237,7 +236,6 @@ impl Engine {
         let mut depths: Vec<Option<usize>> = vec![None; edges.len()];
         for node in order {
             callbacks[node] |= edges[node].iter().any(|&child| callbacks[child]);
-            scopes[node] |= edges[node].iter().any(|&child| scopes[child]);
             if admitted[node] {
                 depths[node] = edges[node].iter().try_fold(0, |depth, &child| {
                     Some(depth.max(depths[child]?.checked_add(usize::from(node < count))?))
@@ -245,24 +243,12 @@ impl Engine {
             }
         }
         depths.truncate(count);
-        scopes.truncate(count);
-        self.has_scoped_callbacks = scopes.iter().any(|&needed| needed);
         self.scalar_callback_depths = depths
             .iter()
             .enumerate()
             .map(|(node, &depth)| if callbacks[node] { depth } else { None })
             .collect();
         self.callback_child_depths = depths;
-        self.callback_scope_demands = scopes;
-    }
-    pub(super) fn scoped_callbacks(&self, root: usize, child: bool) -> bool {
-        self.has_scoped_callbacks
-            && (child
-                || (self.callback_scope_demands.get(root) == Some(&true)
-                    && self
-                        .scalar_callback_depths
-                        .get(root)
-                        .is_some_and(Option::is_some)))
     }
     pub(super) fn scalar_callback_kind(&self, child: usize) -> (i32, i32) {
         if self.metadata[child].enters_scope {

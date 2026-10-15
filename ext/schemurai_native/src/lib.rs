@@ -691,14 +691,14 @@ pub struct Roots {
 #[derive(Default)]
 pub struct Engine {
     nodes: Vec<Vec<Op>>,
+    programs: Vec<Value>,
     pattern_cache_count: usize,
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
     kind_demand: Vec<KindDemand>,
     scalar_callback_depths: Vec<Option<usize>>,
     callback_child_depths: Vec<Option<usize>>,
-    callback_scope_demands: Vec<bool>,
-    has_scoped_callbacks: bool,
+    has_references: bool,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -880,6 +880,7 @@ impl Engine {
         let index = self.nodes.len();
         self.indices.insert(program, index);
         self.nodes.push(vec![]);
+        self.programs.push(program);
         self.error_operands.push(vec![]);
         self.tracks.push(false);
         self.kind_demand.push(KindDemand::None);
@@ -1456,7 +1457,14 @@ impl Execution<'_> {
             }
             let outcome = match op {
                 Op::Ref(target) => {
-                    if RefFrame::contains(active.active, node, value) {
+                    let target = match self.resolve_reference(*target, value, active) {
+                        Ok(target) => target,
+                        Err(status) => return status,
+                    };
+                    let program = self.programs[node];
+                    if RefFrame::contains(active.active, node, value)
+                        || self.caches.reference_active(program, value)
+                    {
                         Valid
                     } else {
                         let frame = RefFrame {
@@ -1464,11 +1472,10 @@ impl Execution<'_> {
                             value,
                             parent: active.active,
                         };
+                        let reference = self.caches.reference_frame(program, value);
+                        let _guard = self.caches.reference_guard(&reference);
                         self.eval_with_kind(
-                            match self.resolve_reference(*target, value, active) {
-                                Ok(target) => target,
-                                Err(status) => return status,
-                            },
+                            target,
                             value,
                             depth + 1,
                             scope::Context {
@@ -3523,12 +3530,10 @@ pub unsafe extern "C" fn sn_callback_kind(
 /// # Safety
 /// Engine must be initialized and root compiled.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_scoped_callbacks(
-    engine: *const Engine,
-    root: usize,
-    child: i32,
-) -> i32 {
-    i32::from(unsafe { &*engine }.scoped_callbacks(root, child != 0))
+pub unsafe extern "C" fn sn_reference_context(engine: *const Engine) -> i32 {
+    // Any scalar Ruby primitive can reenter a schema block, including from
+    // tracked/diagnostic traversals that cannot admit container callbacks.
+    i32::from(unsafe { &*engine }.has_references)
 }
 /// # Safety
 /// Engine must be initialized.
@@ -3672,11 +3677,11 @@ pub extern "C" fn sn_engine_header_size() -> usize {
 pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
+    let programs = unsafe { &*std::ptr::addr_of!((*engine).programs) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let callback_depths = unsafe { &*std::ptr::addr_of!((*engine).scalar_callback_depths) };
     let child_depths = unsafe { &*std::ptr::addr_of!((*engine).callback_child_depths) };
-    let callback_scopes = unsafe { &*std::ptr::addr_of!((*engine).callback_scope_demands) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3686,7 +3691,6 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
-        + callback_scopes.capacity() * std::mem::size_of::<bool>()
         + (callback_depths.capacity() + child_depths.capacity())
             * std::mem::size_of::<Option<usize>>()
         + (contextual.capacity()
@@ -3696,6 +3700,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
             + scalar.capacity()
             + amplification.capacity())
             * std::mem::size_of::<bool>()
+        + programs.capacity() * std::mem::size_of::<Value>()
         + nodes.capacity() * std::mem::size_of::<Vec<Op>>()
         + operands.capacity() * std::mem::size_of::<Vec<(i32, Value)>>()
         + operands

@@ -1345,6 +1345,100 @@ RSpec.describe "native VALUE execution" do
     cases.each { |options, expected| expect(run.call(:native, options)).to eq(expected) }
   end
 
+  it "inherits active reference guards when saved native blocks reenter their source" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :saved
+
+      def count(&block)
+        @saved ||= block
+        super
+      end
+    end
+    string = Class.new(String) do
+      attr_accessor :saved
+      attr_reader :calls
+
+      def is_a?(type)
+        return super unless type == String
+
+        @calls = (@calls || 0) + 1
+        @saved.call(self) if @calls == 1
+        true
+      end
+    end
+    run = lambda do |backend, keyword, options, bridge = nil|
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+                "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "string"}},
+                "contains" => {keyword => "#/$defs/x"}}
+      validator = Schemurai.compile(schema, backend: backend)
+      input = array.new(["seed"])
+      compatibility = if backend == :native
+        validator.instance_variable_get(:@evaluator).instance_variable_get(:@vm)
+      else
+        validator
+      end
+      first = (bridge == :vm_to_native) ? compatibility : validator
+      expect(first.valid?(input)).to be(true)
+      value = string.new("a")
+      value.saved = input.saved
+      input[0] = value
+      second = (bridge == :native_to_vm) ? compatibility : validator
+      result = capture_validation(second, :valid?, input, **options)
+      [result, value.calls, capture_validation(input.saved, :call, "after")]
+    end
+    cases = ["$ref", "$dynamicRef"].product([{}, {timeout: 10}]).map do |keyword, options|
+      [keyword, options, run.call(:vm, keyword, options)]
+    end
+    expect(cases.map { |entry| entry.last[1] }).to eq([1, 2, 1, 2])
+    # Exercise both directions of the shared compatibility state before
+    # forbidding VM execution for the entirely native cases below.
+    [:vm_to_native, :native_to_vm].product(["$ref", "$dynamicRef"]).each do |bridge, keyword|
+      expected = run.call(:vm, keyword, {}, bridge)
+      expect(expected[1]).to eq(1)
+      expect(run.call(:native, keyword, {}, bridge)).to eq(expected)
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |keyword, options, expected| expect(run.call(:native, keyword, options)).to eq(expected) }
+  end
+
+  it "publishes native reference guards during scalar validity and diagnostics" do # rubocop:disable RSpec/ExampleLength
+    string = Class.new(String) do
+      attr_accessor :saved
+      attr_reader :calls
+
+      def is_a?(type)
+        return super unless type == String
+
+        @calls = (@calls || 0) + 1
+        @saved.call(self) if @calls == 1
+        true
+      end
+    end
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+              "$defs" => {"x" => {"type" => "string"}, "use" => {"$ref" => "#/$defs/x"}},
+              "$ref" => "#/$defs/use"}
+    run = lambda do |backend, method|
+      validator = Schemurai.compile(schema, backend: backend)
+      compatibility = (backend == :native) ? validator.instance_variable_get(:@evaluator).instance_variable_get(:@vm) : validator
+      expect(compatibility.valid?("seed")).to be(true)
+      evaluator = (backend == :native) ? compatibility : compatibility.instance_variable_get(:@evaluator)
+      compiler = evaluator.instance_variable_get(:@compiler)
+      source = compiler.resolve(evaluator.instance_variable_get(:@root), "#/$defs/use")
+      value = string.new("a")
+      value.saved = ->(item) { evaluator.send(:evaluate_valid, source, item) }
+      allow(compatibility).to receive(:valid?).and_raise("VM execution") if backend == :native
+      allow(compatibility).to receive(:validate).and_raise("VM execution") if backend == :native
+      result = capture_validation(validator, method, value)
+      [result, value.calls]
+    end
+    [:valid?, :validate].each do |method|
+      expected = run.call(:vm, method)
+      expect(expected[1]).to eq(1)
+      expect(run.call(:native, method)).to eq(expected)
+    end
+  end
+
   it "shares current scopes with saved callbacks after native program refresh" do # rubocop:disable RSpec/ExampleLength
     array = Class.new(Array) do
       attr_reader :saved, :observed

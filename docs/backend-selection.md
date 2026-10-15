@@ -963,8 +963,7 @@ references are admitted when every possible target forms an acyclic graph and
 needs no exported annotations. One zero-depth dispatch vertex per anchor name,
 plus one for recursive resources, keeps binding edges shared and excludes cycles
 without increasing schema evaluation depth. Iterative postorder analysis proves
-child eligibility, whole-root coverage and scope demand before kind demands
-are finalized.
+child eligibility and whole-root coverage before kind demands are finalized.
 The whole-root proof requires every reachable instruction to have a runtime
 path and every reachable schema depth to remain within the native bound. Other roots retain the earlier guard before
 any new callback can run, preventing a later compatibility transfer from
@@ -985,8 +984,23 @@ bindings. Child callbacks inherit the Array's current contents, including when
 saved blocks run under another resource or after native program refresh.
 Bounded invocations own separate Arrays. Pending native scope-entry counts let
 C unwind the live Array when a Ruby request raises. Completed native calls
-publish their final scope contents. Ordinary linked-frame reference lookup keeps
-its existing path when callback scope tracking is unnecessary.
+publish their final scope contents. Reference context is enabled conservatively
+for programs containing references, including scalar and diagnostic paths:
+Ruby primitive methods can reenter saved schema blocks without any container
+callback. Programs without references skip context tracking. Publishing compares
+identity values first and avoids allocating a Ruby Array when contents match.
+
+Callbacks also inherit active reference guards by compiled Program identity and
+instance identity. Native stack guards are copied before a Ruby request and
+published as a flat Ruby Array; callback completion restores its incoming
+native guards even when Ruby raises. The remaining VM evaluator shares its
+identity Hashes with native readers and consults the native guard Array before
+entering a reference. Native never replaces VM identity Hashes or their entries,
+so VM ensure cleanup retains ownership of its guards. Bounded invocations keep
+private state. Both static and dynamic references need this bridge: user methods
+can invoke a saved block for the same reference and instance even when the
+compiled schema graph is acyclic. Stack records are borrowed only within native
+frames and copied before unwinding; no Rust stack pointer crosses into Ruby.
 Original dynamic names survive invariant-target simplification for callback
 scope polling. Scoped lookup walks outer to inner and shares binding predicates
 with the ordinary native lookup, while issuing the VM's per-resource checkpoints.
