@@ -26,6 +26,7 @@ pub struct Caches {
     pending_scalar: std::cell::Cell<Option<ScalarArguments>>,
     frame_error: std::cell::Cell<bool>,
     scalar_callback: std::cell::Cell<bool>,
+    callback_checkpoints: std::cell::Cell<bool>,
     callbacks_allowed: std::cell::Cell<bool>,
     pending_contains: std::cell::Cell<Option<ContainsArguments>>,
 }
@@ -195,7 +196,7 @@ impl Caches {
         Ok(unsafe { sn_runtime_ordinal(ordinal) })
     }
     pub(super) fn callback_checkpoint(&self, value: Value) -> Verdict {
-        if !self.scalar_callback() {
+        if !self.callback_checkpoints.get() {
             return Valid;
         }
         let Ok(ordinal) = self.next_call() else {
@@ -545,6 +546,7 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     caches.runtime_order.set(false);
     caches.dynamic_calls.set(false);
     caches.scalar_callback.set(false);
+    caches.callback_checkpoints.set(false);
     caches.callbacks_allowed.set(false);
     caches.reorder.set(false);
     caches.rescued_strings.borrow_mut().clear();
@@ -582,10 +584,15 @@ pub unsafe extern "C" fn sn_caches_pending(
 /// # Safety
 /// Both caches must be live and idle under the GVL. The parent has unwound.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_caches_scalar_callback(caches: *const Caches, parent: *const Caches) {
+pub unsafe extern "C" fn sn_caches_scalar_callback(
+    caches: *const Caches,
+    parent: *const Caches,
+    limited: i32,
+) {
     let caches = unsafe { &*caches };
     caches.deadline.set(unsafe { &*parent }.deadline.get());
     caches.scalar_callback.set(true);
+    caches.callback_checkpoints.set(limited != 0);
     caches.dynamic_calls.set(true);
     caches.runtime_order.set(true);
 }

@@ -696,6 +696,7 @@ pub struct Engine {
     tracks: Vec<bool>,
     kind_demand: Vec<KindDemand>,
     scalar_callback_depths: Vec<Option<usize>>,
+    callback_child_depths: Vec<Option<usize>>,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -1303,8 +1304,19 @@ impl Engine {
             };
             ops.push(op);
         }
-        self.kind_demand[index] = ops
+        self.nodes[index] = ops;
+        self.error_operands[index] = error_operands;
+        Ok(index)
+    }
+    fn compile_kind_demands(&mut self) {
+        self.kind_demand = self
+            .nodes
             .iter()
+            .map(|ops| self.kind_demand_for(ops))
+            .collect();
+    }
+    fn kind_demand_for(&self, ops: &[Op]) -> KindDemand {
+        ops.iter()
             .map(|op| match op {
                 Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
                     KindDemand::Predicate
@@ -1325,10 +1337,7 @@ impl Engine {
                 | Op::Conditional(..) => KindDemand::None,
             })
             .max()
-            .unwrap_or(KindDemand::None);
-        self.nodes[index] = ops;
-        self.error_operands[index] = error_operands;
-        Ok(index)
+            .unwrap_or(KindDemand::None)
     }
 }
 
@@ -1359,7 +1368,7 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         known_kind: Option<&InstanceKind>,
     ) -> Verdict {
-        if !self.budget.checkpoint() {
+        if self.caches.callback_checkpoint(value) != Valid || !self.budget.checkpoint() {
             return Unsupported;
         }
         let Some(key) = self
@@ -1412,6 +1421,7 @@ impl Execution<'_> {
         }
         if let [Op::String(required, rules)] = self.nodes[node].as_slice()
             && rules.pattern.is_some()
+            && !self.caches.scalar_callback()
         {
             return rules.eval_guarded(self.caches, *required, value);
         }
@@ -1428,10 +1438,10 @@ impl Execution<'_> {
         if self.unsupported_kind(node, kind) {
             return Unsupported;
         }
-        for (index, op) in self.nodes[node].iter().enumerate() {
-            // The callback entry checks the first opcode. Later instructions
-            // checkpoint only after prior Ruby assertions have completed.
-            if index != 0 && self.caches.callback_checkpoint(value) != Valid {
+        for op in &self.nodes[node] {
+            // Runtime observations checkpoint each reached opcode once, after
+            // earlier assertions and descendant calls have completed.
+            if self.caches.callback_checkpoint(value) != Valid {
                 return Unsupported;
             }
             if !self.budget.checkpoint() {
@@ -1484,6 +1494,11 @@ impl Execution<'_> {
                         evaluation::BranchPolicy::Validity(branch_kind),
                         self.caches.dynamic_calls(),
                         |child| {
+                            if matches!(op, Op::One(_))
+                                && self.caches.callback_checkpoint(value) != Valid
+                            {
+                                return Unsupported;
+                            }
                             self.eval_with_kind(child, value, depth + 1, active, Some(kind_state))
                         },
                     ) {
@@ -2181,6 +2196,7 @@ impl Execution<'_> {
     }
     fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
         if kind == TYPE_UNSUPPORTED
+            || self.caches.scalar_callback()
             || (self.caches.callbacks_allowed() && self.caches.dynamic_calls())
         {
             self.caches.type_predicate(value, mask, union)
@@ -2209,6 +2225,9 @@ impl Execution<'_> {
     // Diagnostic/trial paths require a full Hash-key guard. A known parent kind
     // remains reusable, while control-flow-only children need no classification.
     fn diagnostic_kind(&self, node: usize, value: Value, known: &InstanceKind) -> i32 {
+        if self.caches.scalar_callback() && self.kind_demand[node] == KindDemand::Predicate {
+            return TYPE_UNSUPPORTED;
+        }
         if known.get() != TYPE_UNCHECKED {
             return known.get();
         }
@@ -3415,6 +3434,7 @@ pub unsafe extern "C" fn sn_compile(
         e.simplify_dynamic_references();
         e.compile_memoization();
         e.compile_scalar_callback_depths();
+        e.compile_kind_demands();
         Ok::<_, Value>(())
     })) {
         Ok(Ok(())) => VERDICT_VALID,
@@ -3580,6 +3600,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let callback_depths = unsafe { &*std::ptr::addr_of!((*engine).scalar_callback_depths) };
+    let child_depths = unsafe { &*std::ptr::addr_of!((*engine).callback_child_depths) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3589,7 +3610,8 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
-        + callback_depths.capacity() * std::mem::size_of::<Option<usize>>()
+        + (callback_depths.capacity() + child_depths.capacity())
+            * std::mem::size_of::<Option<usize>>()
         + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()

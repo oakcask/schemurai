@@ -952,22 +952,26 @@ schemas. Frames preserve exception ordering, trial short circuits and error
 limits, and remain rooted during GC and private to each Ractor runner.
 Ordinary supported containers retain native size and uniqueness algorithms.
 Object validity with only count assertions needs no key scan because only its size is read.
-Contains validity can call a native scalar child from Ruby any?/count methods
-when no item-schema or unevaluated-item traversal is required. The compiler
-proof admits a nonempty sequence of Boolean/type/number/string/const/enum
-instructions, with no inherited reference bindings or exported annotations.
-Later child instructions request Ruby checkpoints after preceding assertions
-complete, preserving short circuits and exceptions rescued by enumeration. An iterative
-whole-program proof also requires reachable
-instructions to have complete runtime paths, static acyclic references and
-a depth within the native bound. Other roots retain the earlier guard before
+Contains validity can call a native child from Ruby any?/count methods when
+no item-schema or unevaluated-item traversal is required. The compiler proof
+admits scalar assertions, empty schemas, logical applicators, acyclic static
+references and container headers, including nested contains. Children need
+no inherited dynamic bindings or exported annotations. Original dynamic or
+recursive reference opcodes remain excluded from isolated children, even when
+the native compiler can simplify their target: VM scope polling is observable
+inside these callbacks. Iterative postorder analysis proves both child
+eligibility and whole-root coverage before kind demands are finalized.
+The whole-root proof requires every reachable instruction to have a runtime
+path and every reachable schema depth to remain within the native bound. Other roots retain the earlier guard before
 any new callback can run, preventing a later compatibility transfer from
 replaying an already invoked block. Earlier type predicates join ordered
 runtime observations before the first callback can mutate their instance.
 After Rust unwinds, C creates the callback. Boolean and type children dispatch
 in C, sharing the ordinary runtime type helper without allocating per-yield
-observations. Other scalar children reuse a runner with separate observations
-for each yield and a fresh runner on reentry. Shared Ruby scalar primitives
+observations. Other children reuse a runner with separate observations for
+each yield and a fresh runner on reentry. Bounded child entries, reached
+instructions and oneOf branches request Ruby checkpoints in evaluation order;
+unbounded children skip these requests. Shared Ruby scalar primitives
 preserve method dispatch even for ordinary yielded values.
 The original Ruby method can rescue child exceptions and run ensure clauses.
 Children use the VM's scalar checkpoints, while the parent retains its native

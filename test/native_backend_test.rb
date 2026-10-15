@@ -1230,14 +1230,24 @@ RSpec.describe "native VALUE execution" do
       end
     end
     values = [Class.new(Array).new([1, "a", [1]]), Class.new(Array).new, rescuing.new([BasicObject.new, 1]),
-      fake, BasicObject.new, [1, "a"], nil, {Object.new => 1}]
+      fake, BasicObject.new, [1, "a"], nil, {Object.new => 1},
+      Class.new(Array).new([Class.new(Hash)["x", 1], {1 => 2}, Class.new(Array).new([1])])]
     children = [true, false, {"type" => "integer"}, {"type" => %w[number string]}, {"type" => "array"},
       {"type" => "null"}, {"type" => "boolean"}, {"type" => "number"}, {"type" => "string"}, {"type" => "object"},
       {"type" => "integer", "const" => 1}, {"type" => %w[integer string], "enum" => [1, "a"], "const" => "a"},
       {"type" => "string", "const" => "a", "minLength" => 2}, {"enum" => [1, "a"], "maximum" => 0},
       {"maximum" => 0}, {"type" => "number", "multipleOf" => 0.1},
       {"minLength" => 2, "pattern" => "^a", "format" => "ipv4"},
-      {"contentEncoding" => "base64", "contentMediaType" => "application/json"}, {"const" => [1]}, {"enum" => [1, "a"]}]
+      {"contentEncoding" => "base64", "contentMediaType" => "application/json"}, {"const" => [1]}, {"enum" => [1, "a"]},
+      {}, {"allOf" => []}, {"anyOf" => []}, {"oneOf" => []},
+      {"allOf" => [{"type" => "integer"}, {"minimum" => 0}]},
+      {"anyOf" => [{"type" => "integer"}, {"minLength" => 2}]},
+      {"oneOf" => [{"const" => 1}, {"const" => "a"}, false]}, {"not" => {"type" => "integer"}},
+      {"if" => {"type" => "number"}, "then" => {"minimum" => 2}, "else" => {"maxLength" => 0}},
+      {"$id" => "urn:contains-child", "$defs" => {"leaf" => {"type" => "integer"}},
+       "allOf" => [{"$ref" => "urn:contains-child#/$defs/leaf"}, {"$ref" => "urn:contains-child#/$defs/leaf"}]},
+      {"maxItems" => 1, "uniqueItems" => true}, {"required" => ["x"], "dependencies" => {"x" => ["y"]}},
+      {"contains" => {"type" => "integer"}}, {"contains" => {"anyOf" => [true, false]}}]
     rules = children.flat_map do |child|
       [{"contains" => child}, {"type" => "array", "contains" => child},
         {"maxItems" => 0, "contains" => child}, {"uniqueItems" => true, "contains" => child},
@@ -1315,20 +1325,24 @@ RSpec.describe "native VALUE execution" do
       end
       budget
     end
-    schema = {"contains" => {"type" => "string", "enum" => ["a"], "const" => "a", "minLength" => 1}}
-    run = lambda do |backend, fail_at, options, text|
+    leaf = {"type" => "string", "enum" => ["a"], "const" => "a", "minLength" => 1}
+    schemas = [leaf, {}, {"allOf" => [leaf, {"const" => "a"}]}, {"anyOf" => [{"const" => "b"}, leaf]},
+      {"oneOf" => [leaf, false, leaf]}, {"not" => leaf}, {"if" => leaf, "then" => {"const" => "a"}, "else" => false},
+      {"$id" => "urn:contains-child", "$defs" => {"leaf" => leaf},
+       "allOf" => [{"$ref" => "urn:contains-child#/$defs/leaf"}, {"$ref" => "urn:contains-child#/$defs/leaf"}]}].map { |child| {"contains" => child} }
+    run = lambda do |backend, schema, fail_at, options, text|
       state = {calls: [], checks: 0, fail_at: fail_at, active: false}
       value = array.new(state, string.new(state[:calls], text))
       outcome = capture_validation(Schemurai.compile(schema, backend: backend), :valid?, value, **options)
       [outcome, state[:calls]]
     end
-    cases = ([nil] + (1..7).to_a).product([{timeout: 10}, {max_errors: 0}], %w[a b]).map do |fail_at, options, text|
-      [fail_at, options, text, run.call(:vm, fail_at, options, text)]
+    cases = schemas.product([nil] + (1..20).to_a, [{timeout: 10}, {max_errors: 0}], %w[a b]).map do |schema, fail_at, options, text|
+      [schema, fail_at, options, text, run.call(:vm, schema, fail_at, options, text)]
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
-    cases.each do |fail_at, options, text, expected|
-      expect(run.call(:native, fail_at, options, text)).to eq(expected), [fail_at, options, text].inspect
+    cases.each do |schema, fail_at, options, text, expected|
+      expect(run.call(:native, schema, fail_at, options, text)).to eq(expected), [schema, fail_at, options, text].inspect
     end
   end
 
@@ -1351,13 +1365,18 @@ RSpec.describe "native VALUE execution" do
       [{"allOf" => [rule, {"items" => true}]}, ->(value) { value }],
       [{"items" => rule}, ->(value) { [value] }],
       [{"properties" => {"v" => rule}}, ->(value) { {"v" => value} }],
-      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }]
+      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }],
+      [{"contains" => {"anyOf" => [true, {"items" => true}]}}, ->(value) { value }],
+      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"unevaluatedProperties" => true}}, ->(value) { value }],
+      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "contains" => {"$ref" => "#/$defs/loop"}}, ->(value) { value }],
+      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "integer"}},
+        "contains" => {"$dynamicRef" => "#x"}}, ->(value) { value }]
     ]
     cases.each do |schema, wrap|
       native = Schemurai.compile(schema, backend: :native)
       value = klass.new
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      expect(program.valid?(wrap.call(value))).to be_nil
+      expect(program.valid?(wrap.call(value))).to be_nil, schema.inspect
       expect(value.calls).to be_empty
       expected_value = klass.new
       expected = capture_validation(Schemurai.compile(schema, backend: :vm), :valid?, wrap.call(expected_value))
@@ -1456,8 +1475,10 @@ RSpec.describe "native VALUE execution" do
         super
       end
     end
-    schema = {"contains" => {"type" => "number", "multipleOf" => 0.1}}
-    cases = [{}, {timeout: 10}].map do |options|
+    leaf = {"type" => "number", "multipleOf" => 0.1}
+    schemas = [{"contains" => leaf}, {"contains" => {"allOf" => [leaf, {"type" => "number"}]}},
+      {"$defs" => {"leaf" => leaf}, "contains" => {"allOf" => [{"$ref" => "#/$defs/leaf"}, {"$ref" => "#/$defs/leaf"}]}}]
+    cases = schemas.product([{}, {timeout: 10}]).map do |schema, options|
       vm = Schemurai.compile(schema, backend: :vm)
       input = klass.new([0.2])
       expected = capture_validation(vm, :valid?, input, **options)
@@ -1474,6 +1495,70 @@ RSpec.describe "native VALUE execution" do
       expect(native.valid?(klass.new([0.2]), **options)).to be(true)
       expect(capture_validation(input.saved, :call, 0.3)).to eq(expected_later.first)
     end
+  end
+
+  it "retains nested contains callbacks in their original scope through compaction" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :saved
+
+      def any?(&block)
+        @saved = block
+        super
+      end
+    end
+    schema = {"contains" => {"allOf" => [{"contains" => {"type" => "integer"}}, {"minItems" => 1}]}}
+    run = lambda do |backend, options|
+      inner = array.new([1])
+      outer = array.new([inner])
+      validator = Schemurai.compile(schema, backend: backend)
+      result = capture_validation(validator, :valid?, outer, **options)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      [result, capture_validation(inner.saved, :call, 2), capture_validation(inner.saved, :call, "bad"),
+        capture_validation(outer.saved, :call, array.new([3])), capture_validation(inner.saved, :call, 4)]
+    end
+    cases = [{}, {timeout: 10}].map { |options| [options, run.call(:vm, options)] }
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |options, expected| expect(run.call(:native, options)).to eq(expected) }
+  end
+
+  it "keeps nested saved contains blocks active until the outer invocation returns" do # rubocop:disable RSpec/ExampleLength
+    inner_class = Class.new(Array) do
+      attr_reader :saved
+
+      def any?(&block)
+        @saved = block
+        super
+      end
+    end
+    outer_class = Class.new(Array) do
+      def initialize(inner, calls)
+        super([inner])
+        @calls = calls
+      end
+
+      def any?
+        result = yield first
+        GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+        @calls << first.saved.call(2)
+        result
+      rescue NoMethodError => error
+        @calls << error.class
+        false
+      end
+    end
+    schema = {"contains" => {"contains" => {"type" => "integer"}}}
+    run = lambda do |backend, options|
+      calls = []
+      inner = inner_class.new([1])
+      value = outer_class.new(inner, calls)
+      result = capture_validation(Schemurai.compile(schema, backend: backend), :valid?, value, **options)
+      [result, calls, capture_validation(inner.saved, :call, 3)]
+    end
+    cases = [{}, {timeout: 10}].map { |options| [options, run.call(:vm, options)] }
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |options, expected| expect(run.call(:native, options)).to eq(expected) }
   end
 
   it "shares contains scalar caches with the owning evaluator across invocations" do # rubocop:disable RSpec/ExampleLength
@@ -1665,16 +1750,20 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "keeps native contains callbacks private to independent Ractor runners" do
-    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:contains" => {"contains" => {"type" => "integer"}}}, backend: :native).make_shareable
+    schemas = {"urn:contains" => {"contains" => {"type" => "integer"}},
+               "urn:composite-contains" => {"contains" => {"allOf" => [{"type" => "integer"}, {"minimum" => 0}]}}}
+    registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
     workers = Array.new(2) do
       Ractor.new(registry) do |shared|
-        runner = shared.validator_for("urn:contains").instance_variable_get(:@evaluator).instance_variable_get(:@program)
-        klass = Class.new(Array)
-        GC.start
-        [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+        %w[urn:contains urn:composite-contains].map do |uri|
+          runner = shared.validator_for(uri).instance_variable_get(:@evaluator).instance_variable_get(:@program)
+          klass = Class.new(Array)
+          GC.start
+          [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+        end
       end
     end
-    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, true]) }
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([[true, false, true], [true, false, true]]) }
   end
 
   it "preserves dependency triggers, key occurrences and message exceptions" do # rubocop:disable RSpec/ExampleLength
