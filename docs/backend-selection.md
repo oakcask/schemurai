@@ -484,8 +484,13 @@ half the slots remain empty. Collisions advance through consecutive
 slots, wrapping at the capacity boundary. Every fingerprint
 collision is resolved with exact JSON equality. Small arrays use direct
 comparisons. Native index storage is capped at 64 MiB and uses fallible
-allocation. Larger indexes or allocation failures delegate to the VM instead
-of aborting the process.
+allocation. When a fingerprint is unavailable or index allocation is declined,
+native evaluation first proves the input graph contains only ordinary,
+acyclic values, then uses the same ordered direct comparisons as small arrays.
+The proof uses an explicit stack without the fingerprint depth bound. Special
+or cyclic values still delegate, preserving Ruby fingerprint callbacks and errors.
+This can take quadratic work but does not require VM execution for ordinary
+JSON values.
 Container equality visits nested values
 even when both operands are the same Ruby object, preserving VM behavior for
 NaN and unsupported nested values. Arrays beginning with a Bignum use a
@@ -632,7 +637,14 @@ key equality; value identity plus depth keys fingerprints. The first four
 relative levels skip cache bookkeeping for shallow ordinary trees. Deeper
 shared graphs can reuse whole subtrees, including nonadjacent repeated children,
 without treating identical containers as automatically equal: NaN descendants,
-unsupported children, key validation and depth fallback retain their behavior.
+unsupported children and key validation retain their behavior.
+Equality keeps its bounded recursive prefix for shallow comparisons and uses
+explicit continuations beyond depth 256. Both traversals share scalar equality
+and numeric comparison rules, and preserve depth-first Array/Hash order.
+Continuations and active-pair tracking use native storage proportional to the
+deep traversal; cyclic comparisons still delegate for Ruby's stack-error
+behavior. Fingerprinting and schema evaluation retain their separate depth
+guards, so this change removes the equality depth limit only.
 Each cache retains at most 4,096 results with FIFO eviction and is discarded
 before another comparison/hash or Ruby callback. This bounds auxiliary storage;
 it does not guarantee polynomial traversal for arbitrary graphs whose reusable

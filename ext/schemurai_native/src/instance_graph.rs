@@ -82,3 +82,81 @@ unsafe extern "C" fn entry(context: *mut c_void, _key: Value, value: Value) -> i
     }))
     .unwrap_or(VERDICT_INVALID)
 }
+
+enum Work {
+    Visit(Value),
+    Finish(Value),
+}
+
+// A failed fingerprint may indicate either an optimization bound or Ruby
+// behavior that native equality must not skip. Prove the entire input is
+// ordinary and acyclic before substituting direct comparisons for hashing.
+// Unlike the memoization hint above, this rare path needs no depth/visit cap.
+pub(super) fn ordinary_acyclic(value: Value, budget: &budget::Budget) -> bool {
+    let mut work = vec![Work::Visit(value)];
+    let mut states = HashMap::new();
+    while let Some(task) = work.pop() {
+        if !budget.checkpoint() {
+            return false;
+        }
+        match task {
+            Work::Finish(value) => {
+                states.insert(value, true);
+            }
+            Work::Visit(value) => {
+                if let Some(&done) = states.get(&value) {
+                    if !done {
+                        return false;
+                    }
+                    continue;
+                }
+                match unsafe { sn_kind(value) } {
+                    TYPE_UNSUPPORTED => return false,
+                    TYPE_ARRAY => {
+                        states.insert(value, false);
+                        work.push(Work::Finish(value));
+                        for i in (0..unsafe { sn_len(value) }).rev() {
+                            work.push(Work::Visit(unsafe { sn_entry(value, i) }));
+                        }
+                    }
+                    TYPE_OBJECT => {
+                        states.insert(value, false);
+                        work.push(Work::Finish(value));
+                        let mut context = OrdinaryWalk {
+                            work: &mut work,
+                            budget,
+                        };
+                        if unsafe {
+                            sn_hash_each(
+                                value,
+                                (&mut context as *mut OrdinaryWalk<'_>).cast(),
+                                ordinary_entry,
+                            )
+                        } != VERDICT_VALID
+                        {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    true
+}
+
+struct OrdinaryWalk<'a> {
+    work: &'a mut Vec<Work>,
+    budget: &'a budget::Budget,
+}
+unsafe extern "C" fn ordinary_entry(context: *mut c_void, _: Value, value: Value) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let context = unsafe { &mut *context.cast::<OrdinaryWalk<'_>>() };
+        if !context.budget.checkpoint() {
+            return VERDICT_UNSUPPORTED;
+        }
+        context.work.push(Work::Visit(value));
+        VERDICT_VALID
+    }))
+    .unwrap_or(VERDICT_UNSUPPORTED)
+}

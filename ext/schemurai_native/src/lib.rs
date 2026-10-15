@@ -2038,77 +2038,19 @@ fn equal_cached(
         return Unsupported;
     }
     if depth > MAX_EVALUATION_DEPTH {
-        return Unsupported;
+        return equal_iterative(a, b, depth, memo, budget);
     }
-    let (ka, kb) = unsafe { (sn_kind(a), sn_kind(b)) };
-    if ka == TYPE_UNSUPPORTED || kb == TYPE_UNSUPPORTED {
-        return Unsupported;
-    }
-    if ka & TYPE_NUMBER != 0 && kb & TYPE_NUMBER != 0 {
-        let (ia, ib) = unsafe { (sn_fixnum(a) != 0, sn_fixnum(b) != 0) };
-        let (fa, fb) = unsafe { (sn_is_float(a) != 0, sn_is_float(b) != 0) };
-        if ia && ib {
-            return verdict(unsafe { sn_integer(a) == sn_integer(b) });
-        }
-        if fa && fb {
-            return verdict(unsafe { sn_float(a) == sn_float(b) });
-        }
-        if (ia && fb) || (fa && ib) {
-            let (n, f) = unsafe {
-                if ia {
-                    (sn_integer(a), sn_float(b))
-                } else {
-                    (sn_integer(b), sn_float(a))
-                }
-            };
-            // Convert the float to an integer, never the integer to a rounded float.
-            // Fixnums are strictly inside i64's bounds on supported CRuby targets.
-            return verdict(
-                f.is_finite()
-                    && f.trunc() == f
-                    && f >= i64::MIN as f64
-                    && f < i64::MAX as f64
-                    && f as i64 == n,
-            );
-        }
-        if !fa && !fb {
-            return verdict(
-                unsafe {
-                    if ia {
-                        sn_big_equal(b, a)
-                    } else {
-                        sn_big_equal(a, b)
-                    }
-                } != 0,
-            );
-        }
-        return if fa {
-            number::integer_float_equal(b, unsafe { sn_float(a) })
-        } else {
-            number::integer_float_equal(a, unsafe { sn_float(b) })
-        };
-    }
-    // JSON container equality visits every value, even for the same object:
-    // nested NaN values are unequal and unsupported values need VM evaluation.
-    if ka != TYPE_ARRAY && ka != TYPE_OBJECT && unsafe { sn_same(a, b) } != 0 {
-        return Valid;
-    }
-    if ka != kb {
-        return Invalid;
-    }
-    if unsafe { sn_same_class(a, b) } == 0 {
-        return Invalid;
-    }
-    let container = ka == TYPE_ARRAY || ka == TYPE_OBJECT;
+    let ka = match equality_kind(a, b) {
+        Ok(kind) => kind,
+        Err(result) => return result,
+    };
     let key = (a, b, depth);
-    if container
-        && memo.eligible(depth)
+    if memo.eligible(depth)
         && let Some(result) = memo.get(key)
     {
         return result;
     }
     let result = match ka {
-        TYPE_STRING => verdict(unsafe { sn_string_equal(a, b) } != 0),
         TYPE_ARRAY => {
             let len = unsafe { sn_len(a) };
             if len != unsafe { sn_len(b) } {
@@ -2146,14 +2088,200 @@ fn equal_cached(
                 )
             })
         }
-        TYPE_UNSUPPORTED => Unsupported,
-        _ => Invalid,
+        _ => unreachable!("equality_kind returns only container kinds"),
     };
-    if container && memo.eligible(depth) {
+    if memo.eligible(depth) {
         memo.record(key, result);
     }
     result
 }
+
+// Resolve scalar equality once for both recursive and explicit-stack traversal.
+// Only ordinary equal-class containers require child traversal.
+fn equality_kind(a: Value, b: Value) -> Result<i32, Verdict> {
+    let (ka, kb) = unsafe { (sn_kind(a), sn_kind(b)) };
+    if ka == TYPE_UNSUPPORTED || kb == TYPE_UNSUPPORTED {
+        return Err(Unsupported);
+    }
+    if ka & TYPE_NUMBER != 0 && kb & TYPE_NUMBER != 0 {
+        let (ia, ib) = unsafe { (sn_fixnum(a) != 0, sn_fixnum(b) != 0) };
+        let (fa, fb) = unsafe { (sn_is_float(a) != 0, sn_is_float(b) != 0) };
+        if ia && ib {
+            return Err(verdict(unsafe { sn_integer(a) == sn_integer(b) }));
+        }
+        if fa && fb {
+            return Err(verdict(unsafe { sn_float(a) == sn_float(b) }));
+        }
+        if (ia && fb) || (fa && ib) {
+            let (n, f) = unsafe {
+                if ia {
+                    (sn_integer(a), sn_float(b))
+                } else {
+                    (sn_integer(b), sn_float(a))
+                }
+            };
+            // Convert the float to an integer, never the integer to a rounded float.
+            // Fixnums are strictly inside i64's bounds on supported CRuby targets.
+            return Err(verdict(
+                f.is_finite()
+                    && f.trunc() == f
+                    && f >= i64::MIN as f64
+                    && f < i64::MAX as f64
+                    && f as i64 == n,
+            ));
+        }
+        if !fa && !fb {
+            return Err(verdict(
+                unsafe {
+                    if ia {
+                        sn_big_equal(b, a)
+                    } else {
+                        sn_big_equal(a, b)
+                    }
+                } != 0,
+            ));
+        }
+        return Err(if fa {
+            number::integer_float_equal(b, unsafe { sn_float(a) })
+        } else {
+            number::integer_float_equal(a, unsafe { sn_float(b) })
+        });
+    }
+    // JSON container equality visits every value, even for the same object:
+    // nested NaN values are unequal and unsupported values need VM evaluation.
+    if ka != TYPE_ARRAY && ka != TYPE_OBJECT && unsafe { sn_same(a, b) } != 0 {
+        return Err(Valid);
+    }
+    if ka != kb {
+        return Err(Invalid);
+    }
+    if unsafe { sn_same_class(a, b) } == 0 {
+        return Err(Invalid);
+    }
+    match ka {
+        TYPE_ARRAY | TYPE_OBJECT => Ok(ka),
+        TYPE_STRING => Err(verdict(unsafe { sn_string_equal(a, b) } != 0)),
+        _ => Err(Invalid),
+    }
+}
+
+enum EqualityWork {
+    Compare(Value, Value, usize),
+    Array(Value, Value, usize, usize, usize),
+    Object(Value, Vec<(Value, Value)>, usize, usize),
+    Finish(Value, Value, usize),
+}
+
+// Keep shallow comparisons on their allocation-free recursive path. Beyond
+// that bounded prefix, explicit continuations preserve depth-first order
+// without growing the native call stack. Scalar rules remain shared above.
+fn equal_iterative(
+    a: Value,
+    b: Value,
+    depth: usize,
+    memo: &mut structural::Cache<(Value, Value, usize), Verdict>,
+    budget: &budget::Budget,
+) -> Verdict {
+    let mut work = vec![EqualityWork::Compare(a, b, depth)];
+    let mut active = std::collections::HashSet::new();
+    while let Some(task) = work.pop() {
+        if !budget.checkpoint() {
+            return Unsupported;
+        }
+        match task {
+            EqualityWork::Compare(a, b, depth) => {
+                let kind = match equality_kind(a, b) {
+                    Ok(kind) => kind,
+                    Err(Valid) => continue,
+                    Err(result) => return result,
+                };
+                let key = (a, b, depth);
+                if memo.eligible(depth)
+                    && let Some(result) = memo.get(key)
+                {
+                    if result != Valid {
+                        return result;
+                    }
+                    continue;
+                }
+                let len = unsafe { sn_len(a) };
+                if len != unsafe { sn_len(b) } {
+                    return Invalid;
+                }
+                // Cyclic equality still needs Ruby's stack-error behavior.
+                // Do not turn an infinitely recursive comparison into success.
+                if !active.insert((a, b)) {
+                    return Unsupported;
+                }
+                work.push(EqualityWork::Finish(a, b, depth));
+                if len == 0 {
+                    continue;
+                }
+                if kind == TYPE_ARRAY {
+                    work.push(EqualityWork::Array(a, b, 0, len, depth + 1));
+                } else {
+                    let mut entries = EqualityEntries {
+                        values: Vec::with_capacity(len),
+                        budget,
+                    };
+                    let status = decode(unsafe {
+                        sn_hash_each(
+                            a,
+                            (&mut entries as *mut EqualityEntries<'_>).cast(),
+                            equality_entry,
+                        )
+                    });
+                    if status != Valid {
+                        return status;
+                    }
+                    work.push(EqualityWork::Object(b, entries.values, 0, depth + 1));
+                }
+            }
+            EqualityWork::Array(a, b, index, len, depth) => {
+                let pair = unsafe { (sn_entry(a, index), sn_entry(b, index)) };
+                if index + 1 < len {
+                    work.push(EqualityWork::Array(a, b, index + 1, len, depth));
+                }
+                work.push(EqualityWork::Compare(pair.0, pair.1, depth));
+            }
+            EqualityWork::Object(b, entries, index, depth) => {
+                let (key, value) = entries[index];
+                let other = unsafe { sn_lookup(b, key) };
+                if unsafe { sn_missing(other) } != 0 {
+                    return Invalid;
+                }
+                if index + 1 < entries.len() {
+                    work.push(EqualityWork::Object(b, entries, index + 1, depth));
+                }
+                work.push(EqualityWork::Compare(value, other, depth));
+            }
+            EqualityWork::Finish(a, b, depth) => {
+                active.remove(&(a, b));
+                if memo.eligible(depth) {
+                    memo.record((a, b, depth), Valid);
+                }
+            }
+        }
+    }
+    Valid
+}
+
+struct EqualityEntries<'a> {
+    values: Vec<(Value, Value)>,
+    budget: &'a budget::Budget,
+}
+unsafe extern "C" fn equality_entry(context: *mut c_void, key: Value, value: Value) -> i32 {
+    catch_unwind(AssertUnwindSafe(|| {
+        let entries = unsafe { &mut *context.cast::<EqualityEntries<'_>>() };
+        if !entries.budget.checkpoint() {
+            return Unsupported as i32;
+        }
+        entries.values.push((key, value));
+        Valid as i32
+    }))
+    .unwrap_or(Unsupported as i32)
+}
+
 fn decode(result: i32) -> Verdict {
     match result {
         VERDICT_INVALID => Invalid,
@@ -2427,21 +2555,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         return Unsupported;
     }
     if len <= 16 {
-        for i in 0..len {
-            for previous in 0..i {
-                match equal_budgeted(
-                    unsafe { sn_entry(value, previous) },
-                    unsafe { sn_entry(value, i) },
-                    depth,
-                    budget,
-                ) {
-                    Valid => return Invalid,
-                    Unsupported => return Unsupported,
-                    Invalid => {}
-                }
-            }
-        }
-        return Valid;
+        return unique_linear(value, depth, budget);
     }
     let values = unsafe { std::slice::from_raw_parts(sn_array_data(value), len) };
     // This is a checked optimization hint, not an instance shape assumption.
@@ -2460,7 +2574,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         }
     }
     let mut fingerprints = structural::Cache::batch(depth);
-    indexed_unique(
+    let result = indexed_unique(
         values,
         |item| {
             fingerprint_cached(
@@ -2473,7 +2587,34 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
             )
         },
         |a, b| equal_budgeted(a, b, depth, budget),
-    )
+    );
+    if result == Unsupported
+        && budget.checkpoint()
+        && instance_graph::ordinary_acyclic(value, budget)
+    {
+        unique_linear(value, depth, budget)
+    } else {
+        result
+    }
+}
+// Index availability is an optimization decision. Exact ordered comparisons
+// can still decide uniqueness when a depth or memory bound declines hashing.
+fn unique_linear(value: Value, depth: usize, budget: &budget::Budget) -> Verdict {
+    for i in 0..unsafe { sn_len(value) } {
+        for previous in 0..i {
+            match equal_budgeted(
+                unsafe { sn_entry(value, previous) },
+                unsafe { sn_entry(value, i) },
+                depth,
+                budget,
+            ) {
+                Valid => return Invalid,
+                Unsupported => return Unsupported,
+                Invalid => {}
+            }
+        }
+    }
+    Valid
 }
 // Keep Big-only sampling and retry state out of the common scalar path.
 #[inline(never)]
