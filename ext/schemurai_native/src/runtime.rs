@@ -1,5 +1,6 @@
 //! Runner-owned search caches and observations requested outside Rust frames.
 use super::*;
+mod reports;
 mod scopes;
 use regex_automata::{
     Input,
@@ -32,6 +33,8 @@ pub struct Caches {
     continuations_allowed: std::cell::Cell<bool>,
     pending_contains: std::cell::Cell<Option<ContainsArguments>>,
     scopes: scopes::Scopes,
+    reports: reports::Reports,
+    report_continuations_allowed: std::cell::Cell<bool>,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -92,6 +95,7 @@ unsafe extern "C" {
 impl Caches {
     fn reset_pass(&self) {
         self.scopes.reset();
+        self.reports.reset();
         self.pending.set(None);
         self.call_cursor.set(0);
         self.pending_pointer.set(None);
@@ -140,6 +144,39 @@ impl Caches {
     }
     pub(super) fn continuations_allowed(&self) -> bool {
         self.continuations_allowed.get()
+    }
+    pub(super) fn allow_report_continuations(&self, allowed: bool) {
+        self.report_continuations_allowed.set(allowed);
+    }
+    pub(super) fn report_continuations_allowed(&self) -> bool {
+        self.report_continuations_allowed.get()
+    }
+    pub(super) fn initial_report(&self) -> Option<diagnostics::Report> {
+        self.reports.initial()
+    }
+    pub(super) fn report_child(
+        &self,
+        node: usize,
+        value: Value,
+        report: &mut diagnostics::Report,
+        annotations: bool,
+    ) -> Result<tracking::Tracked, Verdict> {
+        let ordinal = self.next_call()?;
+        if self.observe(ordinal, value, RUNTIME_NATIVE_REPORT) == Unsupported {
+            self.reports
+                .request(ordinal, report.continuation(annotations));
+            self.pending_contains.set(Some(ContainsArguments {
+                rules: unsafe { sn_nil() },
+                instance: value,
+                child: node,
+                required: 0,
+                scalar_kind: CALLBACK_RUNTIME,
+                scalar_flags: 0,
+            }));
+            return Err(Unsupported);
+        }
+        let completed = self.reports.result(ordinal).ok_or(Unsupported)?;
+        Ok(report.adopt(completed))
     }
     pub(super) fn native_child(&self, child: usize, instance: Value) -> Verdict {
         self.children_request(
@@ -581,6 +618,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         + unsafe { &*caches_ptr }.scopes.size()
         + rescued
         + messages
+        + unsafe { &*caches_ptr }.reports.memory_usage()
         + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
         + caches
@@ -631,6 +669,8 @@ pub unsafe extern "C" fn sn_caches_take_reorder(caches: *const Caches) -> i32 {
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.scopes.clear();
+    caches.reports.clear();
+    caches.report_continuations_allowed.set(false);
     caches.reset_pass();
     caches.deadline.set(None);
     caches.runtime_order.set(false);
@@ -724,6 +764,7 @@ pub unsafe extern "C" fn sn_contains_arguments(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
     unsafe { &*caches }.scopes.mark();
+    unsafe { &*caches }.reports.mark();
     if let Some(arguments) = unsafe { &*caches }.pending_contains.get() {
         unsafe {
             sn_pin(arguments.rules);

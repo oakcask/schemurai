@@ -153,6 +153,7 @@ typedef struct { size_t max_errors; uint32_t enabled; double timeout; } native_l
 typedef struct {
     VALUE owner, parent, active_budget, callback_scope, child_callbacks;
     VALUE scope_state, active_scope_state;
+    VALUE report_seed, report_results;
     VALUE ref_state, vm_active, active_ref_state, active_vm_state;
     int continuation, scalar_mode;
     VALUE regexps, limited_regexps, pointers, messages, frames;
@@ -193,6 +194,8 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->active_budget);
     rb_gc_mark(r->callback_scope);
     rb_gc_mark(r->child_callbacks);
+    rb_gc_mark(r->report_seed);
+    rb_gc_mark(r->report_results);
     rb_gc_mark(r->scope_state);
     rb_gc_mark(r->active_scope_state);
     rb_gc_mark(r->ref_state);
@@ -309,6 +312,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->active_budget = Qnil;
     r->callback_scope = Qnil;
     r->child_callbacks = Qnil;
+    r->report_seed = r->report_results = Qnil;
     r->scope_state = Qnil;
     r->active_scope_state = Qnil;
     r->ref_state = r->vm_active = r->active_ref_state = r->active_vm_state = Qnil;
@@ -731,6 +735,9 @@ extern size_t sn_report_size(const void *);
 extern void sn_report_record(const void *, size_t, diagnostic_record *);
 extern void sn_report_mark(const void *);
 extern void sn_report_free(void *);
+extern void *sn_report_seed(const void *);
+extern void sn_report_inherit(const void *, const void *);
+extern void sn_report_accept(const void *, const void *);
 static void report_mark(void *ptr) {
     report_holder *h = ptr;
     if (h->report) sn_report_mark(h->report);
@@ -782,6 +789,7 @@ static VALUE clear_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     st_foreach(call->runner->matches, release_operation, 0);
     st_clear(call->runner->matches);
+    call->runner->report_results = Qnil;
     call->runner->pointers = Qnil;
     call->runner->messages = Qnil;
     call->runner->frames = Qnil;
@@ -1037,10 +1045,36 @@ static VALUE call_runtime(VALUE context) {
         || (r->callback_context && (!r->continuation || r->scalar_mode))
         || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
         || operation->kind == SN_RUNTIME_ARRAY_CHILDREN || operation->kind == SN_RUNTIME_OBJECT_CHILDREN
-        || operation->kind == SN_RUNTIME_NATIVE_CHILD;
+        || operation->kind == SN_RUNTIME_NATIVE_CHILD || operation->kind == SN_RUNTIME_NATIVE_REPORT;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
+        return Qtrue;
+    }
+    if (operation->kind == SN_RUNTIME_NATIVE_REPORT) {
+        contains_arguments arguments;
+        sn_contains_arguments(r->caches, &arguments);
+        report_holder *seed;
+        VALUE seed_object = TypedData_Make_Struct(rb_cObject, report_holder, &report_type, seed);
+        seed->report = NULL;
+        seed->report = sn_report_seed(r->caches);
+        VALUE callback = build_runner(r->owner, arguments.child);
+        runner_holder *child;
+        TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+        child->parent = callback_scope(call);
+        child->callback_context = child->continuation = 1;
+        child->scalar_mode = sn_caches_is_scalar(r->caches);
+        child->report_seed = seed_object;
+        VALUE result = evaluate_runner(callback, instance, call->budget, 2);
+        if (NIL_P(result)) rb_raise(rb_eRuntimeError, "native report continuation lost its coverage proof");
+        if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
+        rb_ary_push(r->report_results, result);
+        report_holder *completed;
+        TypedData_Get_Struct(result, report_holder, &report_type, completed);
+        sn_report_accept(r->caches, completed->report);
+        RB_GC_GUARD(result);
+        RB_GC_GUARD(seed_object);
+        RB_GC_GUARD(callback);
         return Qtrue;
     }
     if (operation->kind == SN_RUNTIME_NATIVE_CHILD) {
@@ -1252,6 +1286,11 @@ static VALUE evaluate_runner_body(VALUE context) {
     }
     clear_runtime((VALUE)&call);
     r->active_budget = budget;
+    if (!NIL_P(r->report_seed)) {
+        report_holder *seed;
+        TypedData_Get_Struct(r->report_seed, report_holder, &report_type, seed);
+        sn_report_inherit(r->caches, seed->report);
+    }
     if (!NIL_P(r->parent)) {
         runner_holder *parent;
         TypedData_Get_Struct(r->parent, runner_holder, &runner_type, parent);
@@ -1298,6 +1337,11 @@ static VALUE evaluate_runner_body(VALUE context) {
         RB_GC_GUARD(instance);
         RB_GC_GUARD(self);
         return result;
+    }
+    if (diagnostics == 2) {
+        RB_GC_GUARD(instance);
+        RB_GC_GUARD(self);
+        return owner;
     }
     size_t count = sn_report_len(h->report);
     VALUE output = rb_ary_new_capa(count);
@@ -1348,6 +1392,7 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         child->callback_context = runner->callback_context;
         child->continuation = runner->continuation;
         child->scalar_mode = runner->scalar_mode;
+        child->report_seed = runner->report_seed;
         child->scope_state = runner->scope_state;
         child->ref_state = runner->ref_state;
         child->vm_active = runner->vm_active;

@@ -991,8 +991,25 @@ state and callback execution mode. Ordinary validity continuations keep native
 budget polling; continuations within Ruby iteration blocks preserve those
 blocks' Ruby checkpoint boundaries. No extra schema-entry checkpoint is emitted
 before suspending. Saved callbacks retain their original cache/budget scope and
-start a fresh native stack when called later. Tracked validity and detailed
-error callbacks still need a separate continuation/result protocol.
+start a fresh native stack when called later.
+
+Detailed collection now has an owned report continuation protocol as well. Its
+snapshot includes both pointer prefixes, prior errors, reserved-error count,
+limits and silent/annotation policy. C starts another native collector only
+after Rust unwinds, and roots the seed and completed report as TypedData.
+Parent replay adopts the complete report and its independent verdict/location
+buffers together. Error counts alone never stand in for the child's verdict.
+Public top-level reports discard returned location buffers after consumption;
+only internal results retain them for their parent. Report marking includes
+unrendered pointer names and location keys, and memory reporting includes the
+owned buffers.
+The initial detailed admission covers scalar assertions, container headers,
+logical applicators and resolved references, including long circuits. Roots
+reaching other container traversals retain their guard before new native report
+calls can expose Ruby side effects. Full container diagnostic and annotation
+callbacks remain separate cases. Owned prefix/error snapshots add cold-path
+copying and storage; substantially larger deep error workloads may need a
+shared error log or result deltas.
 Callback scopes use an evaluator-owned live Ruby resource Array. Before each
 Ruby request, native execution publishes an owned scope snapshot after Rust
 unwinds. Changed scope contents are recorded with the request and replayed with
@@ -1044,7 +1061,7 @@ and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Special Arrays and Hashes, including subclasses, singleton methods and
 nonstandard keys, can still delegate when child graphs contain unresolved references or require
-evaluated-location export. Tracked or detailed schema evaluation beyond the native
+evaluated-location export. Tracked or detailed container evaluation beyond the native
 stack bound and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
