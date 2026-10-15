@@ -13,12 +13,20 @@ pub struct Caches {
     pending: std::cell::Cell<Option<(Value, Value, i32)>>,
     deadline: std::cell::Cell<Option<std::time::Instant>>,
     runtime_order: std::cell::Cell<bool>,
-    dynamic_types: std::cell::Cell<bool>,
-    type_cursor: std::cell::Cell<usize>,
+    dynamic_calls: std::cell::Cell<bool>,
+    call_cursor: std::cell::Cell<usize>,
     pointers: std::cell::RefCell<Pointers>,
     pending_pointer: std::cell::Cell<Option<usize>>,
     messages: std::cell::RefCell<HashMap<Message, Option<Value>>>,
     pending_message: std::cell::Cell<Option<Message>>,
+    pending_number: std::cell::Cell<Option<NumberArguments>>,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NumberArguments {
+    ordinal: Value,
+    rules: Value,
+    instance: Value,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Message {
@@ -91,21 +99,39 @@ impl Caches {
         // Qundef cannot be a Ruby pattern operand, including malformed schemas.
         self.observe(unsafe { sn_undefined() }, value, RUNTIME_JSON)
     }
-    pub(super) fn dynamic_types(&self) -> bool {
-        self.dynamic_types.get()
+    pub(super) fn dynamic_calls(&self) -> bool {
+        self.dynamic_calls.get()
+    }
+    fn next_call(&self) -> Result<Value, Verdict> {
+        self.dynamic_calls.set(true);
+        let ordinal = self.call_cursor.get();
+        if ordinal > (isize::MAX >> 1) as usize {
+            return Err(Unsupported);
+        }
+        self.call_cursor.set(ordinal + 1);
+        Ok(unsafe { sn_runtime_ordinal(ordinal) })
     }
     pub(super) fn type_predicate(&self, value: Value, mask: i32, union: bool) -> Verdict {
-        self.dynamic_types.set(true);
-        let ordinal = self.type_cursor.get();
-        if ordinal > (isize::MAX >> 1) as usize {
+        let Ok(ordinal) = self.next_call() else {
             return Unsupported;
-        }
-        self.type_cursor.set(ordinal + 1);
-        self.observe(
-            unsafe { sn_runtime_ordinal(ordinal) },
-            value,
-            RUNTIME_TYPE + mask * 2 + i32::from(union),
-        )
+        };
+        self.observe(ordinal, value, RUNTIME_TYPE + mask * 2 + i32::from(union))
+    }
+    pub(super) fn number(
+        &self,
+        rules: Value,
+        instance: Value,
+        required: i32,
+    ) -> Result<NumberFrame<'_>, Verdict> {
+        Ok(NumberFrame {
+            caches: self,
+            arguments: NumberArguments {
+                ordinal: self.next_call()?,
+                rules,
+                instance,
+            },
+            required,
+        })
     }
     pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
         self.observe(name, value, RUNTIME_REQUIRED_MISSING)
@@ -190,6 +216,31 @@ impl Caches {
         Unsupported
     }
 }
+pub(super) struct NumberFrame<'a> {
+    caches: &'a Caches,
+    arguments: NumberArguments,
+    required: i32,
+}
+impl NumberFrame<'_> {
+    pub(super) fn step(&self, step: i32) -> Verdict {
+        let result = self.caches.observe(
+            self.arguments.ordinal,
+            self.arguments.instance,
+            RUNTIME_NUMBER + step * 64 + self.required,
+        );
+        if result == Unsupported {
+            self.caches.pending_number.set(Some(self.arguments));
+        }
+        result
+    }
+    pub(super) fn predicate(&self, step: i32) -> Result<bool, Verdict> {
+        match self.step(step) {
+            Valid => Ok(true),
+            Invalid => Ok(false),
+            Unsupported => Err(Unsupported),
+        }
+    }
+}
 /// # Safety
 /// Caches must be null or the currently active runner's caches, and klass one
 /// of the exact identity scalar classes. No Ruby allocation is performed here.
@@ -258,9 +309,10 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
     let caches = unsafe { &*caches };
     caches.matches.set(matches);
     caches.pending.set(None);
-    caches.type_cursor.set(0);
+    caches.call_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.pending_message.set(None);
+    caches.pending_number.set(None);
 }
 /// # Safety
 /// Caches must be live and called only between complete validation calls.
@@ -268,14 +320,15 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
-    caches.type_cursor.set(0);
+    caches.call_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.deadline.set(None);
     caches.runtime_order.set(false);
-    caches.dynamic_types.set(false);
+    caches.dynamic_calls.set(false);
     *caches.pointers.borrow_mut() = Pointers::default();
     *caches.messages.borrow_mut() = HashMap::new();
     caches.pending_message.set(None);
+    caches.pending_number.set(None);
 }
 /// # Safety
 /// Caches must be live and no Rust evaluation may be active.
@@ -283,9 +336,10 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
 pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
-    caches.type_cursor.set(0);
+    caches.call_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.pending_message.set(None);
+    caches.pending_number.set(None);
     caches.runtime_order.set(true);
 }
 /// # Safety
@@ -334,6 +388,12 @@ pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
                     sn_pin(*value);
                 }
             }
+        }
+    }
+    if let Some(number) = unsafe { &*caches }.pending_number.get() {
+        unsafe {
+            sn_pin(number.rules);
+            sn_pin(number.instance);
         }
     }
     if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
@@ -423,6 +483,15 @@ pub unsafe extern "C" fn sn_message_result(caches: *const Caches, result: Value)
         .messages
         .borrow_mut()
         .insert(caches.pending_message.get().unwrap(), Some(result));
+}
+
+/// # Safety
+/// Caches must have a pending number request and output must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_number_arguments(caches: *const Caches, output: *mut NumberArguments) {
+    unsafe {
+        *output = (&*caches).pending_number.get().unwrap();
+    }
 }
 
 #[cfg(test)]

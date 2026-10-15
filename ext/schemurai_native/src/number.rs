@@ -394,6 +394,7 @@ impl Limit {
 }
 #[derive(Debug)]
 pub(super) struct Rules {
+    source: Value,
     limits: Vec<(i32, Limit)>,
     multiple: Option<Limit>,
     pub(super) fast_limits: Option<Vec<(i32, i64)>>,
@@ -510,6 +511,7 @@ impl Engine {
         let runtime_operands = limits.iter().any(|(_, limit)| limit.null)
             || multiple.as_ref().is_some_and(|limit| limit.null);
         Ok(Some(Rules {
+            source: operand,
             runtime_operands,
             limits,
             multiple,
@@ -770,6 +772,52 @@ fn wide_float_tie(value: Value, rounded: f64) -> Option<Ordering> {
 impl Rules {
     // Shared by validity scans and diagnostic prechecks. Numeric traversal
     // borrows only opaque VALUEs and uses the compiled primitive shortcuts.
+    pub(super) fn runtime_valid(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+    ) -> Verdict {
+        caches
+            .number(self.source, value, required)
+            .map_or(Unsupported, |frame| frame.step(0))
+    }
+    pub(super) fn runtime_failures(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+        mut visit: impl FnMut(&'static str) -> Result<(), Verdict>,
+    ) -> Result<(), Verdict> {
+        let frame = caches.number(self.source, value, required)?;
+        if !frame.predicate(1)? {
+            if required != 0 {
+                visit("type")?;
+            }
+            return Ok(());
+        }
+        if required == TYPE_INTEGER && !frame.predicate(2)? {
+            visit("type")?;
+        }
+        if frame.step(3) != Valid {
+            return Err(Unsupported);
+        }
+        for (bit, keyword, step) in [
+            (MAXIMUM, "maximum", 4),
+            (MINIMUM, "minimum", 5),
+            (EXCLUSIVE_MAXIMUM, "exclusiveMaximum", 6),
+            (EXCLUSIVE_MINIMUM, "exclusiveMinimum", 7),
+            (MULTIPLE_OF, "multipleOf", 8),
+        ] {
+            if ((bit == MULTIPLE_OF && self.multiple.is_some())
+                || self.limits.iter().any(|&(candidate, _)| candidate == bit))
+                && !frame.predicate(step)?
+            {
+                visit(keyword)?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn runtime_operands(&self) -> bool {
         self.runtime_operands
     }

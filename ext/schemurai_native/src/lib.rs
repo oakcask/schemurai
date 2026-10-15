@@ -1242,13 +1242,10 @@ impl Engine {
         self.kind_demand[index] = ops
             .iter()
             .map(|op| match op {
-                Op::Type(..) => KindDemand::Predicate,
-                Op::Const(_)
-                | Op::Enum(_)
-                | Op::Number(..)
-                | Op::String(..)
-                | Op::Array(..)
-                | Op::Object(..) => KindDemand::Data,
+                Op::Type(..) | Op::Number(..) => KindDemand::Predicate,
+                Op::Const(_) | Op::Enum(_) | Op::String(..) | Op::Array(..) | Op::Object(..) => {
+                    KindDemand::Data
+                }
                 Op::Unsupported
                 | Op::Boolean(_)
                 | Op::UnresolvedRef(_)
@@ -1412,7 +1409,7 @@ impl Execution<'_> {
                     match evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Validity(branch_kind),
-                        self.caches.dynamic_types(),
+                        self.caches.dynamic_calls(),
                         |child| {
                             self.eval_with_kind(child, value, depth + 1, active, Some(kind_state))
                         },
@@ -1474,6 +1471,9 @@ impl Execution<'_> {
             Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
             Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag, &self.budget),
             Op::Number(required, rules) => {
+                if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                    return rules.runtime_valid(self.caches, *required, value);
+                }
                 if *required != 0 && kind & required == 0 {
                     Invalid
                 } else if kind & TYPE_NUMBER == 0 {
@@ -1553,9 +1553,12 @@ impl Execution<'_> {
                 [Op::Number(_, rules)] => rules.fast_limits.as_deref(),
                 _ => None,
             };
+            let primitive = primitive.filter(|_| !self.caches.dynamic_calls());
             let number = match self.nodes[child].as_slice() {
                 [Op::Number(required, rules)]
-                    if depth <= MAX_EVALUATION_DEPTH && !self.tracks[child] =>
+                    if depth <= MAX_EVALUATION_DEPTH
+                        && !self.tracks[child]
+                        && !self.caches.dynamic_calls() =>
                 {
                     Some((*required, rules))
                 }
@@ -1658,7 +1661,12 @@ impl Execution<'_> {
                         return Unsupported;
                     }
                     let result = if let Some((required, rules)) = number {
-                        rules.eval_guarded(self.caches, required, item, &self.budget)
+                        let status = rules.eval_guarded(self.caches, required, item, &self.budget);
+                        if status == Unsupported {
+                            self.eval(child, item, depth, active)
+                        } else {
+                            status
+                        }
                     } else if let Some((required, rules)) = string {
                         if rules.pattern.is_some() {
                             rules.eval_guarded(self.caches, required, item)
@@ -1776,7 +1784,9 @@ impl Execution<'_> {
             );
         let number = match self.nodes[child].as_slice() {
             [Op::Number(required, rules)]
-                if depth <= MAX_EVALUATION_DEPTH && !self.tracks[child] =>
+                if depth <= MAX_EVALUATION_DEPTH
+                    && !self.tracks[child]
+                    && !self.caches.dynamic_calls() =>
             {
                 Some((*required, rules))
             }
@@ -1795,7 +1805,12 @@ impl Execution<'_> {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
-                rules.eval_guarded(self.caches, required, value, &self.budget)
+                let status = rules.eval_guarded(self.caches, required, value, &self.budget);
+                if status == Unsupported {
+                    self.eval(child, value, depth, active)
+                } else {
+                    status
+                }
             } else {
                 self.eval(child, value, depth, active)
             };
@@ -2153,7 +2168,9 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
     {
         c.status = if c.depth <= MAX_EVALUATION_DEPTH {
             match field.and_then(|field| field.check) {
-                Some(RecordCheck::IntegerBounds(min, max)) if value & c.engine.fixnum_flag != 0 => {
+                Some(RecordCheck::IntegerBounds(min, max))
+                    if value & c.engine.fixnum_flag != 0 && !c.engine.caches.dynamic_calls() =>
+                {
                     let n = immediate_integer(value);
                     verdict(n >= min && n <= max)
                 }

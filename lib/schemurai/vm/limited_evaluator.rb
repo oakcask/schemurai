@@ -55,11 +55,10 @@ module Schemurai
         result
       end
 
-      private def decimal(value)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
+      private def number_state
+        state = super
+        state.budget = @budget
+        state
       end
 
       private def ecma_regexp(pattern)

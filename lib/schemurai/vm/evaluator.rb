@@ -55,9 +55,9 @@ module Schemurai
 
     class Evaluator
       include Internal::UniqueItems
+      include Internal::NumberChecks::Evaluation
 
       MISSING_SEGMENT = Object.new.freeze
-      DECIMAL_CACHE_LIMIT = 16
 
       def backend = :vm
 
@@ -70,8 +70,7 @@ module Schemurai
         @regexps = nil
         @active = nil
         @resolved_references = nil
-        @decimals = nil
-        @multiple_results = nil
+        @number_state = nil
         @dynamic_scope = nil
         @instance_path_buffer = nil
         @schema_path_buffer = nil
@@ -271,7 +270,7 @@ module Schemurai
           when :type_string
             check_compiled_type("string", Internal::TypeChecks.single?(instance, TYPE_STRING), instance)
           when :typed_number
-            if number?(instance)
+            if instance.is_a?(Numeric) && !instance.is_a?(Complex)
               check_number(operand, instance)
             else
               check_compiled_type("number", false, instance)
@@ -448,21 +447,9 @@ module Schemurai
         Internal::TypeChecks.integer?(value)
       end
 
-      private def valid_number?(rules, value)
-        mask = rules.mask
-        actual = (mask & MULTIPLE_OF).zero? ? value : decimal(value)
-        return false if (mask & MAXIMUM) != 0 && actual > rules.maximum
-        return false if (mask & MINIMUM) != 0 && actual < rules.minimum
-        return false if (mask & EXCLUSIVE_MAXIMUM) != 0 && actual >= rules.exclusive_maximum
-        return false if (mask & EXCLUSIVE_MINIMUM) != 0 && actual <= rules.exclusive_minimum
-        return true if (mask & MULTIPLE_OF).zero?
-
-        valid_multiple?(rules, value)
-      end
-
       private def check_number(rules, value)
         mask = rules.mask
-        actual = (mask & MULTIPLE_OF).zero? ? value : decimal(value)
+        actual = (mask & MULTIPLE_OF).zero? ? value : number_state.decimal(value)
         if (mask & MAXIMUM) != 0 && actual > rules.maximum
           add_error("maximum") { Internal::ErrorMessage.numeric_limit("maximum", rules.maximum) }
         end
@@ -484,16 +471,6 @@ module Schemurai
         divisor = rules.multiple_of
         valid = valid_multiple?(rules, value)
         add_error("multipleOf") { Internal::ErrorMessage.multiple_of(divisor) } unless valid
-      end
-
-      private def valid_multiple?(rules, value)
-        results = (@multiple_results ||= {}.compare_by_identity)
-        values = (results[rules] ||= {})
-        return values[value] if values.key?(value)
-
-        values.clear if values.length >= DECIMAL_CACHE_LIMIT
-        divisor = rules.multiple_of
-        values[value] = divisor.positive? && decimal(value).remainder(divisor).zero?
       end
 
       private def valid_string?(rules, value)
@@ -1046,16 +1023,6 @@ module Schemurai
         end
       end
 
-      private def decimal(value)
-        return value if value.is_a?(Integer) || value.is_a?(Rational)
-
-        decimals = (@decimals ||= {})
-        return decimals[value] if decimals.key?(value)
-
-        decimals.clear if decimals.length >= DECIMAL_CACHE_LIMIT
-        decimals[value] = Internal::Decimal.parse(value)
-      end
-
       private def ecma_regexp(pattern)
         regexps = (@regexps ||= {})
         return regexps[pattern] if regexps.key?(pattern)
@@ -1074,7 +1041,7 @@ module Schemurai
         pointer << "/" << Internal::JsonPointer.escape(segment)
       end
 
-      private_constant :DECIMAL_CACHE_LIMIT, :MISSING_SEGMENT
+      private_constant :MISSING_SEGMENT
     end
   end
 

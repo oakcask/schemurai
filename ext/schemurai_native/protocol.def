@@ -66,6 +66,8 @@ SN_CONSTANT(RUNTIME_DIAGNOSTIC_MESSAGE, 6)
 SN_CONSTANT(RUNTIME_NULL_NUMBER, 8)
 /* Type requests add twice the type mask and the union-opcode bit. */
 SN_CONSTANT(RUNTIME_TYPE, 64)
+/* Numeric frame requests add 64 times the step and the required type mask. */
+SN_CONSTANT(RUNTIME_NUMBER, 1024)
 SN_CONSTANT(ADAPTER_UNSUPPORTED, 3)
 SN_CONSTANT(STATUS_PANIC, -1)
 SN_CONSTANT(STATUS_EXCEPTION, -2)

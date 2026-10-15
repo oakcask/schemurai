@@ -18,7 +18,11 @@ module Schemurai
       end
 
       module_function def integer?(value)
-        number?(value) && value.finite? && value.to_i == value
+        number?(value) && integral?(value)
+      end
+
+      module_function def integral?(value)
+        value.finite? && value.to_i == value
       end
 
       module_function def single?(value, mask)
@@ -44,7 +48,7 @@ module Schemurai
         return 0 unless number?(value)
         return NUMBER unless integer
 
-        (value.finite? && value.to_i == value) ? NUMBER | INTEGER : NUMBER
+        integral?(value) ? NUMBER | INTEGER : NUMBER
       end
 
       module_function def valid?(value, mask, union)

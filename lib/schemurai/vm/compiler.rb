@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../decimal"
+require_relative "../number_checks"
 require_relative "../type_checks"
 
 module Schemurai
@@ -14,11 +15,11 @@ module Schemurai
       :multiple_of
     )
 
-    MAXIMUM = 1 << 0
-    MINIMUM = 1 << 1
-    EXCLUSIVE_MAXIMUM = 1 << 2
-    EXCLUSIVE_MINIMUM = 1 << 3
-    MULTIPLE_OF = 1 << 4
+    MAXIMUM = Internal::NumberChecks::MAXIMUM
+    MINIMUM = Internal::NumberChecks::MINIMUM
+    EXCLUSIVE_MAXIMUM = Internal::NumberChecks::EXCLUSIVE_MAXIMUM
+    EXCLUSIVE_MINIMUM = Internal::NumberChecks::EXCLUSIVE_MINIMUM
+    MULTIPLE_OF = Internal::NumberChecks::MULTIPLE_OF
 
     TypeRules = Data.define(:mask, :names)
 
