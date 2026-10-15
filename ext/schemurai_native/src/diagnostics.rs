@@ -385,6 +385,9 @@ impl Execution<'_> {
                 .or(self.metadata[node].primary_binding),
         };
         let active = self.enter_scope(node, active, &frame);
+        let _scope = self
+            .caches
+            .scope_guard(frame.resource, self.metadata[node].enters_scope);
         let tracked = ANNOTATIONS || self.tracks[node];
         let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
@@ -1096,7 +1099,7 @@ impl Execution<'_> {
                         parent: active.active,
                     };
                     let keyword = reference_keyword(source.0);
-                    let target = self.reference_target(*target, active);
+                    let target = self.resolve_reference(*target, value, active)?;
                     let active = scope::Context {
                         active: Some(&frame),
                         ..active

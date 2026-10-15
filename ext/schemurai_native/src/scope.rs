@@ -92,6 +92,7 @@ mod tests {
 #[derive(Clone, Copy, Debug)]
 enum ReferenceKind {
     Static,
+    InvariantDynamic(usize),
     Recursive,
     Dynamic(usize),
 }
@@ -117,11 +118,23 @@ impl Reference {
             _ => None,
         }
     }
+    pub(super) fn callback_dynamic_target(self) -> Option<(usize, usize)> {
+        match self.kind {
+            ReferenceKind::Dynamic(name) | ReferenceKind::InvariantDynamic(name) => {
+                Some((name, self.target))
+            }
+            _ => None,
+        }
+    }
     pub(super) fn recursive_target(self) -> Option<usize> {
         matches!(self.kind, ReferenceKind::Recursive).then_some(self.target)
     }
     pub(super) fn static_target(self) -> Option<usize> {
-        matches!(self.kind, ReferenceKind::Static).then_some(self.target)
+        matches!(
+            self.kind,
+            ReferenceKind::Static | ReferenceKind::InvariantDynamic(_)
+        )
+        .then_some(self.target)
     }
 }
 impl Engine {
@@ -148,7 +161,7 @@ impl Engine {
                     && let ReferenceKind::Dynamic(name) = reference.kind
                     && invariant[name] == Some(reference.target)
                 {
-                    reference.kind = ReferenceKind::Static;
+                    reference.kind = ReferenceKind::InvariantDynamic(name);
                 }
             }
         }
@@ -386,6 +399,14 @@ impl Engine {
             active
         }
     }
+    fn scope_binding(&self, reference: Reference, resource: Value) -> Option<usize> {
+        if let Some((name, _)) = reference.callback_dynamic_target() {
+            return self.dynamic_bindings.get(&(resource, name)).copied();
+        }
+        let &root = self.resources.get(&resource)?;
+        (reference.recursive_target().is_some() && self.metadata[root].recursive_anchor)
+            .then_some(root)
+    }
     pub(super) fn reference_target(&self, reference: Reference, context: Context<'_>) -> usize {
         if matches!(reference.kind, ReferenceKind::Dynamic(0)) && self.anchor_tables.len() == 1 {
             return context
@@ -398,23 +419,46 @@ impl Engine {
         // Linked frames walk inner to outer. Keep replacing a match so the
         // outermost matching resource wins, just as the VM's scope.each does.
         while let Some(frame) = current {
-            match reference.kind {
-                ReferenceKind::Static => break,
-                ReferenceKind::Recursive => {
-                    if let Some(&root) = self.resources.get(&frame.resource)
-                        && self.metadata[root].recursive_anchor
-                    {
-                        target = root;
-                    }
-                }
-                ReferenceKind::Dynamic(name) => {
-                    if let Some(binding) = self.dynamic_bindings.get(&(frame.resource, name)) {
-                        target = *binding;
-                    }
-                }
+            if reference.static_target().is_some() {
+                break;
+            }
+            if let Some(binding) = self.scope_binding(reference, frame.resource) {
+                target = binding;
             }
             current = frame.parent;
         }
         target
+    }
+}
+
+impl Execution<'_> {
+    pub(super) fn resolve_reference(
+        &self,
+        reference: Reference,
+        value: Value,
+        active: Context<'_>,
+    ) -> Result<usize, Verdict> {
+        if !self.caches.scopes_enabled() {
+            return Ok(self.engine.reference_target(reference, active));
+        }
+        let dynamic = reference.callback_dynamic_target();
+        let recursive = reference.recursive_target();
+        if dynamic.is_none() && recursive.is_none() {
+            return Ok(reference.static_target().expect("static reference"));
+        }
+        let mut index = 0;
+        while let Some(resource) = self.caches.scope_at(index) {
+            if self.caches.callback_checkpoint(value) != Valid {
+                return Err(Unsupported);
+            }
+            if let Some(target) = self.engine.scope_binding(reference, resource) {
+                return Ok(target);
+            }
+            index += 1;
+        }
+        Ok(dynamic
+            .map(|(_, fallback)| fallback)
+            .or(recursive)
+            .expect("scoped reference"))
     }
 }

@@ -697,6 +697,8 @@ pub struct Engine {
     kind_demand: Vec<KindDemand>,
     scalar_callback_depths: Vec<Option<usize>>,
     callback_child_depths: Vec<Option<usize>>,
+    callback_scope_demands: Vec<bool>,
+    has_scoped_callbacks: bool,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -1409,6 +1411,9 @@ impl Execution<'_> {
                 .or(self.metadata[node].primary_binding),
         };
         let active = self.enter_scope(node, active, &frame);
+        let _scope = self
+            .caches
+            .scope_guard(frame.resource, self.metadata[node].enters_scope);
         if self.tracks[node] {
             return match known_kind {
                 Some(kind) => {
@@ -1460,7 +1465,10 @@ impl Execution<'_> {
                             parent: active.active,
                         };
                         self.eval_with_kind(
-                            self.reference_target(*target, active),
+                            match self.resolve_reference(*target, value, active) {
+                                Ok(target) => target,
+                                Err(status) => return status,
+                            },
                             value,
                             depth + 1,
                             scope::Context {
@@ -1775,6 +1783,10 @@ impl Execution<'_> {
                     .or(self.metadata[child].primary_binding),
             };
             let object_active = self.enter_scope(child, active, &frame);
+            let _scope = self.caches.scope_guard(
+                frame.resource,
+                object.is_some() && self.metadata[child].enters_scope,
+            );
             let pattern = string.and_then(|(required, rules)| {
                 rules
                     .pattern_only()
@@ -3509,6 +3521,16 @@ pub unsafe extern "C" fn sn_callback_kind(
     kind
 }
 /// # Safety
+/// Engine must be initialized and root compiled.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_scoped_callbacks(
+    engine: *const Engine,
+    root: usize,
+    child: i32,
+) -> i32 {
+    i32::from(unsafe { &*engine }.scoped_callbacks(root, child != 0))
+}
+/// # Safety
 /// Engine must be initialized.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_root_index(engine: *const Engine) -> usize {
@@ -3654,6 +3676,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let callback_depths = unsafe { &*std::ptr::addr_of!((*engine).scalar_callback_depths) };
     let child_depths = unsafe { &*std::ptr::addr_of!((*engine).callback_child_depths) };
+    let callback_scopes = unsafe { &*std::ptr::addr_of!((*engine).callback_scope_demands) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3663,6 +3686,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
+        + callback_scopes.capacity() * std::mem::size_of::<bool>()
         + (callback_depths.capacity() + child_depths.capacity())
             * std::mem::size_of::<Option<usize>>()
         + (contextual.capacity()

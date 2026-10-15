@@ -70,7 +70,7 @@ module Schemurai
 
       def backend = :vm
 
-      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil)
+      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil, dynamic_scope: nil)
         @graph = graph
         @compiler = compiler
         @root = root
@@ -80,7 +80,7 @@ module Schemurai
         @active = nil
         @resolved_references = nil
         @number_state = number_state
-        @dynamic_scope = nil
+        @dynamic_scope = dynamic_scope
         @instance_path_buffer = nil
         @schema_path_buffer = nil
         @evaluation_pool = nil
