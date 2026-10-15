@@ -1332,7 +1332,11 @@ impl Engine {
                 {
                     KindDemand::Predicate
                 }
-                Op::Object(_, rules) if rules.header_only() || self.object_callbacks(rules) => {
+                Op::Object(_, rules)
+                    if rules.header_only()
+                        || self.object_callbacks(rules)
+                        || self.object_report_callbacks(rules) =>
+                {
                     KindDemand::Predicate
                 }
                 Op::Array(..) | Op::Object(..) => KindDemand::Data,
@@ -1531,6 +1535,7 @@ impl Execution<'_> {
                             }
                             self.eval_with_kind(child, value, depth + 1, active, Some(kind_state))
                         },
+                        |_, _| Ok(()),
                     ) {
                         Ok(result) => verdict(branch_kind.accepts(result.matches)),
                         Err(status) => status,

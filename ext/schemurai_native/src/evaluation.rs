@@ -42,7 +42,6 @@ impl BranchPolicy {
 pub(super) trait BranchResult {
     fn valid() -> Self;
     fn status(&self) -> Verdict;
-    fn merge(&mut self, branch: Self);
 }
 impl BranchResult for Verdict {
     fn valid() -> Self {
@@ -51,7 +50,6 @@ impl BranchResult for Verdict {
     fn status(&self) -> Verdict {
         *self
     }
-    fn merge(&mut self, _: Self) {}
 }
 impl BranchResult for Tracked {
     fn valid() -> Self {
@@ -59,9 +57,6 @@ impl BranchResult for Tracked {
     }
     fn status(&self) -> Verdict {
         self.status
-    }
-    fn merge(&mut self, branch: Self) {
-        self.merge(branch);
     }
 }
 
@@ -74,6 +69,7 @@ pub(super) fn scan_branches<R: BranchResult>(
     policy: BranchPolicy,
     separate_calls: bool,
     mut evaluate: impl FnMut(usize) -> R,
+    mut merge: impl FnMut(&mut R, R) -> Result<(), Verdict>,
 ) -> Result<BranchMatches<R>, Verdict> {
     let mut result = BranchMatches {
         matches: 0,
@@ -87,7 +83,7 @@ pub(super) fn scan_branches<R: BranchResult>(
                 Invalid => {}
                 Valid => {
                     result.matches += if separate_calls { 1 } else { multiplicity };
-                    result.coverage.merge(branch);
+                    merge(&mut result.coverage, branch)?;
                 }
             }
             if policy.finished(result.matches) {
@@ -197,8 +193,14 @@ mod tests {
         let nodes = [(0, 2), (1, 1)];
         let evaluate = |node| if node == 0 { Valid } else { Unsupported };
         for kind in [BranchKind::Any, BranchKind::One] {
-            let result =
-                scan_branches(&nodes, BranchPolicy::Validity(kind), false, evaluate).unwrap();
+            let result = scan_branches(
+                &nodes,
+                BranchPolicy::Validity(kind),
+                false,
+                evaluate,
+                |_, _| Ok(()),
+            )
+            .unwrap();
             assert_eq!(result.matches, 2);
             assert_eq!(
                 kind.accepts(result.matches),
@@ -206,7 +208,9 @@ mod tests {
             );
         }
         assert!(matches!(
-            scan_branches(&nodes, BranchPolicy::Complete, false, evaluate),
+            scan_branches(&nodes, BranchPolicy::Complete, false, evaluate, |_, _| Ok(
+                ()
+            )),
             Err(Unsupported)
         ));
     }

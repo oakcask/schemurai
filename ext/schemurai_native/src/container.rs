@@ -184,7 +184,7 @@ impl Engine {
                 // scalar/header reports already have all required runtime paths.
                 report_unsupported[node] |= match op {
                     Op::Array(..) => false,
-                    Op::Object(_, rules) => !rules.header_only(),
+                    Op::Object(..) => false,
                     Op::Unsupported | Op::UnresolvedRef(_) => true,
                     _ => false,
                 };
@@ -206,9 +206,14 @@ impl Engine {
                         );
                     }
                     Op::Object(_, rules) if rules.header_only() => {}
-                    Op::Object(_, rules) if rules.unevaluated.is_none() => {
+                    Op::Object(_, rules) => {
                         callbacks[node] = true;
-                        edges[node].extend(rules.callback_children().copied());
+                        edges[node].extend(
+                            rules
+                                .callback_children()
+                                .chain(rules.unevaluated.iter())
+                                .copied(),
+                        );
                     }
                     Op::Ref(reference) => {
                         if let Some((name, fallback)) = reference.callback_dynamic_target() {
@@ -228,9 +233,7 @@ impl Engine {
                         edges[node].push(*condition);
                         edges[node].extend(yes.iter().chain(no));
                     }
-                    Op::Object(..) | Op::Unsupported | Op::UnresolvedRef(_) => {
-                        admitted[node] = false
-                    }
+                    Op::Unsupported | Op::UnresolvedRef(_) => admitted[node] = false,
                 }
             }
         }
@@ -283,6 +286,12 @@ impl Engine {
         rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
     }
     pub(super) fn array_report_callbacks(&self, rules: &Array) -> bool {
+        rules
+            .callback_children()
+            .chain(rules.unevaluated.iter())
+            .all(|&child| self.report_supported.get(child) == Some(&true))
+    }
+    pub(super) fn object_report_callbacks(&self, rules: &Object) -> bool {
         rules
             .callback_children()
             .chain(rules.unevaluated.iter())

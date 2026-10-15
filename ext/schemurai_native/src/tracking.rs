@@ -24,6 +24,30 @@ impl Hash for JsonKey {
 }
 pub(super) type KeySet = HashSet<JsonKey, BuildHasherDefault<BucketHasher>>;
 
+// An owned export snapshot can be traversed by C across Ruby allocations.
+pub struct PropertyLocations {
+    pub(crate) set: Option<Value>,
+    pub(crate) keys: Vec<Value>,
+}
+impl PropertyLocations {
+    pub(crate) fn new(engine: &Engine, tracked: &Tracked) -> Self {
+        Self {
+            set: tracked.properties_set(),
+            keys: tracked.native_properties(engine),
+        }
+    }
+    pub(crate) fn mark(&self) {
+        for &value in self.set.iter().chain(&self.keys) {
+            unsafe {
+                sn_pin(value);
+            }
+        }
+    }
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.keys.capacity() * std::mem::size_of::<Value>()
+    }
+}
+
 // Store only nonempty words. The common single-word case needs no allocation,
 // even when its property IDs are near the end of a large compiled engine.
 #[derive(Clone, Default)]
@@ -138,6 +162,7 @@ impl PropertyBits {
 pub(super) struct Tracked {
     pub status: Verdict,
     properties: KeySet,
+    runtime_properties: Option<(Value, usize)>,
     known_properties: PropertyBits,
     items: Vec<u64>,
 }
@@ -154,6 +179,11 @@ impl Tracked {
             }
     }
     pub(super) fn mark(&self) {
+        if let Some((set, _)) = self.runtime_properties {
+            unsafe {
+                sn_pin(set);
+            }
+        }
         for key in &self.properties {
             unsafe {
                 sn_pin(key.0);
@@ -162,7 +192,8 @@ impl Tracked {
     }
     // Bound retained annotation slots independently of the number of results.
     pub(super) fn memo_slots(&self) -> usize {
-        self.properties.capacity()
+        self.runtime_properties.map_or(0, |(_, count)| count)
+            + self.properties.capacity()
             + self.items.capacity()
             + match &self.known_properties.words {
                 PropertyWords::Empty | PropertyWords::Single(..) => 0,
@@ -174,6 +205,7 @@ impl Tracked {
         Self {
             status,
             properties: KeySet::default(),
+            runtime_properties: None,
             known_properties: PropertyBits::default(),
             items: vec![],
         }
@@ -197,7 +229,9 @@ impl Tracked {
         self.known_properties.contains(index)
     }
     pub(super) fn property_count(&self) -> usize {
-        self.properties.len() + self.known_properties.count
+        self.runtime_properties.map_or(0, |(_, count)| count)
+            + self.properties.len()
+            + self.known_properties.count
     }
     pub(super) fn item_count(&self) -> usize {
         self.items
@@ -206,6 +240,7 @@ impl Tracked {
             .sum()
     }
     pub(super) fn merge(&mut self, other: Self) -> Verdict {
+        debug_assert!(self.runtime_properties.is_none() && other.runtime_properties.is_none());
         if other.status != Valid {
             return other.status;
         }
@@ -218,16 +253,72 @@ impl Tracked {
         merge_bits(&mut self.items, other.items);
         Valid
     }
-    pub(super) fn merge_diagnostics(&mut self, other: Self) -> Result<(), Verdict> {
+    pub(super) fn merge_diagnostics(
+        &mut self,
+        execution: &Execution<'_>,
+        other: Self,
+    ) -> Result<(), Verdict> {
         if other.status == Unsupported {
             return Err(Unsupported);
         }
         if self.status != Valid || other.status != Valid {
             *self = Self::new(Invalid);
         } else {
-            self.merge(other);
+            if self.merge_runtime(execution, other) == Unsupported {
+                return Err(Unsupported);
+            }
         }
         Ok(())
+    }
+    pub(super) fn has_runtime_properties(&self) -> bool {
+        self.runtime_properties.is_some()
+    }
+    pub(super) fn properties_set(&self) -> Option<Value> {
+        self.runtime_properties.map(|(set, _)| set)
+    }
+    pub(super) fn set_properties(&mut self, set: Value, count: usize) {
+        debug_assert!(self.properties.is_empty() && self.known_properties.count == 0);
+        self.runtime_properties = (count != 0).then_some((set, count));
+    }
+    pub(super) fn native_properties(&self, engine: &Engine) -> Vec<Value> {
+        let mut known: Vec<_> = engine
+            .property_ids
+            .iter()
+            .filter(|(_, index)| self.contains_known_property(**index))
+            .map(|(key, &index)| (index, key.0))
+            .collect();
+        known.sort_unstable_by_key(|&(index, _)| index);
+        known
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(self.properties.iter().map(|key| key.0))
+            .collect()
+    }
+    pub(super) fn merge_runtime(&mut self, execution: &Execution<'_>, other: Self) -> Verdict {
+        if other.status != Valid {
+            return other.status;
+        }
+        if !self.has_runtime_properties() && !other.has_runtime_properties() {
+            return self.merge(other);
+        }
+        if self.property_count() == 0 && self.item_count() == 0 {
+            *self = other;
+            return Valid;
+        }
+        if other.property_count() != 0 {
+            let Ok((set, count)) =
+                execution
+                    .caches
+                    .merge_properties(execution.engine, self, &other)
+            else {
+                return Unsupported;
+            };
+            self.properties.clear();
+            self.known_properties = PropertyBits::default();
+            self.runtime_properties = Some((set, count));
+        }
+        merge_bits(&mut self.items, other.items);
+        Valid
     }
     pub(super) fn property(&mut self, engine: &Engine, value: Value) {
         let key = JsonKey::new(value);
@@ -513,7 +604,8 @@ impl Execution<'_> {
                 return Unsupported;
             }
             if !missing(value, key, self.undefined) {
-                let result = evaluation.merge(self.eval_tracked(child, value, depth, active));
+                let result =
+                    evaluation.merge_runtime(self, self.eval_tracked(child, value, depth, active));
                 if result != Valid {
                     return result;
                 }

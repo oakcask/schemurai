@@ -1,5 +1,6 @@
 //! Runner-owned search caches and observations requested outside Rust frames.
 use super::*;
+mod properties;
 mod reports;
 mod scopes;
 use regex_automata::{
@@ -34,6 +35,7 @@ pub struct Caches {
     pending_contains: std::cell::Cell<Option<ContainsArguments>>,
     scopes: scopes::Scopes,
     reports: reports::Reports,
+    properties: properties::Properties,
     report_continuations_allowed: std::cell::Cell<bool>,
 }
 #[repr(C)]
@@ -96,6 +98,7 @@ impl Caches {
     fn reset_pass(&self) {
         self.scopes.reset();
         self.reports.reset();
+        self.properties.reset();
         self.pending.set(None);
         self.call_cursor.set(0);
         self.pending_pointer.set(None);
@@ -176,11 +179,11 @@ impl Caches {
             None,
         )
     }
-    pub(super) fn array_report(
+    pub(super) fn container_report(
         &self,
         node: usize,
         value: Value,
-        header: (Value, i32),
+        header: (Value, i32, bool),
         report: &mut diagnostics::Report,
         prior: &tracking::Tracked,
         annotations: bool,
@@ -194,7 +197,11 @@ impl Caches {
                 scalar_kind: CALLBACK_RUNTIME,
                 scalar_flags: 0,
             },
-            RUNTIME_ARRAY_REPORT,
+            if header.2 {
+                RUNTIME_OBJECT_REPORT
+            } else {
+                RUNTIME_ARRAY_REPORT
+            },
             report,
             annotations,
             Some(prior),
@@ -211,7 +218,7 @@ impl Caches {
         let ordinal = self.next_call()?;
         if self.observe(ordinal, arguments.instance, operation) == Unsupported {
             let seed = match prior {
-                Some(prior) => report.array_continuation(annotations, prior),
+                Some(prior) => report.container_continuation(annotations, prior),
                 None => report.continuation(annotations),
             };
             self.reports.request(ordinal, seed);
@@ -679,6 +686,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         + rescued
         + messages
         + unsafe { &*caches_ptr }.reports.memory_usage()
+        + unsafe { &*caches_ptr }.properties.memory_usage()
         + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
         + caches
@@ -730,6 +738,7 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.scopes.clear();
     caches.reports.clear();
+    caches.properties.clear();
     caches.report_continuations_allowed.set(false);
     caches.reset_pass();
     caches.deadline.set(None);
@@ -825,6 +834,7 @@ pub unsafe extern "C" fn sn_contains_arguments(
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
     unsafe { &*caches }.scopes.mark();
     unsafe { &*caches }.reports.mark();
+    unsafe { &*caches }.properties.mark();
     if let Some(arguments) = unsafe { &*caches }.pending_contains.get() {
         unsafe {
             sn_pin(arguments.rules);

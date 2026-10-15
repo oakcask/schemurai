@@ -2,6 +2,7 @@
 
 require_relative "string_checks"
 require_relative "container_checks/array_diagnostics"
+require_relative "container_checks/object_diagnostics"
 
 require_relative "error_message"
 require_relative "value_equality"
@@ -9,6 +10,14 @@ require_relative "value_equality"
 module Schemurai
   module Internal
     module ContainerChecks
+      module Properties
+        module_function def merge(left, left_keys, right, right_keys)
+          result = left ? left.dup : Set.new(left_keys)
+          result.merge(right || right_keys)
+          result.freeze
+        end
+      end
+
       module Bounds
         private def valid_container_bounds?(length, maximum, minimum)
           return false if maximum && length > maximum
@@ -418,6 +427,76 @@ module Schemurai
           @budget&.checkpoint
           @value.key?(name) || false
         end
+      end
+
+      class ObjectReportLocations
+        def initialize(properties = Set.new)
+          @properties = properties
+        end
+
+        def valid? = true
+        def evaluated_properties = @properties
+
+        def record_property(name)
+          @properties.add(name)
+          self
+        end
+      end
+
+      class ObjectReportPrior
+        def initialize(callback)
+          @callback = callback
+        end
+
+        def evaluated_properties = @callback.properties(true)
+      end
+
+      class ObjectReportFrame < ObjectFrame
+        include ObjectDiagnostics
+        include ChildCallback
+        include StringChecks::Regexps
+
+        def collect
+          @failed = false
+          unless container?
+            @callback.object_error("type", self) if @required && collecting_object_errors?
+            return @callback.finish_object(!@required, nil)
+          end
+          result = check_object(@rules, @value, ObjectReportPrior.new(@callback))
+          @callback.finish_object(result.valid? && !@failed, @evaluation&.evaluated_properties)
+        end
+
+        private def collecting_object_errors? = !@callback.silent?
+        private def object_budget = @callback.invocation_budget
+        private def regexp_cache = (@regexps ||= @callback.regexp_cache)
+        private def tracked_evaluation = (@evaluation ||= ObjectReportLocations.new)
+
+        private def object_error(keyword, _rules, _value, name = nil, required_name = nil)
+          @failed = true
+          @dependency_name = name
+          @required_name = (keyword == "required") ? name : required_name
+          @callback.object_error(keyword, self)
+        end
+
+        private def evaluate_child_at(program, instance, segment, keyword, child = ObjectDiagnostics::MISSING_SEGMENT)
+          flags = child.equal?(ObjectDiagnostics::MISSING_SEGMENT) ? 0 : 2
+          valid = @callback.evaluate_object(program, instance, segment, keyword, child, flags, false)
+          @failed = true unless valid
+          valid
+        end
+
+        private def evaluate_at(program, instance, segment, keyword, child)
+          flags = segment.equal?(ObjectDiagnostics::MISSING_SEGMENT) ? 3 : 2
+          valid, properties = @callback.evaluate_object(program, instance, segment, keyword, child, flags, true)
+          @failed = true unless valid
+          valid ? Evaluation.valid(evaluated_properties: properties) : Evaluation.invalid
+        end
+      end
+
+      class LimitedObjectReportFrame < ObjectReportFrame
+        include StringChecks::TimedRegexps
+
+        private def regexp_budget = object_budget
       end
 
       class ObjectChildrenFrame < ObjectFrame
