@@ -274,9 +274,15 @@ impl Execution<'_> {
                             report.add("minLength", source, value, len)?;
                         }
                         if let Some(pattern) = &rules.pattern {
-                            match pattern.eval(self.caches, value) {
+                            match pattern.assertion(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("pattern", source, value, 0)?,
+                                Invalid => {
+                                    let invalid = pattern.invalid(self.caches, value);
+                                    report.add("pattern", source, value, usize::from(invalid))?;
+                                    if invalid {
+                                        continue;
+                                    }
+                                }
                                 Valid => {}
                             }
                         }
@@ -947,9 +953,10 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
                 c.coverage.property(c.engine, key);
                 return Ok(());
             }
-            let evaluated = c.rules.visit_value_rules::<true>(
+            let evaluated = c.rules.visit_value_rules(
                 c.engine.caches,
                 &c.engine.budget,
+                true,
                 key,
                 None,
                 |segment, name, child| visit(c.report, child, value, segment, name),
@@ -1038,7 +1045,7 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             engine: unsafe { &*engine },
             caches,
             memo: memo::Memo::default(),
-            budget: budget::Budget::new(limits),
+            budget: caches.budget(limits),
         };
         let mut report = Report {
             limits,

@@ -6,6 +6,7 @@ require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ru
 require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
+require_relative "../ecma_regexp"
 require_relative "compiler"
 
 module Schemurai
@@ -1065,41 +1066,7 @@ module Schemurai
         regexps = (@regexps ||= {})
         return regexps[pattern] if regexps.key?(pattern)
 
-        whitespace = "\\u0009-\\u000D\\u0020\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF"
-        translated = +""
-        escaped = false
-        in_class = false
-        pattern.each_char do |character|
-          @budget&.checkpoint
-          if escaped
-            translated << case character
-            when "d" then in_class ? "0-9" : "[0-9]"
-            when "D" then in_class ? "^0-9" : "[^0-9]"
-            when "w" then in_class ? "A-Za-z0-9_" : "[A-Za-z0-9_]"
-            when "W" then in_class ? "^A-Za-z0-9_" : "[^A-Za-z0-9_]"
-            when "s" then in_class ? whitespace : "[#{whitespace}]"
-            when "S" then in_class ? "^#{whitespace}" : "[^#{whitespace}]"
-            else "\\#{character}"
-            end
-            escaped = false
-          elsif character == "\\"
-            escaped = true
-          elsif character == "["
-            in_class = true
-            translated << character
-          elsif character == "]"
-            in_class = false
-            translated << character
-          elsif character == "^" && !in_class
-            translated << "\\A"
-          elsif character == "$" && !in_class
-            translated << "\\z"
-          else
-            translated << character
-          end
-        end
-        translated << "\\" if escaped
-        regexps[pattern] = Regexp.new(translated)
+        regexps[pattern] = Internal::EcmaRegexp.compile(pattern, @budget)
       end
 
       private def pointer(path, final_segment = MISSING_SEGMENT)

@@ -28,6 +28,11 @@ extern VALUE sn_root_at(const void *, size_t);
 extern void *sn_caches_new(void);
 extern void sn_caches_free(void *);
 extern size_t sn_caches_size(const void *);
+extern void sn_caches_runtime(const void *, const void *);
+extern int sn_caches_pending(const void *, VALUE *, VALUE *, int *);
+extern void sn_caches_mark(const void *);
+extern void sn_caches_begin(const void *);
+extern void sn_caches_observe(const void *);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -96,28 +101,60 @@ static void check_evaluation_status(int status, const char *panic_message) {
     if (status == SN_STATUS_STACK_ERROR) rb_raise(rb_eSysStackError, "stack level too deep");
     if (status < 0) rb_raise(rb_eRuntimeError, "%s", panic_message);
 }
-static VALUE valid(VALUE self, VALUE instance) {
-    holder *h;
-    TypedData_Get_Struct(self, holder, &engine_type, h);
-    if (!h->engine) rb_raise(rb_eRuntimeError, "uninitialized native program");
-    if (h->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
-    int status = sn_valid(h->engine, NULL, sn_root_index(h->engine), instance);
-    RB_GC_GUARD(instance);
-    check_evaluation_status(status, "native evaluator panicked");
-    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
-}
+static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
+static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner; void *caches; size_t root; } runner_holder;
-static void runner_mark(void *ptr) { rb_gc_mark(((runner_holder *)ptr)->owner); }
+typedef struct { VALUE owner, regexps; void *caches; size_t root; st_table *matches; } runner_holder;
+static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
+    rb_gc_mark((VALUE)key);
+    return ST_CONTINUE;
+}
+static int mark_pattern_matches(st_data_t key, st_data_t value, st_data_t context) {
+    rb_gc_mark((VALUE)key);
+    st_foreach((st_table *)value, mark_match, 0);
+    return ST_CONTINUE;
+}
+static int release_matches(st_data_t key, st_data_t value, st_data_t context) {
+    st_free_table((st_table *)value);
+    return ST_CONTINUE;
+}
+static void runner_mark(void *ptr) {
+    runner_holder *r = ptr;
+    rb_gc_mark(r->owner);
+    rb_gc_mark(r->regexps);
+    if (r->caches) sn_caches_mark(r->caches);
+    if (r->matches) st_foreach(r->matches, mark_pattern_matches, 0);
+}
 static void runner_release(void *ptr) {
     runner_holder *h = ptr;
     if (h->caches) sn_caches_free(h->caches);
+    if (h->matches) {
+        st_foreach(h->matches, release_matches, 0);
+        st_free_table(h->matches);
+    }
     xfree(h);
+}
+static int match_size(st_data_t key, st_data_t value, st_data_t context) {
+    *(size_t *)context += st_memsize((st_table *)value);
+    return ST_CONTINUE;
 }
 static size_t runner_size(const void *ptr) {
     const runner_holder *h = ptr;
-    return sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
+    size_t bytes = sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
+    if (h->matches) {
+        bytes += st_memsize(h->matches);
+        st_foreach(h->matches, match_size, (st_data_t)&bytes);
+    }
+    return bytes;
+}
+/* Numeric-key lookups only: Rust calls this while borrowing instance storage.
+ * Table mutations, Ruby calls and allocations happen after Rust returns. */
+int sn_cached_regexp(const void *matches, VALUE source, VALUE instance) {
+    st_data_t bucket, result;
+    if (st_lookup((st_table *)matches, (st_data_t)source, &bucket)
+        && st_lookup((st_table *)bucket, (st_data_t)instance, &result)) return (int)result;
+    return SN_VERDICT_UNSUPPORTED;
 }
 static const rb_data_type_t runner_type = {
     "Schemurai::Native::Runner", {runner_mark, runner_release, runner_size, NULL, {NULL}},
@@ -146,12 +183,20 @@ static VALUE runner(VALUE self, VALUE root) {
     holder *h = ready_program(self);
     size_t index = sn_node_index(h->engine, root);
     if (index == SIZE_MAX) rb_raise(rb_eArgError, "root was not compiled in this native program");
+    return build_runner(self, index);
+}
+static VALUE build_runner(VALUE self, size_t index) {
     VALUE klass = rb_const_get(rb_obj_class(self), rb_intern_const("Runner"));
     runner_holder *r;
     VALUE object = TypedData_Make_Struct(klass, runner_holder, &runner_type, r);
     r->owner = self;
+    r->regexps = Qnil;
     r->root = index;
+    r->caches = NULL;
+    r->matches = NULL;
+    r->matches = st_init_numtable();
     r->caches = sn_caches_new();
+    sn_caches_runtime(r->caches, r->matches);
     RB_GC_GUARD(self);
     return object;
 }
@@ -171,27 +216,15 @@ static void finish_budget(VALUE budget, const native_outcome *outcome) {
     if (outcome->kind) rb_funcall(budget, rb_intern("raise_native_limit"), 2, UINT2NUM(outcome->kind), SIZET2NUM(outcome->attempted));
 }
 static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) {
-    runner_holder *r;
-    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    holder *h = ready_program(r->owner);
-    native_limits limits = read_limits(budget);
-    native_outcome outcome = {0};
-    int status = sn_valid_with_limits(h->engine, r->caches, r->root, instance, &limits, &outcome);
-    check_evaluation_status(status, "native evaluator panicked");
-    finish_budget(budget, &outcome);
-    RB_GC_GUARD(instance);
-    RB_GC_GUARD(self);
-    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
+    return evaluate_runner(self, instance, budget, 0);
 }
 static VALUE runner_valid(VALUE self, VALUE instance) {
-    runner_holder *r;
-    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    holder *h = ready_program(r->owner);
-    int status = sn_valid(h->engine, r->caches, r->root, instance);
-    RB_GC_GUARD(instance);
-    RB_GC_GUARD(self);
-    check_evaluation_status(status, "native evaluator panicked");
-    return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
+    return evaluate_runner(self, instance, Qnil, 0);
+}
+static VALUE valid(VALUE self, VALUE instance) {
+    holder *h = ready_program(self);
+    VALUE run = build_runner(self, sn_root_index(h->engine));
+    return runner_valid(run, instance);
 }
 void sn_pin(VALUE value) { rb_gc_mark(value); }
 VALUE sn_nil(void) { return Qnil; }
@@ -529,21 +562,135 @@ static const rb_data_type_t report_type = {
     "Schemurai::Native::Diagnostics", {report_mark, report_release, report_size, NULL, {NULL}},
     NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
 };
-static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, const void *caches, size_t root, VALUE budget) {
-    report_holder *h;
-    VALUE owner = TypedData_Make_Struct(rb_cObject, report_holder, &report_type, h);
-    h->report = NULL;
-    int status = 0;
+typedef struct {
+    VALUE self, instance, budget;
+    runner_holder *runner;
+    holder *engine;
+    report_holder *report;
+    int status;
+} evaluation_call;
+
+static VALUE clear_runtime(VALUE context) {
+    evaluation_call *call = (evaluation_call *)context;
+    st_foreach(call->runner->matches, release_matches, 0);
+    st_clear(call->runner->matches);
+    sn_caches_runtime(call->runner->caches, call->runner->matches);
+    sn_caches_begin(call->runner->caches);
+    return Qnil;
+}
+static void evaluate_native(evaluation_call *call) {
+    runner_holder *r = call->runner;
     native_outcome outcome = {0};
-    if (NIL_P(budget)) {
-        h->report = sn_diagnose(engine->engine, caches, root, instance, &status);
+    native_limits limits = {0};
+    if (!NIL_P(call->budget)) limits = read_limits(call->budget);
+    if (call->report) {
+        if (NIL_P(call->budget)) {
+            call->report->report = sn_diagnose(call->engine->engine, r->caches, r->root,
+                call->instance, &call->status);
+        } else {
+            call->report->report = sn_diagnose_with_limits(call->engine->engine, r->caches, r->root,
+                call->instance, &call->status, &limits, &outcome);
+        }
+    } else if (NIL_P(call->budget)) {
+        call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance);
     } else {
-        native_limits limits = read_limits(budget);
-        h->report = sn_diagnose_with_limits(engine->engine, caches, root, instance, &status, &limits, &outcome);
+        call->status = sn_valid_with_limits(call->engine->engine, r->caches, r->root,
+            call->instance, &limits, &outcome);
     }
-    check_evaluation_status(status, "native diagnostics panicked");
-    if (!NIL_P(budget)) finish_budget(budget, &outcome);
-    if (status == SN_VERDICT_UNSUPPORTED) return Qnil;
+    check_evaluation_status(call->status,
+        call->report ? "native diagnostics panicked" : "native evaluator panicked");
+    if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
+}
+typedef struct { evaluation_call *call; VALUE source, instance; } regexp_call;
+static VALUE call_regexp(VALUE context) {
+    regexp_call *operation = (regexp_call *)context;
+    evaluation_call *call = operation->call;
+    VALUE source = operation->source, instance = operation->instance;
+    runner_holder *r = call->runner;
+    if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (NIL_P(r->regexps)) r->regexps = rb_hash_new();
+    VALUE regexp = rb_hash_lookup2(r->regexps, source, Qundef);
+    if (regexp == Qundef) {
+        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+        VALUE compiler = rb_const_get(internal, rb_intern_const("EcmaRegexp"));
+        regexp = rb_funcall(compiler, id_compile, 2, source, call->budget);
+        rb_hash_aset(r->regexps, source, regexp);
+    }
+    VALUE result = rb_funcall(regexp, rb_intern_const("match?"), 1, instance);
+    if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    RB_GC_GUARD(regexp);
+    return result;
+}
+static void evaluate_regexp(evaluation_call *call, VALUE source, VALUE instance, int assertion) {
+    regexp_call operation = {call, source, instance};
+    VALUE previous = rb_errinfo();
+    int state = 0;
+    VALUE result = rb_protect(call_regexp, (VALUE)&operation, &state);
+    int verdict;
+    if (state) {
+        if (!assertion || !rb_obj_is_kind_of(rb_errinfo(), rb_eRegexpError)) rb_jump_tag(state);
+        rb_set_errinfo(previous);
+        verdict = SN_REGEXP_INVALID;
+    } else {
+        verdict = RTEST(result) ? SN_VERDICT_VALID : SN_VERDICT_INVALID;
+    }
+    runner_holder *r = call->runner;
+    st_data_t bucket;
+    if (!st_lookup(r->matches, (st_data_t)source, &bucket)) {
+        bucket = (st_data_t)st_init_numtable();
+        st_insert(r->matches, (st_data_t)source, bucket);
+    }
+    st_insert((st_table *)bucket, (st_data_t)instance, verdict);
+    RB_GC_GUARD(previous);
+    RB_GC_GUARD(source);
+    RB_GC_GUARD(instance);
+}
+/* Each retry starts after Rust has returned and dropped all borrowed views,
+ * memo entries and partial reports. Only pure Regexp observations are cached.
+ * The original Ruby deadline survives every pass and runtime operation. */
+static VALUE retry_runtime(VALUE context) {
+    evaluation_call *call = (evaluation_call *)context;
+    VALUE source = Qnil, instance = Qnil;
+    int assertion = 0;
+    /* Reordered fast scans may have requested an operation the VM would never
+     * reach. Replay in observable order before invoking any Ruby method. */
+    sn_caches_observe(call->runner->caches);
+    evaluate_native(call);
+    while (call->status == SN_VERDICT_UNSUPPORTED &&
+           sn_caches_pending(call->runner->caches, &source, &instance, &assertion)) {
+        evaluate_regexp(call, source, instance, assertion);
+        sn_caches_runtime(call->runner->caches, call->runner->matches);
+        evaluate_native(call);
+    }
+    return Qnil;
+}
+static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagnostics) {
+    runner_holder *r;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
+    evaluation_call call = {self, instance, budget, r, ready_program(r->owner), NULL, 0};
+    report_holder *h = NULL;
+    VALUE owner = Qnil;
+    if (diagnostics) {
+        owner = TypedData_Make_Struct(rb_cObject, report_holder, &report_type, h);
+        h->report = NULL;
+        call.report = h;
+    }
+    clear_runtime((VALUE)&call);
+    evaluate_native(&call);
+    VALUE source = Qnil, requested = Qnil;
+    int assertion = 0;
+    if (call.status == SN_VERDICT_UNSUPPORTED &&
+        sn_caches_pending(r->caches, &source, &requested, &assertion)) {
+        rb_ensure(retry_runtime, (VALUE)&call, clear_runtime, (VALUE)&call);
+    }
+    if (call.status == SN_VERDICT_UNSUPPORTED || !diagnostics) {
+        VALUE result = call.status == SN_VERDICT_UNSUPPORTED ? Qnil : (call.status ? Qtrue : Qfalse);
+        RB_GC_GUARD(owner);
+        RB_GC_GUARD(instance);
+        RB_GC_GUARD(self);
+        return result;
+    }
     size_t count = sn_report_len(h->report);
     VALUE output = rb_ary_new_capa(count);
     for (size_t index = 0; index < count; index++) {
@@ -567,19 +714,14 @@ static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, con
 }
 static VALUE diagnostics(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
-    return collect_diagnostics(self, instance, h, NULL, sn_root_index(h->engine), Qnil);
+    VALUE run = build_runner(self, sn_root_index(h->engine));
+    return evaluate_runner(run, instance, Qnil, 1);
 }
 static VALUE runner_diagnostics(VALUE self, VALUE instance) {
-    runner_holder *r;
-    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    holder *h = ready_program(r->owner);
-    return collect_diagnostics(self, instance, h, r->caches, r->root, Qnil);
+    return evaluate_runner(self, instance, Qnil, 1);
 }
 static VALUE runner_diagnostics_with_budget(VALUE self, VALUE instance, VALUE budget) {
-    runner_holder *r;
-    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    holder *h = ready_program(r->owner);
-    return collect_diagnostics(self, instance, h, r->caches, r->root, budget);
+    return evaluate_runner(self, instance, budget, 1);
 }
 void Init_schemurai_native(void) {
     /* Cache fixed IDs explicitly, independent of compiler-specific macros. */

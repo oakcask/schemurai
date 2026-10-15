@@ -32,7 +32,7 @@ module Schemurai
         when "multipleOf" then messages.multiple_of(operand.multiple_of)
         when "maxLength", "minLength", "maxItems", "minItems", "maxProperties", "minProperties"
           messages.size(keyword, operand.public_send(ATTRIBUTES.fetch(keyword)), detail)
-        when "pattern" then messages.pattern(operand.pattern)
+        when "pattern" then (detail == 1) ? messages.invalid_pattern(operand.pattern) : messages.pattern(operand.pattern)
         when "format" then messages.format(operand.format.name)
         when "contentEncoding" then messages.content_encoding
         when "contentMediaType" then messages.content_media_type

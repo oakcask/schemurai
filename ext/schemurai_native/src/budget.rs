@@ -47,6 +47,15 @@ impl Budget {
             ..Self::default()
         }
     }
+    pub fn resume(limits: Limits, deadline: &Cell<Option<Instant>>) -> Self {
+        let mut budget = Self::new(limits);
+        if let Some(original) = deadline.get() {
+            budget.deadline = Some(original);
+        } else {
+            deadline.set(budget.deadline);
+        }
+        budget
+    }
     pub fn timed(&self) -> bool {
         self.limits.enabled & 2 != 0
     }
@@ -106,6 +115,35 @@ mod tests {
                 enabled: 2,
                 ..Limits::default()
             })
+            .check_deadline()
+        );
+    }
+
+    #[test]
+    fn runtime_retries_retain_the_original_native_deadline() {
+        let original = Instant::now() - Duration::from_secs(1);
+        let deadline = Cell::new(Some(original));
+        let budget = Budget::resume(
+            Limits {
+                timeout: 10.0,
+                enabled: 2,
+                ..Limits::default()
+            },
+            &deadline,
+        );
+        assert!(!budget.check_deadline());
+        assert_eq!(budget.hit.get(), (2, 0));
+        assert_eq!(deadline.get(), Some(original));
+        deadline.set(None);
+        assert!(
+            Budget::resume(
+                Limits {
+                    timeout: 10.0,
+                    enabled: 2,
+                    ..Limits::default()
+                },
+                &deadline
+            )
             .check_deadline()
         );
     }

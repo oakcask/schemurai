@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../vm/limited_evaluator"
+require_relative "../ecma_regexp"
 require "schemurai_native"
 require_relative "diagnostics"
 

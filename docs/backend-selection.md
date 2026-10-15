@@ -78,6 +78,23 @@ Compilation callbacks use `rb_protect` in C; Ruby exceptions return through
 Rust as ordinary errors and are raised after the Rust stack has unwound.
 Rust panics are caught at evaluation/compilation entry points.
 
+Ruby-specific regexp behavior uses a runtime request rather than VM execution.
+Rust returns after releasing all borrowed views, memo state and partial reports;
+C then calls the shared ECMA translator and `Regexp#match?` through libruby.
+An invocation-local numeric-key table stores the observation, and native
+evaluation restarts using it. Before the first Ruby operation, a replay restores
+input-order property routing and the separate property-name phase so a
+reordered fast scan cannot expose an exception from an unvisited operation.
+The runner marks pending and completed observation
+handles for GC. An ensure handler clears results on success and exceptions;
+only compiled Ruby regexps persist on that validator. Ractors own separate
+tables and Ruby regexps. Both Ruby and native duration deadlines remain fixed
+across retries, and native error limits are checked before another runtime call.
+The existing Validator Rust matcher path needs no Ruby call or extra Ruby allocation.
+Cold runtime cases can repeat native traversal once per distinct observation,
+so many distinct strings may take quadratic traversal work. This bridge trades
+that cold-path cost for keeping Ruby calls entirely outside borrowed Rust frames.
+
 ### Evaluation design policy
 
 Native evaluation should share compiled rule metadata, predicates, lookup
@@ -730,8 +747,12 @@ views or string contents is copied across the boundary. Matcher heap
 memory is included in the native program's approximate `ObjectSpace.memsize_of`
 report. Lookaround, backreferences, named groups, inline flags, Unicode
 properties, class set operations, adjacent repetition operators, invalid input
-encodings, and other string encodings delegate to the VM to preserve regexp
-semantics and exceptions. The same matcher handles overlapping
+encodings, and other string encodings request Ruby's regexp behavior through
+the C boundary. `pattern` assertions convert `RegexpError` to validation errors
+and skip later format/content assertions, while pattern-property routing keeps
+the exception. Other encoding exceptions retain their class and message. The
+Ruby evaluator, VM and native runtime bridge share the ECMA translation helper.
+The same matching behavior handles overlapping
 `patternProperties` and their evaluated-property annotations.
 
 Integer schema bounds beyond i128 retain GC-rooted Ruby VALUE handles. Ordinary
@@ -756,7 +777,7 @@ to require successful reference resolution before sharing.
 
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
-Ruby-specific patterns, content transcoding for other encodings, unusual Numeric
+content transcoding for other encodings, unusual Numeric
 objects and invalid numeric operands. Successful
 detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
