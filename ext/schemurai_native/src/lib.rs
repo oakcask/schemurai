@@ -18,6 +18,7 @@ mod memo;
 mod memo_scope;
 mod number;
 mod pattern;
+mod pointer;
 mod runtime;
 // Some shared constants are consumed only by C or Ruby.
 #[allow(dead_code)]

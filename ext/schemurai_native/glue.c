@@ -33,6 +33,9 @@ extern int sn_caches_pending(const void *, VALUE *, VALUE *, int *);
 extern void sn_caches_mark(const void *);
 extern void sn_caches_begin(const void *);
 extern void sn_caches_observe(const void *);
+extern size_t sn_pointer_parts(const void *);
+extern void sn_pointer_part(const void *, size_t, const unsigned char **, size_t *, VALUE *);
+extern void sn_pointer_result(const void *, VALUE);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -105,7 +108,7 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps; void *caches; size_t root; st_table *matches; } runner_holder;
+typedef struct { VALUE owner, regexps, pointers; void *caches; size_t root; st_table *matches; } runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -123,6 +126,7 @@ static void runner_mark(void *ptr) {
     runner_holder *r = ptr;
     rb_gc_mark(r->owner);
     rb_gc_mark(r->regexps);
+    rb_gc_mark(r->pointers);
     if (r->caches) sn_caches_mark(r->caches);
     if (r->matches) st_foreach(r->matches, mark_pattern_matches, 0);
 }
@@ -191,6 +195,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     VALUE object = TypedData_Make_Struct(klass, runner_holder, &runner_type, r);
     r->owner = self;
     r->regexps = Qnil;
+    r->pointers = Qnil;
     r->root = index;
     r->caches = NULL;
     r->matches = NULL;
@@ -533,6 +538,7 @@ typedef struct {
     size_t instance_len;
     const unsigned char *schema_path;
     size_t schema_len;
+    VALUE instance_pointer, schema_pointer;
     int opcode;
     VALUE operand, instance;
     size_t detail;
@@ -574,6 +580,7 @@ static VALUE clear_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     st_foreach(call->runner->matches, release_matches, 0);
     st_clear(call->runner->matches);
+    call->runner->pointers = Qnil;
     sn_caches_runtime(call->runner->caches, call->runner->matches);
     sn_caches_begin(call->runner->caches);
     return Qnil;
@@ -601,6 +608,28 @@ static void evaluate_native(evaluation_call *call) {
         call->report ? "native diagnostics panicked" : "native evaluator panicked");
     if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
 }
+/* Each borrowed native text piece is copied before any Ruby method is called.
+ * The owning runner keeps the request and its name handles alive across GC. */
+static VALUE build_pointer(runner_holder *runner) {
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+    VALUE helper = rb_const_get(internal, rb_intern_const("JsonPointer"));
+    VALUE output = rb_utf8_str_new("", 0);
+    size_t count = sn_pointer_parts(runner->caches);
+    for (size_t index = 0; index < count; index++) {
+        const unsigned char *data;
+        size_t length;
+        VALUE key;
+        sn_pointer_part(runner->caches, index, &data, &length, &key);
+        if (length) rb_str_append(output, rb_utf8_str_new((const char *)data, length));
+        if (key != Qundef) {
+            VALUE escaped = rb_funcall(helper, rb_intern_const("escape"), 1, key);
+            rb_str_append(output, escaped);
+        }
+    }
+    RB_GC_GUARD(helper);
+    return output;
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -608,6 +637,11 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_POINTER) {
+        VALUE pointer = build_pointer(r);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return pointer;
+    }
     if (operation->kind == SN_RUNTIME_JSON) {
         VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
         rb_funcall(json, rb_intern_const("parse"), 1, instance);
@@ -650,6 +684,13 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
         verdict = RTEST(result) ? SN_VERDICT_VALID : SN_VERDICT_INVALID;
     }
     runner_holder *r = call->runner;
+    if (kind == SN_RUNTIME_POINTER) {
+        if (NIL_P(r->pointers)) r->pointers = rb_ary_new();
+        rb_ary_push(r->pointers, result);
+        sn_pointer_result(r->caches, result);
+        RB_GC_GUARD(result);
+        return;
+    }
     st_data_t bucket;
     if (!st_lookup(r->matches, (st_data_t)source, &bucket)) {
         bucket = (st_data_t)st_init_numtable();
@@ -714,8 +755,8 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         VALUE row = rb_ary_new_capa(7);
         rb_ary_push(output, row);
         rb_ary_push(row, rb_utf8_str_new((const char *)r.keyword, r.keyword_len));
-        rb_ary_push(row, rb_utf8_str_new((const char *)r.instance_path, r.instance_len));
-        rb_ary_push(row, rb_utf8_str_new((const char *)r.schema_path, r.schema_len));
+        rb_ary_push(row, NIL_P(r.instance_pointer) ? rb_utf8_str_new((const char *)r.instance_path, r.instance_len) : rb_str_dup(r.instance_pointer));
+        rb_ary_push(row, NIL_P(r.schema_pointer) ? rb_utf8_str_new((const char *)r.schema_path, r.schema_len) : rb_str_dup(r.schema_pointer));
         rb_ary_push(row, INT2NUM(r.opcode));
         rb_ary_push(row, r.operand);
         rb_ary_push(row, r.instance);

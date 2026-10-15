@@ -100,6 +100,15 @@ Ruby may build a temporary JSON value in this path; only its assertion result is
 retained. UTF-8, binary and valid US-ASCII content, including decoded Base64, keep
 the native parser. Runtime observations and retry deadlines are shared between
 regexp and JSON operations in `ext/schemurai_native/src/runtime.rs`.
+Diagnostic pointers retain native UTF-8 text and defer names with other or
+invalid encodings. Deferred names are escaped by the same Ruby helper as the
+Ruby and VM evaluators, then appended using Ruby's encoding compatibility rules.
+Pointer requests occur when recording an error, after the error-limit check,
+with the instance path before the schema path. They do not raise for paths
+whose errors are never recorded. The runtime request owns its native text and
+name handles across retries. The runner roots completed Ruby strings until the
+report takes ownership; report marking retains them through output allocation.
+UTF-8 diagnostic pointers keep native generation without Ruby calls.
 Cold runtime cases can repeat native traversal once per distinct observation,
 so many distinct strings may take quadratic traversal work. This bridge trades
 that cold-path cost for keeping Ruby calls entirely outside borrowed Rust frames.

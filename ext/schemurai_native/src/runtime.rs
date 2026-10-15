@@ -13,6 +13,17 @@ pub struct Caches {
     pending: std::cell::Cell<Option<(Value, Value, i32)>>,
     deadline: std::cell::Cell<Option<std::time::Instant>>,
     runtime_order: std::cell::Cell<bool>,
+    pointers: std::cell::RefCell<Pointers>,
+    pending_pointer: std::cell::Cell<Option<usize>>,
+}
+#[derive(Default)]
+struct Pointers {
+    indices: HashMap<std::sync::Arc<pointer::Path>, usize>,
+    requests: Vec<PointerRequest>,
+}
+struct PointerRequest {
+    path: std::sync::Arc<pointer::Path>,
+    result: Option<Value>,
 }
 unsafe extern "C" {
     fn sn_cached_runtime(matches: *const c_void, source: Value, value: Value) -> i32;
@@ -52,6 +63,30 @@ impl Caches {
         // Qundef cannot be a Ruby pattern operand, including malformed schemas.
         self.observe(unsafe { sn_undefined() }, value, RUNTIME_JSON)
     }
+    pub(super) fn pointer(&self, path: &pointer::Path) -> Result<Value, Verdict> {
+        let mut pointers = self.pointers.borrow_mut();
+        let index = if let Some(&index) = pointers.indices.get(path) {
+            index
+        } else {
+            let path = std::sync::Arc::new(path.clone());
+            let index = pointers.requests.len();
+            pointers.indices.insert(path.clone(), index);
+            pointers
+                .requests
+                .push(PointerRequest { path, result: None });
+            index
+        };
+        if let Some(value) = pointers.requests[index].result {
+            return Ok(value);
+        }
+        self.pending_pointer.set(Some(index));
+        self.pending.set(Some((
+            unsafe { sn_undefined() },
+            unsafe { sn_nil() },
+            RUNTIME_POINTER,
+        )));
+        Err(Unsupported)
+    }
     pub(super) fn invalid_regexp(&self, source: Value, value: Value) -> bool {
         let matches = self.matches.get();
         !matches.is_null() && unsafe { sn_cached_runtime(matches, source, value) } == REGEXP_INVALID
@@ -85,12 +120,26 @@ pub unsafe extern "C" fn sn_caches_free(caches: *mut Caches) {
 /// # Safety
 /// Caches must be live; call under the GVL or while all Ractors are stopped.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sn_caches_size(caches: *const Caches) -> usize {
+pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
     // GC may inspect a stopped runner while its search has borrowed a cache.
-    let Ok(caches) = (unsafe { &*caches }).searches.try_borrow() else {
+    let Ok(caches) = (unsafe { &*caches_ptr }).searches.try_borrow() else {
         return std::mem::size_of::<Caches>();
     };
+    let pointers = unsafe { &*caches_ptr }
+        .pointers
+        .try_borrow()
+        .map_or(0, |pointers| {
+            pointers.indices.capacity()
+                * std::mem::size_of::<(std::sync::Arc<pointer::Path>, usize)>()
+                + pointers.requests.capacity() * std::mem::size_of::<PointerRequest>()
+                + pointers
+                    .requests
+                    .iter()
+                    .map(|r| std::mem::size_of::<pointer::Path>() + r.path.memory_usage())
+                    .sum::<usize>()
+        });
     std::mem::size_of::<Caches>()
+        + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
         + caches
             .iter()
@@ -106,6 +155,7 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
     let caches = unsafe { &*caches };
     caches.matches.set(matches);
     caches.pending.set(None);
+    caches.pending_pointer.set(None);
 }
 /// # Safety
 /// Caches must be live and called only between complete validation calls.
@@ -113,8 +163,10 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
+    caches.pending_pointer.set(None);
     caches.deadline.set(None);
     caches.runtime_order.set(false);
+    *caches.pointers.borrow_mut() = Pointers::default();
 }
 /// # Safety
 /// Caches must be live and no Rust evaluation may be active.
@@ -122,6 +174,7 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
 pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
+    caches.pending_pointer.set(None);
     caches.runtime_order.set(true);
 }
 /// # Safety
@@ -148,12 +201,76 @@ pub unsafe extern "C" fn sn_caches_pending(
 /// Call from the owning runner's GC mark callback while caches are live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
+    // All keys also belong to the live original instance/schema. C roots every
+    // completed result before recording it, including during stopped-Ractor GC.
+    if let Ok(pointers) = unsafe { &*caches }.pointers.try_borrow() {
+        for request in &pointers.requests {
+            for &(_, key) in &request.path.names {
+                unsafe { sn_pin(key) };
+            }
+            if let Some(value) = request.result {
+                unsafe { sn_pin(value) };
+            }
+        }
+    }
+
     if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
         unsafe {
             sn_pin(source);
             sn_pin(value);
         }
     }
+}
+
+/// # Safety
+/// Caches must have a pending pointer request and be idle under the GVL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_pointer_parts(caches: *const Caches) -> usize {
+    let caches = unsafe { &*caches };
+    caches.pointers.borrow().requests[caches.pending_pointer.get().unwrap()]
+        .path
+        .names
+        .len()
+        + 1
+}
+/// # Safety
+/// Caches must have a pending pointer request; index must be in bounds and
+/// output pointers writable. Text remains owned by the request until cleanup.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_pointer_part(
+    caches: *const Caches,
+    index: usize,
+    data: *mut *const u8,
+    len: *mut usize,
+    key: *mut Value,
+) {
+    let caches = unsafe { &*caches };
+    let pointers = caches.pointers.borrow();
+    let path = &pointers.requests[caches.pending_pointer.get().unwrap()].path;
+    let start = if index == 0 {
+        0
+    } else {
+        path.names[index - 1].0
+    };
+    let (end, name) = path
+        .names
+        .get(index)
+        .copied()
+        .unwrap_or((path.text.len(), unsafe { sn_undefined() }));
+    unsafe {
+        *data = path.text.as_ptr().add(start);
+        *len = end - start;
+        *key = name;
+    }
+}
+/// # Safety
+/// Caches must have a pending pointer request. Value must be rooted by the
+/// owning C runner until cleanup, with no active Rust evaluation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_pointer_result(caches: *const Caches, value: Value) {
+    let caches = unsafe { &*caches };
+    caches.pointers.borrow_mut().requests[caches.pending_pointer.get().unwrap()].result =
+        Some(value);
 }
 
 #[cfg(test)]
