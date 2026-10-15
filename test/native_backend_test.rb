@@ -150,6 +150,110 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "validates plain Object and Symbol scalar types without VM execution" do
+    object = Object.new
+    object.instance_variable_set(:@cycle, object)
+    symbols = [:identity, :"native_identity_#{Process.pid}"]
+    rules = [true, false, {"type" => %w[null boolean object array number integer string]},
+      {"allOf" => [{"not" => {"type" => "number"}}, {"anyOf" => [{"type" => "string"}, true]}]}]
+    rules += %w[null boolean object array number integer string].map { |type| {"type" => type} }
+    schemas = rules + rules.map { |rule| {"items" => rule} } + rules.map { |rule| {"properties" => {"value" => rule}} }
+    values = [object, Object.new, *symbols]
+    expect_native_policy_results(schemas, values + values.map { |value| [value] } + values.map { |value| {"value" => value} })
+  end
+
+  it "checks scalar assertion adapters for plain Object and Symbol values" do
+    scalars = [Object.new, :identity, :"native_identity_adapter_#{Process.pid}"]
+    rules = [{"minimum" => 0, "maximum" => 1, "multipleOf" => 2}, {"minLength" => 1, "maxLength" => 2},
+      {"pattern" => "^a$"}, {"format" => "date"}, {"contentMediaType" => "application/json"},
+      {"contentEncoding" => "base64"}, {"required" => ["id"], "additionalProperties" => false}]
+    schemas = rules.flat_map { |rule| [rule, {"items" => rule}, {"items" => rule.merge("type" => "string")}] }
+    values = scalars + scalars.map { |value| [value, "bad"] } + scalars.map { |value| [value, "a"] }
+    expect_native_policy_results(schemas, values, format: true, content: true)
+  end
+
+  it "compares identity scalars with JSON constants and structural uniqueness" do
+    scalars = Array.new(24) { Object.new } + Array.new(24) { |i| :"native_identity_enum_#{Process.pid}_#{i}" }
+    schemas = [{"const" => 0}, {"const" => "identity"}, {"const" => [0, 1]},
+      {"enum" => (0...16).to_a}, {"enum" => (0...24).to_a},
+      {"enum" => Array.new(24) { |value| {"value" => [value]} }}, {"uniqueItems" => true}]
+    values = [scalars.first, scalars.last, Object.new, :other, scalars, scalars + [scalars.first],
+      [scalars.first, scalars.last], {"value" => [scalars.last]}, [{"value" => scalars.first}, {"value" => scalars.first}]]
+    expect_native_policy_results(schemas, values)
+  end
+
+  it "keeps identity scalars native under budgets, compaction and instance changes" do
+    schema = {"items" => {"anyOf" => [{"type" => "number"}, {"not" => {"type" => "string"}}]}, "uniqueItems" => true}
+    object = Object.new
+    values = [object, :identity, Object.new]
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    expected = [vm.valid?(values), vm.validate(values).errors]
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    expect(native.valid?(values, timeout: 10)).to eq(expected.first)
+    expect(native.validate(values, max_errors: 1, timeout: 10).errors).to eq(expected.last)
+    object.instance_variable_set(:@cycle, values)
+    values << object
+    expect(native.valid?(values, timeout: 10)).to be(false)
+    expect(native.validate(values, timeout: 10).errors.map(&:keyword)).to eq(["uniqueItems"])
+  end
+
+  it "keeps identity scalar uniqueness native in independent Ractor runners" do
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:identity" => {"uniqueItems" => true}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:identity")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        object = Object.new
+        values = [object, :identity, Object.new]
+        GC.start
+        first = runner.valid?(values)
+        values << object
+        [first, runner.valid?(values), runner.diagnostics(values).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, ["uniqueItems"]]) }
+  end
+
+  it "preserves class-wide overrides on identity scalar methods" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      klass = Object.const_get(ARGV.fetch(0))
+      method = ARGV.fetch(1)
+      value = klass == Symbol ? :identity : Object.new
+      schema = method == "is_a?" ? {"type" => "string"} : {"uniqueItems" => true}
+      input = if method == "is_a?"
+        value
+      elsif method == "hash"
+        [*(0...17), {"unused" => value}]
+      else
+        [value, value]
+      end
+      vm = Schemurai.compile(schema, backend: :vm)
+      native = Schemurai.compile(schema, backend: :native)
+      runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      original_class = Object.instance_method(:class)
+      klass.define_method(method) { |*| raise "class-wide override" }
+      capture = lambda do |validator|
+        validator.valid?(input).to_s
+      rescue => error
+        [original_class.bind_call(error).name, error.message]
+      end
+      expected = capture.call(vm)
+      abort "native bypassed an overridden method" unless runner.valid?(input).nil?
+      abort "different override behavior" unless capture.call(native) == expected
+      puts "ok"
+    RUBY
+    %w[Object Symbol].product(%w[== hash is_a? class instance_of?]).each do |klass, method|
+      output, errors, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script, klass, method)
+      expect(status.success?).to be(true), errors
+      expect(output).to eq("ok\n")
+    end
+  end
+
   it "reuses guarded kinds across same-location applicators and rechecks mutations" do # rubocop:disable RSpec/ExampleLength
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     integer = {"type" => "integer", "minimum" => 1}
@@ -438,8 +542,8 @@ RSpec.describe "native VALUE execution" do
     end
     native = Schemurai.compile(dialect.merge("contains" => {"const" => 1}), backend: :native)
     runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(runner.valid?([1, Object.new])).to be_nil
-    expect(runner.diagnostics([1, Object.new])).to be_nil
+    expect(runner.valid?([1, Object.new])).to be(true)
+    expect(runner.diagnostics([1, Object.new])).to eq([])
     expect_native_policy_results(schemas, [[], [0], [1], [1, 0, 2], [1, 1, 1, 1], [1, 1.0], [1, 2**200]])
   end
 
@@ -967,9 +1071,9 @@ RSpec.describe "native VALUE execution" do
     expect(program.valid?([*values, deep])).to be(true)
     expect(program.diagnostics([*values, deep])).not_to be_nil
     shared[0] = Object.new
-    expect(program.valid?(values)).to be_nil
+    expect(program.valid?(values)).to be(true)
     values[-1][0] = 0
-    expect(program.valid?(values)).to be_nil
+    expect(program.valid?(values)).to be(false)
   end
 
   it "discards structural results between calls and after compaction" do # rubocop:disable RSpec/ExampleLength
@@ -1092,8 +1196,8 @@ RSpec.describe "native VALUE execution" do
     rejected = [Object.new, 1]
     expect(program.valid?(rejected)).to be(false)
     expect(program.diagnostics(rejected)).not_to be_nil
-    # Equal shapes reach the unsupported nested value and retain VM fallback.
-    unsupported = [Object.new]
+    # Equal shapes still retain fallback for user-defined object classes.
+    unsupported = [Class.new.new]
     expect(program.valid?(unsupported)).to be_nil
     expect(program.diagnostics(unsupported)).to be_nil
     [rejected, unsupported].each do |value|
@@ -1154,8 +1258,9 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "preserves depth-first unsupported equality after the recursive prefix" do
-    left = [Object.new, 0]
-    right = [Object.new, 1]
+    klass = Class.new
+    left = [klass.new, 0]
+    right = [klass.new, 1]
     300.times do
       left = [left]
       right = [right]
@@ -1434,7 +1539,12 @@ RSpec.describe "native VALUE execution" do
     array.define_singleton_method(:length) { 0 }
     object = {"id" => 1}
     object.define_singleton_method(:key?) { |_key| false }
-    values = [[{"minLength" => 1}, string], [{"minItems" => 1}, array], [{"required" => ["id"]}, object],
+    identity = Object.new
+    identity.define_singleton_method(:==) { |_other| false }
+    typed = Object.new
+    typed.define_singleton_method(:is_a?) { |klass| klass == String }
+    values = [[{"uniqueItems" => true}, [identity, identity]], [{"type" => "string"}, typed],
+      [{"minLength" => 1}, string], [{"minItems" => 1}, array], [{"required" => ["id"]}, object],
       [{"type" => "string", "minLength" => 1}, Class.new(String).new("abc")],
       [{"type" => "array", "minItems" => 1}, Class.new(Array).new([1])],
       [{"items" => {"pattern" => "^a+$", "minLength" => 1}}, [string]],
@@ -2576,7 +2686,7 @@ RSpec.describe "native VALUE execution" do
     end.new
     rule = {"type" => "number", "minimum" => 0, "maximum" => 2**100}
     schemas = [rule, {"items" => rule}, {"properties" => {"value" => rule}}]
-    [numeric, Rational(3, 2), Complex(1, 2), Object.new, :number].each do |value|
+    [numeric, Rational(3, 2), Complex(1, 2)].each do |value|
       schemas.each_with_index do |schema, index|
         native = Schemurai.compile(schema, backend: :native)
         program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)

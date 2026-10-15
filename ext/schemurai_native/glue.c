@@ -9,6 +9,11 @@
 
 static ID id_resolve, id_schemurai, id_resolution_error;
 static ID id_root, id_compile, id_graph, id_dynamic_anchor, id_dynamic_anchor_names, id_dynamic_anchor_count;
+static ID identity_methods[5];
+/* Classification only requests metadata while Rust is active. Ruby method
+ * lookup, which can create callable entries, runs after that evaluation exits. */
+static _Thread_local const void *active_caches;
+extern int sn_identity_kind(const void *, VALUE);
 
 /* The C layer adapts CRuby APIs to Rust's opaque VALUEs. */
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
@@ -256,6 +261,10 @@ int sn_shallow_kind(VALUE value) {
         return SN_TYPE_NUMBER | ((isfinite(n) && trunc(n) == n) ? SN_TYPE_INTEGER : 0);
     }
     if (RB_TYPE_P(value, T_STRING)) return CLASS_OF(value) == rb_cString ? SN_TYPE_STRING : SN_TYPE_UNSUPPORTED;
+    /* Ordinary Object and Symbol equality is identity. Singleton classes still
+     * retain runtime dispatch, including custom equality/hash/type methods. */
+    if ((RB_SYMBOL_P(value) && CLASS_OF(value) == rb_cSymbol) || CLASS_OF(value) == rb_cObject)
+        return sn_identity_kind(active_caches, CLASS_OF(value));
     return SN_TYPE_UNSUPPORTED; /* Out-of-domain objects are handled by the Ruby VM. */
 }
 int sn_kind(VALUE value) {
@@ -590,6 +599,8 @@ static void evaluate_native(evaluation_call *call) {
     native_outcome outcome = {0};
     native_limits limits = {0};
     if (!NIL_P(call->budget)) limits = read_limits(call->budget);
+    const void *previous_caches = active_caches;
+    active_caches = r->caches;
     if (call->report) {
         if (NIL_P(call->budget)) {
             call->report->report = sn_diagnose(call->engine->engine, r->caches, r->root,
@@ -604,6 +615,7 @@ static void evaluate_native(evaluation_call *call) {
         call->status = sn_valid_with_limits(call->engine->engine, r->caches, r->root,
             call->instance, &limits, &outcome);
     }
+    active_caches = previous_caches;
     check_evaluation_status(call->status,
         call->report ? "native diagnostics panicked" : "native evaluator panicked");
     if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
@@ -637,6 +649,11 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_IDENTITY_METHODS) {
+        for (size_t index = 0; index < sizeof(identity_methods) / sizeof(*identity_methods); index++)
+            if (!rb_method_basic_definition_p(source, identity_methods[index])) return Qfalse;
+        return Qtrue;
+    }
     if (operation->kind == SN_RUNTIME_POINTER) {
         VALUE pointer = build_pointer(r);
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
@@ -780,6 +797,11 @@ static VALUE runner_diagnostics_with_budget(VALUE self, VALUE instance, VALUE bu
 }
 void Init_schemurai_native(void) {
     /* Cache fixed IDs explicitly, independent of compiler-specific macros. */
+    identity_methods[0] = rb_intern_const("is_a?");
+    identity_methods[1] = rb_intern_const("class");
+    identity_methods[2] = rb_intern_const("instance_of?");
+    identity_methods[3] = rb_intern_const("==");
+    identity_methods[4] = rb_intern_const("hash");
     id_resolve = rb_intern_const("resolve");
     id_schemurai = rb_intern_const("Schemurai");
     id_resolution_error = rb_intern_const("ResolutionError");

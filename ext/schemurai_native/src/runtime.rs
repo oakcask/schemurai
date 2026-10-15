@@ -107,6 +107,19 @@ impl Caches {
         Unsupported
     }
 }
+/// # Safety
+/// Caches must be null or the currently active runner's caches, and klass one
+/// of the exact identity scalar classes. No Ruby allocation is performed here.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_identity_kind(caches: *const Caches, klass: Value) -> i32 {
+    let Some(caches) = (unsafe { caches.as_ref() }) else {
+        return TYPE_UNSUPPORTED;
+    };
+    match caches.observe(klass, unsafe { sn_nil() }, RUNTIME_IDENTITY_METHODS) {
+        Valid => TYPE_IDENTITY_SCALAR,
+        Invalid | Unsupported => TYPE_UNSUPPORTED,
+    }
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn sn_caches_new() -> *mut Caches {
     Box::into_raw(Box::new(Caches::default()))

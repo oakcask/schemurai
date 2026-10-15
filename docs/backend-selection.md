@@ -809,6 +809,18 @@ diagnostics retain local attempted items/properties even when child validation
 fails, discard failed applicator annotations, and merge successful trial
 annotations before checking unevaluated locations. Native-only tests compare
 all 385 official unevaluated-location cases against the VM's complete errors.
+Exact `Symbol` and ordinary `Object` instances with their standard methods are
+native scalars outside the JSON type masks: they match no JSON type, and assertions for other types do not
+apply. Structural equality and `uniqueItems` compare their identities, with
+invocation-local fingerprints derived from the original handles. Instance
+variables do not participate in that comparison. Method-definition metadata is
+checked through libruby after Rust returns, because callable-method lookup may
+allocate. That observation lasts only for the current invocation; class-wide
+changes to type, equality or hash methods retain the VM compatibility path. The active
+runner is selected through thread-local C state only while Rust evaluates,
+keeping recursive C entry and separate Ractors isolated. Ordinary JSON values
+need no method-definition request. These inputs can be nested in
+ordinary arrays and string-keyed Hashes; schema operands must still be JSON-shaped.
 Builtin subclasses, singleton-method objects, and Hashes with nonstandard keys
 delegate to the VM before native field evaluation. Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
