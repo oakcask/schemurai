@@ -294,7 +294,7 @@ impl Execution<'_> {
                             }
                         }
                         if let Some(content) = &rules.content {
-                            match content.eval(value) {
+                            match content.eval(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => report.add(
                                     if content.base64 {
@@ -462,9 +462,12 @@ impl Execution<'_> {
                                 (_, Some((required, format)), _) => {
                                     format.visit_invalid_items(required, &values[start..], invalid)
                                 }
-                                (_, _, Some((required, content))) => {
-                                    content.visit_invalid_items(required, &values[start..], invalid)
-                                }
+                                (_, _, Some((required, content))) => content.visit_invalid_items(
+                                    self.caches,
+                                    required,
+                                    &values[start..],
+                                    invalid,
+                                ),
                                 _ => unreachable!("a scalar item scanner was selected"),
                             };
                             if status != Valid {
@@ -1000,14 +1003,14 @@ fn report_outcome(result: std::thread::Result<Result<*mut Report, i32>>) -> (*mu
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_diagnose(
     engine: *const Engine,
-    caches: *const pattern::Caches,
+    caches: *const runtime::Caches,
     root: usize,
     instance: Value,
     status: *mut i32,
 ) -> *mut Report {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let engine = unsafe { &*engine };
-        let local = pattern::Caches::default();
+        let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let execution = Execution {
             engine,
@@ -1030,7 +1033,7 @@ pub unsafe extern "C" fn sn_diagnose(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_diagnose_with_limits(
     engine: *const Engine,
-    caches: *const pattern::Caches,
+    caches: *const runtime::Caches,
     root: usize,
     instance: Value,
     status: *mut i32,
@@ -1038,7 +1041,7 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
     outcome: *mut budget::Outcome,
 ) -> *mut Report {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let local = pattern::Caches::default();
+        let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let limits = unsafe { *limits };
         let execution = Execution {

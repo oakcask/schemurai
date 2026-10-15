@@ -1,5 +1,6 @@
 //! Content validation borrows Ruby string storage. Base64 decoding uses bounded
-//! stack scratch; JSON scanning never constructs a tree.
+//! stack scratch; native JSON scanning never constructs a tree. Other source
+//! encodings request Ruby parsing after Rust evaluation returns.
 use super::*;
 use std::mem::MaybeUninit;
 
@@ -14,23 +15,36 @@ pub(super) struct Content {
     pub(super) json: bool,
 }
 impl Content {
-    pub(super) fn eval_items(&self, required: i32, values: &[Value]) -> Verdict {
-        self.visit_invalid_items(required, values, |_, _| Invalid)
+    pub(super) fn eval_items(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        values: &[Value],
+    ) -> Verdict {
+        self.visit_invalid_items(caches, required, values, |_, _| Invalid)
     }
     pub(super) fn visit_invalid_items(
         &self,
+        caches: &runtime::Caches,
         required: i32,
         values: &[Value],
         invalid: impl FnMut(usize, Value) -> Verdict,
     ) -> Verdict {
         match (self.base64, self.json) {
-            (true, true) => Self::visit_items_impl::<true, true>(required, values, invalid),
-            (true, false) => Self::visit_items_impl::<true, false>(required, values, invalid),
-            (false, true) => Self::visit_items_impl::<false, true>(required, values, invalid),
-            (false, false) => Self::visit_items_impl::<false, false>(required, values, invalid),
+            (true, true) => Self::visit_items_impl::<true, true>(caches, required, values, invalid),
+            (true, false) => {
+                Self::visit_items_impl::<true, false>(caches, required, values, invalid)
+            }
+            (false, true) => {
+                Self::visit_items_impl::<false, true>(caches, required, values, invalid)
+            }
+            (false, false) => {
+                Self::visit_items_impl::<false, false>(caches, required, values, invalid)
+            }
         }
     }
     fn visit_items_impl<const BASE64: bool, const JSON: bool>(
+        caches: &runtime::Caches,
         required: i32,
         values: &[Value],
         mut invalid: impl FnMut(usize, Value) -> Verdict,
@@ -45,9 +59,10 @@ impl Content {
             } else {
                 unsafe { sn_format_item_view(value, data.as_mut_ptr(), len.as_mut_ptr()) }
             };
-            let result = if kind == -TYPE_UNSUPPORTED || (JSON && !BASE64 && kind == ENCODING_OTHER)
-            {
+            let result = if kind == -TYPE_UNSUPPORTED {
                 Unsupported
+            } else if JSON && !BASE64 && kind == ENCODING_OTHER {
+                caches.json(value)
             } else if kind < 0 {
                 verdict(required == 0)
             } else {
@@ -55,12 +70,12 @@ impl Content {
                 let bytes = unsafe { byte_view(data.assume_init(), len.assume_init()) };
                 if JSON && !BASE64 {
                     if kind == ENCODING_ASCII && !bytes.is_ascii() {
-                        Unsupported
+                        caches.json(value)
                     } else {
                         json(bytes)
                     }
                 } else {
-                    Self::eval_impl::<true, BASE64, JSON>(value, bytes, 0)
+                    Self::eval_impl::<true, BASE64, JSON>(caches, value, bytes, 0)
                 }
             };
             match result {
@@ -76,26 +91,40 @@ impl Content {
         }
         Valid
     }
-    pub(super) fn eval(&self, value: Value) -> Verdict {
-        self.eval_selected::<false>(value, &[], 0)
+    pub(super) fn eval(&self, caches: &runtime::Caches, value: Value) -> Verdict {
+        self.eval_selected::<false>(caches, value, &[], 0)
     }
-    pub(super) fn eval_borrowed(&self, value: Value, bytes: &[u8], encoding: i32) -> Verdict {
-        self.eval_selected::<true>(value, bytes, encoding)
+    pub(super) fn eval_borrowed(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        bytes: &[u8],
+        encoding: i32,
+    ) -> Verdict {
+        self.eval_selected::<true>(caches, value, bytes, encoding)
     }
     fn eval_selected<const BORROWED: bool>(
         &self,
+        caches: &runtime::Caches,
         value: Value,
         bytes: &[u8],
         encoding: i32,
     ) -> Verdict {
         match (self.base64, self.json) {
-            (true, true) => Self::eval_impl::<BORROWED, true, true>(value, bytes, encoding),
-            (true, false) => Self::eval_impl::<BORROWED, true, false>(value, bytes, encoding),
-            (false, true) => Self::eval_impl::<BORROWED, false, true>(value, bytes, encoding),
-            (false, false) => Self::eval_impl::<BORROWED, false, false>(value, bytes, encoding),
+            (true, true) => Self::eval_impl::<BORROWED, true, true>(caches, value, bytes, encoding),
+            (true, false) => {
+                Self::eval_impl::<BORROWED, true, false>(caches, value, bytes, encoding)
+            }
+            (false, true) => {
+                Self::eval_impl::<BORROWED, false, true>(caches, value, bytes, encoding)
+            }
+            (false, false) => {
+                Self::eval_impl::<BORROWED, false, false>(caches, value, bytes, encoding)
+            }
         }
     }
     fn eval_impl<const BORROWED: bool, const BASE64: bool, const JSON: bool>(
+        caches: &runtime::Caches,
         value: Value,
         bytes: &[u8],
         encoding: i32,
@@ -142,7 +171,7 @@ impl Content {
                     _ => unsafe { sn_json_encoding(value) },
                 };
                 if encoding == ENCODING_OTHER || (encoding == ENCODING_ASCII && !bytes.is_ascii()) {
-                    return Unsupported;
+                    return caches.json(value);
                 }
             }
             if !JSON {

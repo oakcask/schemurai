@@ -78,9 +78,11 @@ Compilation callbacks use `rb_protect` in C; Ruby exceptions return through
 Rust as ordinary errors and are raised after the Rust stack has unwound.
 Rust panics are caught at evaluation/compilation entry points.
 
-Ruby-specific regexp behavior uses a runtime request rather than VM execution.
+Ruby-specific regexp behavior and JSON content transcoding use runtime requests
+rather than VM execution.
 Rust returns after releasing all borrowed views, memo state and partial reports;
-C then calls the shared ECMA translator and `Regexp#match?` through libruby.
+C then calls the shared ECMA translator and `Regexp#match?`, or `JSON.parse`,
+through libruby.
 An invocation-local numeric-key table stores the observation, and native
 evaluation restarts using it. Before the first Ruby operation, a replay restores
 input-order property routing and the separate property-name phase so a
@@ -91,6 +93,13 @@ only compiled Ruby regexps persist on that validator. Ractors own separate
 tables and Ruby regexps. Both Ruby and native duration deadlines remain fixed
 across retries, and native error limits are checked before another runtime call.
 The existing Validator Rust matcher path needs no Ruby call or extra Ruby allocation.
+JSON content with other source encodings, or invalid US-ASCII bytes, uses Ruby
+for encoding conversion and parsing. It preserves the VM's rescue of
+`ArgumentError` and `JSON::ParserError`, while propagating encoding exceptions.
+Ruby may build a temporary JSON value in this path; only its assertion result is
+retained. UTF-8, binary and valid US-ASCII content, including decoded Base64, keep
+the native parser. Runtime observations and retry deadlines are shared between
+regexp and JSON operations in `ext/schemurai_native/src/runtime.rs`.
 Cold runtime cases can repeat native traversal once per distinct observation,
 so many distinct strings may take quadratic traversal work. This bridge trades
 that cold-path cost for keeping Ruby calls entirely outside borrowed Rust frames.
@@ -777,8 +786,7 @@ to require successful reference resolution before sharing.
 
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
-content transcoding for other encodings, unusual Numeric
-objects and invalid numeric operands. Successful
+unusual Numeric objects and invalid numeric operands. Successful
 detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required

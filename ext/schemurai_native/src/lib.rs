@@ -18,6 +18,7 @@ mod memo;
 mod memo_scope;
 mod number;
 mod pattern;
+mod runtime;
 // Some shared constants are consumed only by C or Ruby.
 #[allow(dead_code)]
 mod protocol {
@@ -204,7 +205,7 @@ impl StringRules {
     fn eval_length_guarded(&self, required: i32, value: Value) -> Verdict {
         length_guarded(value, required, self.min, self.max)
     }
-    fn eval_guarded(&self, caches: &pattern::Caches, required: i32, value: Value) -> Verdict {
+    fn eval_guarded(&self, caches: &runtime::Caches, required: i32, value: Value) -> Verdict {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
@@ -217,12 +218,12 @@ impl StringRules {
             self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
         }
     }
-    fn eval(&self, caches: &pattern::Caches, value: Value) -> Verdict {
+    fn eval(&self, caches: &runtime::Caches, value: Value) -> Verdict {
         self.eval_with_view::<false>(caches, value, None)
     }
     fn eval_with_view<const BORROWED: bool>(
         &self,
-        caches: &pattern::Caches,
+        caches: &runtime::Caches,
         value: Value,
         view: Option<(&[u8], i32)>,
     ) -> Verdict {
@@ -253,8 +254,8 @@ impl StringRules {
             }
         }
         self.content.as_ref().map_or(Valid, |content| match view {
-            Some((bytes, encoding)) => content.eval_borrowed(value, bytes, encoding),
-            None => content.eval(value),
+            Some((bytes, encoding)) => content.eval_borrowed(caches, value, bytes, encoding),
+            None => content.eval(caches, value),
         })
     }
 }
@@ -485,7 +486,7 @@ impl Object {
     // input-order diagnostic scans visit them here as well.
     fn visit_value_rules(
         &self,
-        caches: &pattern::Caches,
+        caches: &runtime::Caches,
         budget: &budget::Budget,
         properties: bool,
         key: Value,
@@ -1174,10 +1175,10 @@ impl Engine {
     }
 }
 
-// A view of immutable compiled data and validator-owned regex search caches.
+// A view of immutable compiled data and validator-owned runtime caches.
 struct Execution<'a> {
     engine: &'a Engine,
-    caches: &'a pattern::Caches,
+    caches: &'a runtime::Caches,
     memo: memo::Memo,
     budget: budget::Budget,
 }
@@ -1520,8 +1521,11 @@ impl Execution<'_> {
                     return result;
                 }
             } else if let Some((required, content)) = content {
-                let result =
-                    content.eval_items(required, values.get(r.prefix.len()..).unwrap_or(&[]));
+                let result = content.eval_items(
+                    self.caches,
+                    required,
+                    values.get(r.prefix.len()..).unwrap_or(&[]),
+                );
                 if result != Valid {
                     return result;
                 }
@@ -3149,13 +3153,13 @@ pub unsafe extern "C" fn sn_root_at(roots: *const Roots, index: usize) -> Value 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_valid(
     engine: *const Engine,
-    caches: *const pattern::Caches,
+    caches: *const runtime::Caches,
     root: usize,
     value: Value,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &*engine };
-        let local = pattern::Caches::default();
+        let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let execution = Execution {
             engine: e,
@@ -3173,14 +3177,14 @@ pub unsafe extern "C" fn sn_valid(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_valid_with_limits(
     engine: *const Engine,
-    caches: *const pattern::Caches,
+    caches: *const runtime::Caches,
     root: usize,
     value: Value,
     limits: *const budget::Limits,
     outcome: *mut budget::Outcome,
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let local = pattern::Caches::default();
+        let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         let execution = Execution {
             engine: unsafe { &*engine },

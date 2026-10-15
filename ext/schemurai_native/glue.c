@@ -150,7 +150,7 @@ static size_t runner_size(const void *ptr) {
 }
 /* Numeric-key lookups only: Rust calls this while borrowing instance storage.
  * Table mutations, Ruby calls and allocations happen after Rust returns. */
-int sn_cached_regexp(const void *matches, VALUE source, VALUE instance) {
+int sn_cached_runtime(const void *matches, VALUE source, VALUE instance) {
     st_data_t bucket, result;
     if (st_lookup((st_table *)matches, (st_data_t)source, &bucket)
         && st_lookup((st_table *)bucket, (st_data_t)instance, &result)) return (int)result;
@@ -601,13 +601,19 @@ static void evaluate_native(evaluation_call *call) {
         call->report ? "native diagnostics panicked" : "native evaluator panicked");
     if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
 }
-typedef struct { evaluation_call *call; VALUE source, instance; } regexp_call;
-static VALUE call_regexp(VALUE context) {
-    regexp_call *operation = (regexp_call *)context;
+typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
+static VALUE call_runtime(VALUE context) {
+    runtime_call *operation = (runtime_call *)context;
     evaluation_call *call = operation->call;
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_JSON) {
+        VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
+        rb_funcall(json, rb_intern_const("parse"), 1, instance);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return Qtrue;
+    }
     if (NIL_P(r->regexps)) r->regexps = rb_hash_new();
     VALUE regexp = rb_hash_lookup2(r->regexps, source, Qundef);
     if (regexp == Qundef) {
@@ -622,16 +628,24 @@ static VALUE call_regexp(VALUE context) {
     RB_GC_GUARD(regexp);
     return result;
 }
-static void evaluate_regexp(evaluation_call *call, VALUE source, VALUE instance, int assertion) {
-    regexp_call operation = {call, source, instance};
+static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance, int kind) {
+    runtime_call operation = {call, source, instance, kind};
     VALUE previous = rb_errinfo();
     int state = 0;
-    VALUE result = rb_protect(call_regexp, (VALUE)&operation, &state);
+    VALUE result = rb_protect(call_runtime, (VALUE)&operation, &state);
     int verdict;
     if (state) {
-        if (!assertion || !rb_obj_is_kind_of(rb_errinfo(), rb_eRegexpError)) rb_jump_tag(state);
+        VALUE error = rb_errinfo();
+        if (kind == SN_RUNTIME_JSON) {
+            VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
+            VALUE parser_error = rb_const_get(json, rb_intern_const("ParserError"));
+            if (!rb_obj_is_kind_of(error, rb_eArgError) && !rb_obj_is_kind_of(error, parser_error)) rb_jump_tag(state);
+            verdict = SN_VERDICT_INVALID;
+        } else {
+            if (kind != SN_RUNTIME_REGEXP_ASSERTION || !rb_obj_is_kind_of(error, rb_eRegexpError)) rb_jump_tag(state);
+            verdict = SN_REGEXP_INVALID;
+        }
         rb_set_errinfo(previous);
-        verdict = SN_REGEXP_INVALID;
     } else {
         verdict = RTEST(result) ? SN_VERDICT_VALID : SN_VERDICT_INVALID;
     }
@@ -647,19 +661,19 @@ static void evaluate_regexp(evaluation_call *call, VALUE source, VALUE instance,
     RB_GC_GUARD(instance);
 }
 /* Each retry starts after Rust has returned and dropped all borrowed views,
- * memo entries and partial reports. Only pure Regexp observations are cached.
+ * memo entries and partial reports. Only pure assertion observations are cached.
  * The original Ruby deadline survives every pass and runtime operation. */
 static VALUE retry_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     VALUE source = Qnil, instance = Qnil;
-    int assertion = 0;
+    int operation = 0;
     /* Reordered fast scans may have requested an operation the VM would never
      * reach. Replay in observable order before invoking any Ruby method. */
     sn_caches_observe(call->runner->caches);
     evaluate_native(call);
     while (call->status == SN_VERDICT_UNSUPPORTED &&
-           sn_caches_pending(call->runner->caches, &source, &instance, &assertion)) {
-        evaluate_regexp(call, source, instance, assertion);
+           sn_caches_pending(call->runner->caches, &source, &instance, &operation)) {
+        evaluate_runtime(call, source, instance, operation);
         sn_caches_runtime(call->runner->caches, call->runner->matches);
         evaluate_native(call);
     }
@@ -679,9 +693,9 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
     clear_runtime((VALUE)&call);
     evaluate_native(&call);
     VALUE source = Qnil, requested = Qnil;
-    int assertion = 0;
+    int operation = 0;
     if (call.status == SN_VERDICT_UNSUPPORTED &&
-        sn_caches_pending(r->caches, &source, &requested, &assertion)) {
+        sn_caches_pending(r->caches, &source, &requested, &operation)) {
         rb_ensure(retry_runtime, (VALUE)&call, clear_runtime, (VALUE)&call);
     }
     if (call.status == SN_VERDICT_UNSUPPORTED || !diagnostics) {
