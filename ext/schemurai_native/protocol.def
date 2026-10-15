@@ -65,6 +65,7 @@ SN_CONSTANT(RUNTIME_DIAGNOSTIC_MESSAGE, 6)
 SN_CONSTANT(RUNTIME_SCALAR_CONTAINS, 7)
 /* Null numeric requests add twice the assertion bit and the decimal-mode bit. */
 SN_CONSTANT(RUNTIME_NULL_NUMBER, 8)
+SN_CONSTANT(RUNTIME_ARRAY_CHILDREN, 62)
 SN_CONSTANT(RUNTIME_CALLBACK_CHECKPOINT, 63)
 /* Type requests add twice the type mask and the union-opcode bit. */
 SN_CONSTANT(RUNTIME_TYPE, 64)

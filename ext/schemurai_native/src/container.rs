@@ -1,4 +1,4 @@
-//! Ruby container headers without child-schema traversal or native storage loans.
+//! Ruby container primitives and native-child requests without storage loans.
 use super::*;
 
 #[derive(Debug)]
@@ -28,6 +28,16 @@ impl Header {
         scalar: (i32, i32),
     ) -> Verdict {
         caches.contains(self.source, value, child, depth, required, scalar)
+    }
+    pub(super) fn children(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+        node: usize,
+        depth: usize,
+    ) -> Verdict {
+        caches.array_children(self.source, value, node, depth, required)
     }
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
         !self.native_bounds
@@ -149,7 +159,7 @@ impl Engine {
     // user block through the VM. Postorder leaves cycles unproven.
     pub(super) fn compile_scalar_callback_depths(&mut self) {
         if !self.nodes.iter().flatten().any(|op| {
-            matches!(op, Op::Array(_, rules) if rules.has_no_item_schemas() && rules.contains.is_some())
+            matches!(op, Op::Array(_, rules) if rules.unevaluated.is_none() && !rules.header_only())
         }) {
             self.scalar_callback_depths.clear();
             self.callback_child_depths.clear();
@@ -175,11 +185,9 @@ impl Engine {
                     | Op::Const(_)
                     | Op::Enum(_) => {}
                     Op::Array(_, rules) if rules.header_only() => {}
-                    Op::Array(_, rules)
-                        if rules.has_no_item_schemas() && rules.contains.is_some() =>
-                    {
+                    Op::Array(_, rules) if rules.unevaluated.is_none() => {
                         contains[node] = true;
-                        edges[node].push(rules.contains.expect("contains child"))
+                        edges[node].extend(rules.callback_children().copied());
                     }
                     Op::Object(_, rules) if rules.header_only() => {}
                     Op::Ref(reference) => match reference.static_target() {
@@ -216,8 +224,8 @@ impl Engine {
             }
             let contains_children_safe = self.nodes[node].iter().all(|op| match op {
                 Op::Array(_, rules) => rules
-                    .contains
-                    .is_none_or(|child| child_depths[child].is_some()),
+                    .callback_children()
+                    .all(|&child| child_depths[child].is_some()),
                 _ => true,
             });
             if admitted[node] && contains_children_safe {
@@ -238,20 +246,22 @@ impl Engine {
             _ => (CALLBACK_RUNTIME, 0),
         }
     }
-    pub(super) fn scalar_contains_node(&self, node: usize) -> bool {
-        self.nodes[node]
-            .iter()
-            .any(|op| matches!(op, Op::Array(_, rules) if self.scalar_contains(rules)))
+    pub(super) fn callback_array_node(&self, node: usize) -> bool {
+        self.nodes[node].iter().any(|op| {
+            matches!(op, Op::Array(_, rules) if !rules.header_only() && self.array_callbacks(rules))
+        })
     }
-    // Isolated children need no inherited dynamic binding or exported coverage.
-    // The postorder proof covers scalar/control flow and header-only containers.
-    pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
-        rules.has_no_item_schemas()
-            && rules.contains.is_some_and(|child| {
+    // Children share no inherited dynamic binding or exported coverage.
+    pub(super) fn array_callbacks(&self, rules: &Array) -> bool {
+        rules.unevaluated.is_none()
+            && rules.callback_children().all(|&child| {
                 self.callback_child_depths
                     .get(child)
                     .is_some_and(Option::is_some)
             })
+    }
+    pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
+        rules.has_no_item_schemas() && rules.contains.is_some() && self.array_callbacks(rules)
     }
     pub(super) fn container_header(
         &mut self,
@@ -331,6 +341,13 @@ impl Engine {
     }
 }
 impl Array {
+    fn callback_children(&self) -> impl Iterator<Item = &usize> {
+        self.prefix
+            .iter()
+            .chain(&self.items)
+            .chain(self.additional.iter().filter(|_| self.list))
+            .chain(self.contains.iter())
+    }
     fn has_no_item_schemas(&self) -> bool {
         self.prefix.is_empty()
             && self.items.is_empty()

@@ -30,6 +30,7 @@ extern void *sn_new(void);
 extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
 extern int sn_valid(const void *, const void *, size_t, VALUE, size_t);
 extern size_t sn_node_index(const void *, VALUE);
+extern int sn_callback_kind(const void *, size_t, int *);
 extern size_t sn_root_index(const void *);
 extern int sn_has_unresolved_references(const void *);
 extern size_t sn_root_count(const void *);
@@ -138,7 +139,7 @@ static VALUE build_runner(VALUE, size_t);
  * owner keeps the shared engine and all its GC roots alive. */
 typedef struct { size_t max_errors; uint32_t enabled; double timeout; } native_limits;
 typedef struct {
-    VALUE owner, parent, active_budget, callback_scope;
+    VALUE owner, parent, active_budget, callback_scope, child_callbacks;
     VALUE regexps, limited_regexps, pointers, messages, frames;
     VALUE number_state, limited_number_state, string_state, limited_string_state;
     void *caches;
@@ -176,6 +177,7 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->parent);
     rb_gc_mark(r->active_budget);
     rb_gc_mark(r->callback_scope);
+    rb_gc_mark(r->child_callbacks);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->limited_regexps);
     rb_gc_mark(r->pointers);
@@ -285,6 +287,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->parent = Qnil;
     r->active_budget = Qnil;
     r->callback_scope = Qnil;
+    r->child_callbacks = Qnil;
     r->scope_owner = 0;
     r->closed_limited = 0;
     r->callback_kind = SN_CALLBACK_RUNTIME;
@@ -943,13 +946,14 @@ static VALUE call_runtime(VALUE context) {
      * Ruby exception. The native deadline continues across every retry. */
     int staged = (operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL)
         || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches)
-        || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS;
+        || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
+        || operation->kind == SN_RUNTIME_ARRAY_CHILDREN;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
     if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
         return Qtrue;
     }
-    if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS) {
+    if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS || operation->kind == SN_RUNTIME_ARRAY_CHILDREN) {
         contains_arguments arguments;
         sn_contains_arguments(r->caches, &arguments);
         VALUE callback = build_runner(r->owner, arguments.child);
@@ -963,7 +967,10 @@ static VALUE call_runtime(VALUE context) {
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
         VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
         VALUE checks = rb_const_get(internal, rb_intern_const("ContainerChecks"));
-        VALUE klass = rb_const_get(checks, rb_intern_const(NIL_P(call->budget) ? "ContainsFrame" : "LimitedContainsFrame"));
+        const char *frame_name = operation->kind == SN_RUNTIME_SCALAR_CONTAINS
+            ? (NIL_P(call->budget) ? "ContainsFrame" : "LimitedContainsFrame")
+            : (NIL_P(call->budget) ? "ArrayChildrenFrame" : "LimitedArrayChildrenFrame");
+        VALUE klass = rb_const_get(checks, rb_intern(frame_name));
         VALUE args[] = {arguments.rules, arguments.instance, call->budget, INT2FIX(arguments.required), callback};
         VALUE frame = rb_class_new_instance(5, args, klass);
         VALUE result = rb_funcall(frame, rb_intern_const("valid?"), 0);
@@ -1246,6 +1253,32 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
     RB_GC_GUARD(self);
     return result;
 }
+/* Ruby selects the child using the original rules and indexed methods. The
+ * compiled Program is an opaque identity key, never interpreted in Ruby. */
+static VALUE runner_evaluate_child(VALUE self, VALUE program, VALUE instance) {
+    runner_holder *factory;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, factory);
+    if (NIL_P(factory->parent) || !factory->callback_context)
+        rb_raise(rb_eRuntimeError, "not a native child factory");
+    if (NIL_P(factory->child_callbacks)) factory->child_callbacks = rb_hash_new();
+    VALUE callback = rb_hash_lookup2(factory->child_callbacks, program, Qundef);
+    if (callback == Qundef) {
+        holder *owner = ready_program(factory->owner);
+        size_t index = sn_node_index(owner->engine, program);
+        if (index == SIZE_MAX) rb_raise(rb_eRuntimeError, "native child was not compiled");
+        callback = build_runner(factory->owner, index);
+        runner_holder *child;
+        TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+        child->parent = factory->parent;
+        child->depth = factory->depth;
+        child->callback_context = 1;
+        child->callback_kind = sn_callback_kind(owner->engine, index, &child->callback_flags);
+        rb_hash_aset(factory->child_callbacks, program, callback);
+    }
+    VALUE result = scalar_callback(callback, instance);
+    RB_GC_GUARD(self);
+    return result;
+}
 static VALUE diagnostics(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
     VALUE run = build_runner(self, sn_root_index(h->engine));
@@ -1298,6 +1331,7 @@ void Init_schemurai_native(void) {
     VALUE runner_class = rb_define_class_under(klass, "Runner", rb_cObject);
     rb_undef_alloc_func(runner_class);
     rb_define_method(runner_class, "call", scalar_callback, 1);
+    rb_define_method(runner_class, "evaluate_child", runner_evaluate_child, 2);
     rb_define_method(runner_class, "share_scalar_state", runner_share_scalar_state, 2);
     rb_define_method(runner_class, "valid?", runner_valid, 1);
     rb_define_method(runner_class, "valid_with_budget", runner_valid_with_budget, 2);

@@ -61,7 +61,7 @@ module Schemurai
       include Internal::ValueEquality
       include Internal::ContainerChecks::Bounds
       include Internal::ContainerChecks::Required
-      include Internal::ContainerChecks::Contains
+      include Internal::ContainerChecks::ArrayChildren
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
@@ -518,43 +518,7 @@ module Schemurai
         return false unless valid_container_bounds?(length, rules.max_items, rules.min_items)
         return false if rules.unique && !unique_items?(value)
 
-        if (prefix_items = rules.prefix_items)
-          prefix_items.each_with_index do |child, index|
-            @budget&.checkpoint
-            break if index >= length
-            return false unless evaluate_valid(child, value[index])
-          end
-        end
-
-        items = rules.items
-        if rules.items_list
-          items.each_with_index do |child, index|
-            @budget&.checkpoint
-            break if index >= length
-            return false unless evaluate_valid(child, value[index])
-          end
-          if length > items.length && (additional = rules.additional)
-            index = items.length
-            while index < length
-              @budget&.checkpoint
-              return false unless evaluate_valid(additional, value[index])
-              index += 1
-            end
-          end
-        elsif items
-          start = rules.prefix_items&.length || 0
-          index = start
-          while index < length
-            @budget&.checkpoint
-            return false unless evaluate_valid(items, value[index])
-            index += 1
-          end
-        end
-
-        if (contains = rules.contains)
-          return false unless valid_contains?(rules, value) { |item| evaluate_valid(contains, item) }
-        end
-        true
+        valid_array_children?(rules, value, length) { |child, item| evaluate_valid(child, item) }
       end
 
       private def check_array(rules, value, prior_evaluation)

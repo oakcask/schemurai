@@ -120,12 +120,8 @@ impl Caches {
         required: i32,
         scalar: (i32, i32),
     ) -> Verdict {
-        let Ok(ordinal) = self.next_call() else {
-            return Unsupported;
-        };
-        let result = self.observe(ordinal, instance, RUNTIME_SCALAR_CONTAINS);
-        if result == Unsupported {
-            self.pending_contains.set(Some(ContainsArguments {
+        self.children_request(
+            ContainsArguments {
                 rules,
                 instance,
                 child,
@@ -133,7 +129,38 @@ impl Caches {
                 required,
                 scalar_kind: scalar.0,
                 scalar_flags: scalar.1,
-            }));
+            },
+            RUNTIME_SCALAR_CONTAINS,
+        )
+    }
+    pub(super) fn array_children(
+        &self,
+        rules: Value,
+        instance: Value,
+        node: usize,
+        depth: usize,
+        required: i32,
+    ) -> Verdict {
+        self.children_request(
+            ContainsArguments {
+                rules,
+                instance,
+                child: node,
+                depth,
+                required,
+                scalar_kind: CALLBACK_RUNTIME,
+                scalar_flags: 0,
+            },
+            RUNTIME_ARRAY_CHILDREN,
+        )
+    }
+    fn children_request(&self, arguments: ContainsArguments, operation: i32) -> Verdict {
+        let Ok(ordinal) = self.next_call() else {
+            return Unsupported;
+        };
+        let result = self.observe(ordinal, arguments.instance, operation);
+        if result == Unsupported {
+            self.pending_contains.set(Some(arguments));
         }
         result
     }
@@ -608,7 +635,7 @@ pub unsafe extern "C" fn sn_caches_deadline_expired(caches: *const Caches) -> i3
     )
 }
 /// # Safety
-/// Caches must hold a pending contains request and output must be writable.
+/// Caches must hold a pending child request and output must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_contains_arguments(
     caches: *const Caches,

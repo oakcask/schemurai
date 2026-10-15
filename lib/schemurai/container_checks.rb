@@ -53,8 +53,52 @@ module Schemurai
         end
       end
 
-      # Frames evaluate container value operations without child schemas.
-      # Child schema execution remains with the native traversal.
+      module ArrayChildren
+        include Contains
+
+        private def valid_array_children?(rules, value, length)
+          if (prefix_items = rules.prefix_items)
+            prefix_items.each_with_index do |child, index|
+              @budget&.checkpoint
+              break if index >= length
+              return false unless yield(child, value[index])
+            end
+          end
+
+          items = rules.items
+          if rules.items_list
+            items.each_with_index do |child, index|
+              @budget&.checkpoint
+              break if index >= length
+              return false unless yield(child, value[index])
+            end
+            if length > items.length && (additional = rules.additional)
+              index = items.length
+              while index < length
+                @budget&.checkpoint
+                return false unless yield(additional, value[index])
+                index += 1
+              end
+            end
+          elsif items
+            start = rules.prefix_items&.length || 0
+            index = start
+            while index < length
+              @budget&.checkpoint
+              return false unless yield(items, value[index])
+              index += 1
+            end
+          end
+
+          if (contains = rules.contains)
+            return false unless valid_contains?(rules, value) { |item| yield(contains, item) }
+          end
+          true
+        end
+      end
+
+      # Frames preserve Ruby container operations. Compiled child schema
+      # execution remains with the native traversal.
       class Frame
         include Bounds
 
@@ -137,13 +181,15 @@ module Schemurai
         include ValueEquality::Checkpoints
       end
 
-      class ContainsFrame < ArrayFrame
-        include Contains
-
+      class CallbackArrayFrame < ArrayFrame
         def initialize(rules, value, budget, required, callback)
           super(rules, value, budget, required)
           @callback = callback
         end
+      end
+
+      class ContainsFrame < CallbackArrayFrame
+        include Contains
 
         private def valid_tail?(length)
           return false unless super
@@ -153,6 +199,20 @@ module Schemurai
       end
 
       class LimitedContainsFrame < ContainsFrame
+        include ValueEquality::Checkpoints
+      end
+
+      class ArrayChildrenFrame < CallbackArrayFrame
+        include ArrayChildren
+
+        private def valid_tail?(length)
+          return false unless unique?
+
+          valid_array_children?(@rules, @value, length) { |child, item| @callback.evaluate_child(child, item) }
+        end
+      end
+
+      class LimitedArrayChildrenFrame < ArrayChildrenFrame
         include ValueEquality::Checkpoints
       end
 
