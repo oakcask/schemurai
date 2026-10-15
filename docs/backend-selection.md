@@ -485,7 +485,10 @@ slots, wrapping at the capacity boundary. Every fingerprint
 collision is resolved with exact JSON equality. Small arrays use direct
 comparisons. Native index storage is capped at 64 MiB and uses fallible
 allocation. When a fingerprint is unavailable or index allocation is declined,
-native evaluation uses the same ordered direct comparisons as small arrays.
+native evaluation first proves the input graph contains only ordinary,
+acyclic values, then uses the same ordered direct comparisons as small arrays.
+The proof uses an explicit stack without the fingerprint depth bound. Special
+or cyclic values still delegate, preserving Ruby fingerprint callbacks and errors.
 This can take quadratic work but does not require VM execution for ordinary
 JSON values.
 Container equality visits nested values

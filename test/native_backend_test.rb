@@ -722,8 +722,8 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     [Class.new(Array).new, Class.new(Hash).new, Class.new(String).new("item")].each do |special|
-      expect(program.valid?(values + [{"special" => special}])).to be(true)
-      expect(program.diagnostics(values + [{"special" => special}])).to eq([])
+      expect(program.valid?(values + [{"special" => special}])).to be_nil
+      expect(program.diagnostics(values + [{"special" => special}])).to be_nil
       duplicates = values + Array.new(2) { {"special" => special} }
       expect(program.valid?(duplicates)).to be_nil
       expect(program.diagnostics(duplicates)).to be_nil
@@ -960,7 +960,7 @@ RSpec.describe "native VALUE execution" do
     expect(program.valid?([*values, deep])).to be(true)
     expect(program.diagnostics([*values, deep])).not_to be_nil
     shared[0] = Object.new
-    expect(program.valid?(values)).to be(true)
+    expect(program.valid?(values)).to be_nil
     values[-1][0] = 0
     expect(program.valid?(values)).to be_nil
   end
@@ -1166,6 +1166,21 @@ RSpec.describe "native VALUE execution" do
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     expect(program.valid?([cycle, cycle])).to be_nil
     expect(program.diagnostics([cycle, cycle])).to be_nil
+    expect(program.valid?([*Array.new(17) { |i| i }, cycle])).to be_nil
+    expect(program.diagnostics([*Array.new(17) { |i| i }, cycle])).to be_nil
+  end
+
+  it "does not skip custom fingerprint exceptions when direct comparisons would see disjoint shapes" do
+    special = Object.new
+    special.define_singleton_method(:hash) { raise "custom fingerprint" }
+    value = Array.new(17) { |i| i } + [{"unused" => special}]
+    schema = {"uniqueItems" => true}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    [native, vm].each do |validator|
+      expect { validator.valid?(value) }.to raise_error(RuntimeError, "custom fingerprint")
+      expect { validator.validate(value) }.to raise_error(RuntimeError, "custom fingerprint")
+    end
   end
 
   it "keeps enum comparisons native at the schema evaluation depth boundary" do # rubocop:disable RSpec/ExampleLength

@@ -2588,7 +2588,10 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         },
         |a, b| equal_budgeted(a, b, depth, budget),
     );
-    if result == Unsupported && budget.checkpoint() {
+    if result == Unsupported
+        && budget.checkpoint()
+        && instance_graph::ordinary_acyclic(value, budget)
+    {
         unique_linear(value, depth, budget)
     } else {
         result
