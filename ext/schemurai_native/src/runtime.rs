@@ -24,6 +24,7 @@ pub struct Caches {
     messages: std::cell::RefCell<HashMap<Message, Option<Value>>>,
     pending_message: std::cell::Cell<Option<Message>>,
     pending_scalar: std::cell::Cell<Option<ScalarArguments>>,
+    frame_error: std::cell::Cell<bool>,
 }
 type StringError = (Value, usize, &'static str);
 #[repr(C)]
@@ -78,9 +79,13 @@ impl Caches {
         self.pending_pointer.set(None);
         self.pending_message.set(None);
         self.pending_scalar.set(None);
+        self.frame_error.set(false);
         self.pending_rescue.set(None);
     }
 
+    pub(super) fn frame_error(&self, active: bool) {
+        self.frame_error.set(active);
+    }
     pub(super) fn runtime_order(&self) -> bool {
         self.runtime_order.get()
     }
@@ -171,6 +176,25 @@ impl Caches {
             stride,
         })
     }
+    pub(super) fn container(
+        &self,
+        rules: Value,
+        instance: Value,
+        required: i32,
+        object: bool,
+    ) -> Result<ScalarFrame<'_>, Verdict> {
+        self.scalar(
+            rules,
+            instance,
+            required,
+            if object {
+                RUNTIME_OBJECT_HEADER
+            } else {
+                RUNTIME_ARRAY_HEADER
+            },
+            64,
+        )
+    }
     pub(super) fn equality(&self, operand: Value, instance: Value, operation: i32) -> Verdict {
         let Ok(ordinal) = self.next_call() else {
             return Unsupported;
@@ -207,7 +231,7 @@ impl Caches {
         };
         self.message(message)
     }
-    pub(super) fn string_message(
+    pub(super) fn frame_message(
         &self,
         keyword: &'static str,
         source: (i32, Value),
@@ -410,6 +434,12 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
     let caches = unsafe { &*caches };
     caches.matches.set(matches);
     caches.reset_pass();
+}
+/// # Safety
+/// Caches must be live and idle under the GVL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_frame_error(caches: *const Caches) -> i32 {
+    i32::from(unsafe { &*caches }.frame_error.get())
 }
 /// # Safety
 /// Caches must be idle under the GVL. Capture only a RegexpError raised while

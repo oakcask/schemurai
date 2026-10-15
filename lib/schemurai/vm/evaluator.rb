@@ -8,6 +8,7 @@ require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
 require_relative "../value_equality"
+require_relative "../container_checks"
 require_relative "../ecma_regexp"
 require_relative "../json_pointer"
 require_relative "compiler"
@@ -58,6 +59,7 @@ module Schemurai
     class Evaluator
       include Internal::UniqueItems
       include Internal::ValueEquality
+      include Internal::ContainerChecks::Bounds
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
@@ -511,8 +513,7 @@ module Schemurai
 
       private def valid_array?(rules, value)
         length = value.length
-        return false if rules.max_items && length > rules.max_items
-        return false if rules.min_items && length < rules.min_items
+        return false unless valid_container_bounds?(length, rules.max_items, rules.min_items)
         return false if rules.unique && !unique_items?(value)
 
         if (prefix_items = rules.prefix_items)
@@ -657,8 +658,7 @@ module Schemurai
 
       private def valid_object?(rules, value)
         length = value.length
-        return false if rules.max_properties && length > rules.max_properties
-        return false if rules.min_properties && length < rules.min_properties
+        return false unless valid_container_bounds?(length, rules.max_properties, rules.min_properties)
         if rules.required && !rules.required.all? do |name|
           @budget&.checkpoint
           value.key?(name)

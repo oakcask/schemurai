@@ -46,6 +46,30 @@ impl Report {
     ) -> Result<(), Verdict> {
         self.add_with_frame(caches, keyword, source, instance, detail, None)
     }
+    fn collect_header(
+        &mut self,
+        caches: &runtime::Caches,
+        header: &container::Header,
+        required: i32,
+        value: Value,
+        source: (i32, Value),
+    ) -> Result<bool, Verdict> {
+        let silent = self.silent;
+        let applied = header.failures(caches, required, value, silent, |keyword, frame| {
+            self.add_frame(caches, keyword, source, value, frame)
+        })?;
+        Ok(applied && silent && self.failed)
+    }
+    fn add_frame(
+        &mut self,
+        caches: &runtime::Caches,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        frame: Value,
+    ) -> Result<(), Verdict> {
+        self.add_with_frame(caches, keyword, source, instance, 0, Some(frame))
+    }
     fn add_string(
         &mut self,
         caches: &runtime::Caches,
@@ -99,6 +123,7 @@ impl Report {
             return Ok(());
         }
         self.reserve_error()?;
+        caches.frame_error(frame.is_some());
         let instance_path = self.instance_path.render(caches, None)?;
         let keyword_segment = (!matches!(
             keyword,
@@ -108,7 +133,7 @@ impl Report {
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
         let message = if self.render_messages || caches.dynamic_calls() {
             if let Some(frame) = frame {
-                caches.string_message(
+                caches.frame_message(
                     keyword,
                     source,
                     instance,
@@ -132,6 +157,7 @@ impl Report {
             detail,
             message,
         });
+        caches.frame_error(false);
         Ok(())
     }
     fn scoped<T>(
@@ -491,6 +517,18 @@ impl Execution<'_> {
                     }
                 }
                 Op::Array(required, rules) => {
+                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
+                        if report.collect_header(
+                            self.caches,
+                            &rules.header,
+                            *required,
+                            value,
+                            source,
+                        )? {
+                            break;
+                        }
+                        continue;
+                    }
                     if kind == TYPE_ARRAY && !self.budget.checkpoint() {
                         return Err(Unsupported);
                     }
@@ -767,6 +805,18 @@ impl Execution<'_> {
                     }
                 }
                 Op::Object(required, rules) => {
+                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
+                        if report.collect_header(
+                            self.caches,
+                            &rules.header,
+                            *required,
+                            value,
+                            source,
+                        )? {
+                            break;
+                        }
+                        continue;
+                    }
                     if kind == TYPE_OBJECT && !self.budget.checkpoint() {
                         return Err(Unsupported);
                     }

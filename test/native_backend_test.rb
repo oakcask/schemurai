@@ -55,7 +55,7 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "retains the original duration deadline when native transfers to VM", :aggregate_failures do
-    validator = Schemurai.compile({"type" => "array", "minItems" => 0}, backend: :native)
+    validator = Schemurai.compile({"type" => "array", "minItems" => 0, "items" => true}, backend: :native)
     value = Class.new(Array).new
     allow(Process).to receive(:clock_gettime).and_call_original
     allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
@@ -357,7 +357,7 @@ RSpec.describe "native VALUE execution" do
     vm = Schemurai.compile(schema, backend: :vm)
     native = Schemurai.compile(schema, backend: :native)
     runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(runner.valid?(value)).to be_nil
+    expect { runner.valid?(value) }.to raise_error("Ruby collection method reached")
     [:valid?, :validate].each do |method|
       expect(capture_validation(native, method, value)).to eq(capture_validation(vm, method, value))
     end
@@ -1067,6 +1067,209 @@ RSpec.describe "native VALUE execution" do
       expect(native.valid?(value)).to eq(valid)
       expect(native.validate(value).errors).to eq(errors)
     end
+  end
+
+  it "evaluates container bounds and uniqueness without VM execution" do # rubocop:disable RSpec/ExampleLength
+    fake_array = Object.new
+    fake_array.define_singleton_method(:is_a?) { |type| type == Array }
+    fake_array.define_singleton_method(:length) { 2 }
+    fake_array.define_singleton_method(:[]) { |index| [1, 1][index] }
+    fake_array.define_singleton_method(:each_with_index) { |&block| [1, 1].each_with_index(&block) }
+    fake_hash = Object.new
+    fake_hash.define_singleton_method(:is_a?) { |type| type == Hash }
+    fake_hash.define_singleton_method(:length) { 2 }
+    fake_hash.define_singleton_method(:key?) { |*| raise "unused key lookup" }
+    key = Object.new
+    keyed = {key => 1}
+    key.define_singleton_method(:hash) { raise "unused key hash" }
+    fractional = Class.new(Array).new([1, 2])
+    fractional.define_singleton_method(:length) { Rational(3, 2) }
+    values = [[1, 1], [], {"x" => 1}, {}, Class.new(Array).new([1, 1]), Class.new(Array).new([1, 2]), Class.new(Array).new,
+      Class.new(Hash)["x", 1], Class.new(Hash).new, fake_array, fake_hash, fractional, keyed,
+      keyed.dup.compare_by_identity, BasicObject.new, Rational(1, 2), Class.new(String).new("x")]
+    rules = [{"minItems" => 0.5}, {"maxProperties" => -1}, {"minProperties" => 2**100}, {"maxItems" => 0}, {"minItems" => 3}, {"maxItems" => 0, "minItems" => 3, "uniqueItems" => true},
+      {"uniqueItems" => true}, {"uniqueItems" => false}, {"uniqueItems" => 1}, {"items" => []},
+      {"maxItems" => 0, "items" => []}, {"maxItems" => 1, "additionalItems" => false},
+      {"maxProperties" => 0}, {"minProperties" => 3}, {"maxProperties" => 0, "minProperties" => 3, "required" => []},
+      {"maxItems" => "bad"}, {"minProperties" => "bad"}, {"maxItems" => false}, {"minProperties" => false}]
+    rules = rules.flat_map { |rule| [rule, rule.merge("type" => "array"), rule.merge("type" => "object")] }
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value, value]] },
+      ->(rule, value) { [{"properties" => {"v~/s" => rule}}, {"v~/s" => value}] },
+      ->(rule, value) { [{"contains" => rule}, [value]] },
+      ->(rule, value) { [{"$defs" => {"v" => rule}, "allOf" => [{"$ref" => "#/$defs/v"}, {"$ref" => "#/$defs/v"}]}, value] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each_with_index do |(input, method, options, result), index|
+        expect(capture_validation(native, method, input, **options)).to eq(result), [schema, method, options, index].inspect
+      end
+    end
+  end
+
+  it "preserves container length reads, message reads and trial short circuits" do # rubocop:disable RSpec/ExampleLength
+    [Array, Hash].each do |base|
+      klass = Class.new(base) do
+        attr_reader :calls
+        def initialize
+          super
+          @calls = []
+          @reads = 0
+        end
+
+        def is_a?(type)
+          @calls << [:is_a?, type]
+          super
+        end
+
+        def length
+          @reads += 1
+          @calls << [:length, @reads]
+          @reads % 5
+        end
+
+        def each(*args, &block)
+          @calls << :each
+          super
+        end
+      end
+      rule = (base == Array) ? {"maxItems" => 0, "minItems" => 4, "uniqueItems" => true} : {"maxProperties" => 0, "minProperties" => 4}
+      schemas = [rule, rule.merge("type" => "string"), {"items" => rule}, {"properties" => {"v" => rule}},
+        {"contains" => rule}, {"anyOf" => [rule, rule]}, {"oneOf" => [rule, rule]}, {"not" => rule},
+        {"if" => rule, "then" => rule, "else" => rule},
+        {"$defs" => {"v" => rule}, "allOf" => [{"$ref" => "#/$defs/v"}, {"$ref" => "#/$defs/v"}]}]
+      schemas << {"items" => []} if base == Array
+      schemas.each do |schema|
+        [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
+          vm = Schemurai.compile(schema, backend: :vm)
+          native = Schemurai.compile(schema, backend: :native)
+          evaluator = native.instance_variable_get(:@evaluator)
+          allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
+          allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+          allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+          values = Array.new(2) do
+            value = klass.new
+            (base == Array) ? value.concat([1, 1]) : value.merge!("x" => 1)
+            value
+          end
+          inputs = values.map do |value|
+            if schema["items"].is_a?(Hash) || schema.key?("contains")
+              [value]
+            elsif schema.key?("properties")
+              {"v" => value}
+            else
+              value
+            end
+          end
+          [options, {}, options].each do |limits|
+            values.each { |value| value.calls.clear }
+            expected = capture_validation(vm, method, inputs.first, **limits)
+            expect(capture_validation(native, method, inputs.last, **limits)).to eq(expected)
+            expect(values.last.calls).to eq(values.first.calls), [base, schema, method, limits].inspect
+          end
+        end
+      end
+    end
+  end
+
+  it "keeps container exceptions ahead of deadline checks between runtime stages" do # rubocop:disable RSpec/ExampleLength
+    allow(Process).to receive(:clock_gettime).and_call_original
+    advance = -> { allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2) }
+    [Array, Hash].each do |base|
+      klass = Class.new(base) do
+        def initialize(advance)
+          super()
+          @advance = advance
+          @reads = 0
+        end
+
+        def length
+          @reads += 1
+          @advance.call
+          raise ArgumentError, "later container length" if @reads > 1
+
+          1
+        end
+
+        def each(*) = raise(ArgumentError, "later container each")
+      end
+      rules = (base == Array) ? [{"maxItems" => 2, "minItems" => 0}, {"maxItems" => 0}] :
+        [{"maxProperties" => 2, "minProperties" => 0}, {"maxProperties" => 0}, {"maxProperties" => 2}]
+      rules.each do |rule|
+        [:valid?, :validate].each do |method|
+          outcomes = [:vm, :native].map do |backend|
+            validator = Schemurai.compile(rule, backend: backend)
+            allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+            capture_validation(validator, method, klass.new(advance), timeout: 0.1)
+          end
+          expect(outcomes.last).to eq(outcomes.first)
+          expect(outcomes.last[1]).to eq((method == :valid?) ? Schemurai::LimitExceeded : ArgumentError)
+        end
+      end
+    end
+  end
+
+  it "retains container iterator exceptions and message exceptions after earlier error limits" do # rubocop:disable RSpec/ExampleLength
+    cases = [Array, Hash].product([:length, :each, :each_with_index]).flat_map do |base, method|
+      klass = Class.new(base) { define_method(method) { |*| raise RegexpError, "container #{method}" } }
+      value = (base == Array) ? klass.new([1, 1]) : klass["a", 1]
+      rule = (base == Array) ? {"maxItems" => 0, "minItems" => 3, "uniqueItems" => true} : {"maxProperties" => 0, "minProperties" => 3}
+      [rule, {"anyOf" => [rule, true]}, {"contains" => rule}].map do |schema|
+        input = schema.key?("contains") ? [value] : value
+        vm = Schemurai.compile(schema, backend: :vm)
+        expected = [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).map do |operation, options|
+          [operation, options, capture_validation(vm, operation, input, **options)]
+        end
+        [Schemurai.compile(schema, backend: :native), input, expected]
+      end
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, input, expected|
+      expected.each { |operation, options, result| expect(capture_validation(native, operation, input, **options)).to eq(result) }
+    end
+  end
+
+  it "roots arbitrary container length results while rendering messages during compaction" do
+    length = Class.new do
+      def >(_other) = true
+      def <(_other) = true
+
+      def to_s
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        "virtual"
+      end
+    end
+    value = Class.new(Hash).new
+    value.define_singleton_method(:length) { length.new }
+    rule = {"maxProperties" => 0, "minProperties" => 4}
+    expect_native_policy_results([rule, {"allOf" => [rule, rule]}], [value])
+  end
+
+  it "keeps container header frames private to independent Ractor runners" do
+    schemas = {"urn:array-header" => {"maxItems" => 0, "uniqueItems" => true}, "urn:object-header" => {"minProperties" => 2}}
+    registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        array = shared.validator_for("urn:array-header").instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        object = shared.validator_for("urn:object-header").instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        values = [Class.new(Array).new([1, 1]), Class.new(Hash)["x", 1]]
+        GC.start
+        [array.valid?(values.first), array.diagnostics(values.first).map(&:first),
+          object.valid?(values.last), object.diagnostics(values.last).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[maxItems uniqueItems], false, ["minProperties"]]) }
   end
 
   it "compares special values for const and enum without VM execution" do # rubocop:disable RSpec/ExampleLength
@@ -2245,7 +2448,7 @@ RSpec.describe "native VALUE execution" do
       native = Schemurai.compile(schema, backend: :native)
       vm = Schemurai.compile(schema, backend: :vm)
       program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      if schema.key?("uniqueItems") || schema.key?("minLength") || schema["type"] == "string" || schema.dig("items", "pattern")
+      if schema.key?("uniqueItems") || schema.key?("minItems") || schema.key?("minLength") || %w[array string].include?(schema["type"]) || schema.dig("items", "pattern")
         expect(program.valid?(value)).to eq(vm.valid?(value))
         expect(program.diagnostics(value)).not_to be_nil
       else

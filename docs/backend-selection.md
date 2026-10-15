@@ -925,8 +925,25 @@ successful annotations and do not consume diagnostic error limits.
 Container validity successes do not bypass diagnostic collection: descendants
 can still raise during complete diagnostic trials. Only proven scalar checks
 and cached complete diagnostic successes skip that traversal.
+Container assertions without child-schema traversal use libruby frames when
+their applicability, length or comparison methods require Ruby behavior. This
+covers minItems/maxItems, minProperties/maxProperties, uniqueItems and the
+empty tuple gate, including Array/Hash subclasses and singleton methods.
+Bounds validity shares its comparison rules with the VM; diagnostics retain
+fresh length reads for each assertion and message. Object diagnostics also
+retain the original Hash iteration and property lookup, even without child
+schemas. Frames preserve exception ordering, trial short circuits and error
+limits, and remain rooted during GC and private to each Ractor runner.
+Ordinary supported containers retain native size and uniqueness algorithms.
+Header-only object validity needs no key scan because only its size is read.
+The default Ruby evaluator keeps its own traversal policy. Native arithmetic
+and Ruby diagnostic callbacks remain separate because their observable reads
+and iteration requirements differ.
 Array/Hash subclasses, singleton-method containers, and Hashes with nonstandard keys
-can still delegate to the VM before native container field evaluation. Lookup-based paths check
+can still delegate to the VM when reached container assertions require child
+traversal, required keys or dependencies. Schema evaluation beyond the native
+depth limit and defensive unsupported instructions also retain that path.
+Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
 outside Rust evaluation. Small records with up to eight declared keys and eight
 input entries combine this check with a single Hash walk. C passes only borrowed

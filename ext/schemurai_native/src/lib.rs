@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_void};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 mod budget;
+mod container;
 mod content;
 mod diagnostics;
 mod enumeration;
@@ -154,6 +155,7 @@ enum Op {
 }
 #[derive(Debug)]
 struct Array {
+    header: container::Header,
     min: Option<usize>,
     max: Option<usize>,
     unique: bool,
@@ -329,6 +331,8 @@ struct PropertyTarget {
 }
 #[derive(Debug)]
 struct Object {
+    header: container::Header,
+    inspect_required: bool,
     record: Option<RecordObject>,
     min: Option<usize>,
     max: Option<usize>,
@@ -1011,7 +1015,18 @@ impl Engine {
                             0
                         },
                         Box::new(Array {
-                            unique: unsafe { sn_true(unique) } != 0,
+                            header: self.container_header(
+                                operand,
+                                b"max_items\0",
+                                b"min_items\0",
+                                false,
+                                (if unsafe { sn_truthy(unique) } != 0 {
+                                    4
+                                } else {
+                                    0
+                                }) | (if list { 8 } else { 0 }),
+                            )?,
+                            unique: unsafe { sn_truthy(unique) } != 0,
                             min: self.size_field(operand, b"min_items\0")?,
                             max: self.size_field(operand, b"max_items\0")?,
                             prefix,
@@ -1046,6 +1061,9 @@ impl Engine {
                         let pattern_group =
                             pattern::PatternGroup::compile(&pattern_names, &patterns);
                         let required = self.field(operand, b"required\0")?;
+                        let inspect_required = unsafe { sn_truthy(required) } != 0
+                            && !(unsafe { sn_kind(required) } == TYPE_ARRAY
+                                && unsafe { sn_len(required) } == 0);
                         let required = self.required_keys(required);
                         let required_order = required.clone();
                         let required_strings: Vec<_> = required
@@ -1180,6 +1198,14 @@ impl Engine {
                             continue;
                         }
                         let mut object = Object {
+                            header: self.container_header(
+                                operand,
+                                b"max_properties\0",
+                                b"min_properties\0",
+                                true,
+                                0,
+                            )?,
+                            inspect_required,
                             record: None,
                             min: self.size_field(operand, b"min_properties\0")?,
                             max: self.size_field(operand, b"max_properties\0")?,
@@ -1277,6 +1303,8 @@ impl Engine {
                 Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
                     KindDemand::Predicate
                 }
+                Op::Array(_, rules) if rules.header_only() => KindDemand::Predicate,
+                Op::Object(_, rules) if rules.header_only() => KindDemand::Predicate,
                 Op::Array(..) | Op::Object(..) => KindDemand::Data,
                 Op::Unsupported
                 | Op::Boolean(_)
@@ -1469,7 +1497,9 @@ impl Execution<'_> {
                     }
                 }
                 Op::Array(required, rules) => {
-                    if *required != 0 && kind != TYPE_ARRAY {
+                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
+                        rules.header.valid(self.caches, *required, value)
+                    } else if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
                     } else if kind != TYPE_ARRAY {
                         Valid
@@ -1478,10 +1508,14 @@ impl Execution<'_> {
                     }
                 }
                 Op::Object(required, rules) => {
-                    if *required != 0 && kind != TYPE_OBJECT {
+                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
+                        rules.header.valid(self.caches, *required, value)
+                    } else if *required != 0 && kind != TYPE_OBJECT {
                         Invalid
                     } else if kind != TYPE_OBJECT {
                         Valid
+                    } else if rules.header_only() {
+                        bounds(unsafe { sn_len(value) }, rules.min, rules.max)
                     } else {
                         self.object(rules, value, depth + 1, active)
                     }
@@ -1647,7 +1681,8 @@ impl Execution<'_> {
                 [Op::Object(required, rules)]
                     if depth <= MAX_EVALUATION_DEPTH
                         && !self.tracks[child]
-                        && rules.record.is_some() =>
+                        && rules.record.is_some()
+                        && !rules.header_only() =>
                 {
                     Some((*required, rules))
                 }
