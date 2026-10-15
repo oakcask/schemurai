@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "string_checks"
+require_relative "container_checks/array_diagnostics"
 
 require_relative "error_message"
 require_relative "value_equality"
@@ -274,6 +275,69 @@ module Schemurai
       end
 
       class LimitedArrayChildrenFrame < ArrayChildrenFrame
+        include ValueEquality::Checkpoints
+      end
+
+      class ArrayReportItems
+        def initialize(callback, prior)
+          @callback = callback
+          @prior = prior
+        end
+
+        def valid? = true
+        def evaluated_items = self
+        def include?(index) = @callback.include_item?(index, @prior)
+
+        def record_item(index)
+          @callback.record_item(index)
+          self
+        end
+      end
+
+      class ArrayReportFrame < ArrayFrame
+        include ArrayDiagnostics
+        include ChildCallback
+
+        def collect
+          @failed = false
+          unless container?
+            if @required && collecting_array_errors?
+              @callback.error("type", self)
+            end
+            return @callback.finish(!@required)
+          end
+          result = check_array(@rules, @value, ArrayReportItems.new(@callback, true))
+          @callback.finish(result.valid? && !@failed)
+        end
+
+        def message(keyword, rescued)
+          return ErrorMessage.contains(@matched_count, @rules.min_contains, @rules.max_contains) if keyword == "contains"
+
+          super
+        end
+
+        private def collecting_array_errors? = !@callback.silent?
+
+        private def array_error(keyword, _rules, _value, actual = nil)
+          @failed = true
+          @matched_count = actual
+          @callback.error(keyword, self)
+        end
+
+        private def tracked_evaluation = (@evaluation ||= ArrayReportItems.new(@callback, false))
+
+        private def evaluate_child_at(program, instance, index, keyword, child_segment = nil)
+          valid = @callback.evaluate(program, instance, index, keyword, child_segment)
+          @failed = true unless valid
+          valid
+        end
+
+        private def trial(program, instance)
+          @callback.trial(program, instance) ? Evaluation.valid : Evaluation.invalid
+        end
+      end
+
+      class LimitedArrayReportFrame < ArrayReportFrame
         include ValueEquality::Checkpoints
       end
 

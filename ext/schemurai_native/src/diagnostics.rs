@@ -2,6 +2,7 @@
 //! returning to C are the output records materialized as Ruby objects.
 use super::*;
 use tracking::Tracked;
+mod array;
 
 fn reference_keyword(opcode: i32) -> &'static str {
     match opcode {
@@ -22,12 +23,23 @@ struct Error {
     detail: usize,
     message: Value,
 }
+#[derive(Clone)]
+struct ErrorEntry {
+    source: (i32, Value),
+    instance: Value,
+    keyword: &'static str,
+    frame: Value,
+}
 #[derive(Clone, Default)]
 pub struct Report {
     errors: Vec<Error>,
     annotations: bool,
     evaluation: Option<Tracked>,
+    array_prior: Option<Tracked>,
+    entry: Option<ErrorEntry>,
     attempts: usize,
+    collection_reset: usize,
+    reset_path_pops: bool,
     instance_path: pointer::Path,
     schema_path: pointer::Path,
     // Explicit failure signal for the current evaluation, independent of the
@@ -39,10 +51,83 @@ pub struct Report {
     limit_hit: (u32, usize),
 }
 impl Report {
+    pub(super) fn same_collection_policy(&self, other: &Self) -> bool {
+        self.silent == other.silent
+    }
+
+    fn finish_runtime<T>(
+        &mut self,
+        caches: &runtime::Caches,
+        result: Result<T, Verdict>,
+    ) -> Result<T, Verdict> {
+        caches.apply_report_effects(self);
+        if matches!(result, Err(Unsupported)) {
+            caches.capture_report(self);
+        }
+        result
+    }
+
+    pub(super) fn complete_callback(&mut self, valid: bool) {
+        self.evaluation = Some(Tracked::new(if valid { Valid } else { Invalid }));
+    }
+
+    pub(super) fn clear_collection(&mut self, paths_nil: bool) {
+        self.collection_reset = self.collection_reset.saturating_add(1);
+        self.reset_path_pops = paths_nil;
+        self.errors.clear();
+        self.attempts = 0;
+        self.failed = false;
+        self.silent = true;
+        self.instance_path = pointer::Path::default();
+        self.schema_path = pointer::Path::default();
+    }
+    pub(super) fn effect_since(&self, before: &Self) -> Option<Self> {
+        if self.collection_reset != before.collection_reset {
+            return Some(Self {
+                errors: self.errors.clone(),
+                attempts: self.attempts,
+                collection_reset: self.collection_reset,
+                reset_path_pops: self.reset_path_pops,
+                failed: self.failed,
+                silent: self.silent,
+                instance_path: self.instance_path.clone(),
+                schema_path: self.schema_path.clone(),
+                ..Self::default()
+            });
+        }
+        let errors = self.errors.get(before.errors.len()..)?.to_vec();
+        let attempts = self.attempts.saturating_sub(before.attempts);
+        let failed = self.failed && !before.failed;
+        (!errors.is_empty() || attempts != 0 || failed).then_some(Self {
+            errors,
+            attempts,
+            failed,
+            ..Self::default()
+        })
+    }
+    pub(super) fn apply_effect(&mut self, effect: Self) {
+        if effect.collection_reset != 0 {
+            self.collection_reset = effect.collection_reset;
+            self.reset_path_pops = effect.reset_path_pops;
+            self.errors = effect.errors;
+            self.attempts = effect.attempts;
+            self.failed = effect.failed;
+            self.silent = effect.silent;
+            self.instance_path = effect.instance_path;
+            self.schema_path = effect.schema_path;
+            return;
+        }
+        self.errors.extend(effect.errors);
+        self.attempts = self.attempts.saturating_add(effect.attempts);
+        self.failed |= effect.failed;
+    }
+
     pub(super) fn continuation(&self, annotations: bool) -> Self {
         let mut report = self.clone();
         report.annotations = annotations;
         report.evaluation = None;
+        report.array_prior = None;
+        report.entry = None;
         report
     }
     pub(super) fn adopt(&mut self, mut completed: Self) -> Tracked {
@@ -51,7 +136,13 @@ impl Report {
             .take()
             .expect("completed native report");
         completed.annotations = self.annotations;
+        completed.evaluation = self.evaluation.take();
+        completed.array_prior = self.array_prior.take();
+        let instance_path = std::mem::take(&mut self.instance_path);
+        let schema_path = std::mem::take(&mut self.schema_path);
         *self = completed;
+        self.instance_path = instance_path;
+        self.schema_path = schema_path;
         evaluation
     }
     pub(super) fn memory_usage(&self) -> usize {
@@ -64,6 +155,7 @@ impl Report {
                 .map(|e| e.instance_path.memory_usage() + e.schema_path.memory_usage())
                 .sum::<usize>()
             + self.evaluation.as_ref().map_or(0, Tracked::memory_usage)
+            + self.array_prior.as_ref().map_or(0, Tracked::memory_usage)
     }
     pub(super) fn mark(&self) {
         for path in [&self.instance_path, &self.schema_path] {
@@ -85,6 +177,22 @@ impl Report {
         if let Some(evaluation) = &self.evaluation {
             evaluation.mark();
         }
+        if let Some(prior) = &self.array_prior {
+            prior.mark();
+        }
+        if let Some(entry) = &self.entry {
+            unsafe {
+                sn_pin(entry.source.1);
+                sn_pin(entry.instance);
+                sn_pin(entry.frame);
+            }
+        }
+    }
+    pub(super) fn array_continuation(&self, annotations: bool, prior: &Tracked) -> Self {
+        let mut report = self.continuation(annotations);
+        report.array_prior = Some(prior.clone());
+        report.evaluation = Some(Tracked::new(Valid));
+        report
     }
     fn add(
         &mut self,
@@ -168,6 +276,7 @@ impl Report {
         detail: usize,
         frame: Option<Value>,
     ) -> Result<(), Verdict> {
+        caches.apply_report_effects(self);
         if self.silent {
             self.failed = true;
             return Ok(());
@@ -175,12 +284,14 @@ impl Report {
         self.reserve_error()?;
         caches.frame_error(frame.is_some());
         let instance_path = self.instance_path.render(caches, None)?;
+        caches.apply_report_effects(self);
         let keyword_segment = (!matches!(
             keyword,
             "falseSchema" | "$ref" | "$recursiveRef" | "$dynamicRef"
         ))
         .then_some(keyword);
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
+        caches.apply_report_effects(self);
         let message = if self.render_messages || caches.dynamic_calls() {
             if let Some(frame) = frame {
                 caches.frame_message(
@@ -197,6 +308,7 @@ impl Report {
         } else {
             unsafe { sn_nil() }
         };
+        caches.apply_report_effects(self);
         self.errors.push(Error {
             keyword,
             instance_path,
@@ -210,8 +322,26 @@ impl Report {
         caches.frame_error(false);
         Ok(())
     }
+    fn cleanup_reset_paths<T>(
+        &mut self,
+        caches: &runtime::Caches,
+        reset: usize,
+        result: Result<T, Verdict>,
+        count: usize,
+    ) -> Result<T, Verdict> {
+        if self.collection_reset != reset
+            && self.reset_path_pops
+            && !matches!(result, Err(Unsupported))
+        {
+            for _ in 0..count {
+                caches.path_pop()?;
+            }
+        }
+        result
+    }
     fn scoped<T>(
         &mut self,
+        caches: &runtime::Caches,
         segment: &str,
         instance: Option<usize>,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
@@ -220,6 +350,7 @@ impl Report {
             return visit(self);
         }
 
+        let reset = self.collection_reset;
         let schema_len = self.schema_path.checkpoint();
         let instance_len = self.instance_path.checkpoint();
         self.schema_path.push_str("/");
@@ -228,12 +359,19 @@ impl Report {
             self.instance_path.index(index);
         }
         let result = visit(self);
+        let result = self.cleanup_reset_paths(
+            caches,
+            reset,
+            result,
+            segment.split('/').count() + usize::from(instance.is_some()),
+        );
         self.schema_path.truncate(schema_len);
         self.instance_path.truncate(instance_len);
         result
     }
     fn property<T>(
         &mut self,
+        caches: &runtime::Caches,
         segment: &str,
         key: Value,
         schema_key: Option<Value>,
@@ -243,19 +381,22 @@ impl Report {
             return visit(self);
         }
 
+        let reset = self.collection_reset;
         let instance_len = self.instance_path.checkpoint();
         self.instance_path.name(key)?;
         let result = if let Some(key) = schema_key {
-            self.schema_name(segment, key, visit)
+            self.schema_name(caches, segment, key, visit)
         } else {
-            self.scoped(segment, None, visit)
+            self.scoped(caches, segment, None, visit)
         };
+        let result = self.cleanup_reset_paths(caches, reset, result, 1);
         self.instance_path.truncate(instance_len);
         result
     }
 
     fn schema_name<T>(
         &mut self,
+        caches: &runtime::Caches,
         segment: &str,
         key: Value,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
@@ -264,9 +405,11 @@ impl Report {
             return visit(self);
         }
 
-        self.scoped(segment, None, |report| {
+        self.scoped(caches, segment, None, |report| {
             report.schema_path.name(key)?;
-            visit(report)
+            let reset = report.collection_reset;
+            let result = visit(report);
+            report.cleanup_reset_paths(caches, reset, result, 1)
         })
     }
 }
@@ -281,6 +424,26 @@ impl Execution<'_> {
         root: usize,
         instance: Value,
     ) -> Result<Tracked, Verdict> {
+        let result = self.collect_report_inner(report, root, instance);
+        report.finish_runtime(self.caches, result)
+    }
+    fn collect_report_inner(
+        &self,
+        report: &mut Report,
+        root: usize,
+        instance: Value,
+    ) -> Result<Tracked, Verdict> {
+        if let Some(entry) = report.entry.take() {
+            report.add_with_frame(
+                self.caches,
+                entry.keyword,
+                entry.source,
+                entry.instance,
+                0,
+                Some(entry.frame),
+            )?;
+            return Ok(Tracked::new(Invalid));
+        }
         if report.annotations {
             self.collect::<true>(report, root, instance, 0, scope::Context::default())
         } else {
@@ -296,6 +459,9 @@ impl Execution<'_> {
         depth: usize,
         kind: i32,
     ) -> Option<Verdict> {
+        if self.caches.scalar_callback() {
+            return None;
+        }
         match self.nodes[node].as_slice() {
             [Op::Number(required, rules)]
                 if kind != TYPE_UNSUPPORTED
@@ -353,7 +519,9 @@ impl Execution<'_> {
         if depth > MAX_EVALUATION_DEPTH || self.unsupported_kind(node, kind) {
             return Tracked::new(Unsupported);
         }
-        if let [op @ (Op::Const(_) | Op::Enum(_))] = self.nodes[node].as_slice() {
+        if !self.caches.scalar_callback()
+            && let [op @ (Op::Const(_) | Op::Enum(_))] = self.nodes[node].as_slice()
+        {
             return Tracked::new(self.leaf(op, kind, value, depth));
         }
         let mut report = Report {
@@ -388,6 +556,19 @@ impl Execution<'_> {
         self.collect_kind::<ANNOTATIONS>(report, node, value, depth, active, &kind_state)
     }
     fn collect_kind<const ANNOTATIONS: bool>(
+        &self,
+        report: &mut Report,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind_state: &InstanceKind,
+    ) -> Result<Tracked, Verdict> {
+        let result =
+            self.collect_kind_inner::<ANNOTATIONS>(report, node, value, depth, active, kind_state);
+        report.finish_runtime(self.caches, result)
+    }
+    fn collect_kind_inner<const ANNOTATIONS: bool>(
         &self,
         report: &mut Report,
         node: usize,
@@ -448,13 +629,35 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
+        let result = self
+            .collect_uncached_inner::<ANNOTATIONS>(report, node, value, depth, active, kind_state);
+        report.finish_runtime(self.caches, result)
+    }
+    fn collect_uncached_inner<const ANNOTATIONS: bool>(
+        &self,
+        report: &mut Report,
+        node: usize,
+        value: Value,
+        depth: usize,
+        active: scope::Context<'_>,
+        kind_state: &InstanceKind,
+    ) -> Result<Tracked, Verdict> {
         let kind = kind_state.get();
         // Callback results currently carry validity only. Preserve the existing
         // diagnostic guard before any other assertion invokes Ruby methods.
-        if kind == TYPE_UNSUPPORTED && self.callback_container_node(node) {
+        if kind == TYPE_UNSUPPORTED
+            && (self.callback_container_node(node)
+                || self.nodes[node]
+                    .iter()
+                    .any(|op| matches!(op, Op::Array(_, rules) if !rules.header_only())))
+            && !self.caches.report_continuations_allowed()
+        {
             return Err(Unsupported);
         }
         if depth > MAX_EVALUATION_DEPTH {
+            return Err(Unsupported);
+        }
+        if self.caches.callback_checkpoint(value) != Valid {
             return Err(Unsupported);
         }
         let frame = scope::ScopeFrame {
@@ -473,6 +676,9 @@ impl Execution<'_> {
         let parent_failed = std::mem::replace(&mut report.failed, false);
         let mut prior = Tracked::new(Valid);
         for (op, &source) in self.nodes[node].iter().zip(&self.error_operands[node]) {
+            if self.caches.callback_checkpoint(value) != Valid {
+                return Err(Unsupported);
+            }
             if !self.budget.checkpoint() {
                 return Err(Unsupported);
             }
@@ -606,6 +812,26 @@ impl Execution<'_> {
                     }
                 }
                 Op::Array(required, rules) => {
+                    if self.caches.report_continuations_allowed()
+                        && !rules.header_only()
+                        && (kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls())
+                    {
+                        let result = self.caches.array_report(
+                            node,
+                            value,
+                            (source.1, *required),
+                            report,
+                            &prior,
+                            tracked,
+                        )?;
+                        if tracked {
+                            prior.merge_diagnostics(result)?;
+                        }
+                        if report.silent && report.failed {
+                            break;
+                        }
+                        continue;
+                    }
                     if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
                         if report.collect_header(
                             self.caches,
@@ -661,15 +887,20 @@ impl Execution<'_> {
                         if tracked {
                             coverage.item(index);
                         }
-                        report.scoped(&format!("prefixItems/{index}"), Some(index), |r| {
-                            self.collect::<false>(
-                                r,
-                                child,
-                                unsafe { sn_entry(value, index) },
-                                depth + 1,
-                                active,
-                            )
-                        })?;
+                        report.scoped(
+                            self.caches,
+                            &format!("prefixItems/{index}"),
+                            Some(index),
+                            |r| {
+                                self.collect::<false>(
+                                    r,
+                                    child,
+                                    unsafe { sn_entry(value, index) },
+                                    depth + 1,
+                                    active,
+                                )
+                            },
+                        )?;
                     }
                     if rules.list {
                         for (index, &child) in rules.items.iter().take(len).enumerate() {
@@ -679,15 +910,20 @@ impl Execution<'_> {
                             if tracked {
                                 coverage.item(index);
                             }
-                            report.scoped(&format!("items/{index}"), Some(index), |r| {
-                                self.collect::<false>(
-                                    r,
-                                    child,
-                                    unsafe { sn_entry(value, index) },
-                                    depth + 1,
-                                    active,
-                                )
-                            })?;
+                            report.scoped(
+                                self.caches,
+                                &format!("items/{index}"),
+                                Some(index),
+                                |r| {
+                                    self.collect::<false>(
+                                        r,
+                                        child,
+                                        unsafe { sn_entry(value, index) },
+                                        depth + 1,
+                                        active,
+                                    )
+                                },
+                            )?;
                         }
                         if let Some(child) = rules.additional {
                             for index in rules.items.len()..len {
@@ -697,15 +933,20 @@ impl Execution<'_> {
                                 if tracked {
                                     coverage.item(index);
                                 }
-                                report.scoped("additionalItems", Some(index), |r| {
-                                    self.collect::<false>(
-                                        r,
-                                        child,
-                                        unsafe { sn_entry(value, index) },
-                                        depth + 1,
-                                        active,
-                                    )
-                                })?;
+                                report.scoped(
+                                    self.caches,
+                                    "additionalItems",
+                                    Some(index),
+                                    |r| {
+                                        self.collect::<false>(
+                                            r,
+                                            child,
+                                            unsafe { sn_entry(value, index) },
+                                            depth + 1,
+                                            active,
+                                        )
+                                    },
+                                )?;
                             }
                         }
                     } else if let Some(&child) = rules.items.first() {
@@ -769,6 +1010,7 @@ impl Execution<'_> {
                             // The invalid callback is shared, but each scanner retains
                             // its statically selected parser and guarded byte views.
                             let invalid = |index, item| match report.scoped(
+                                self.caches,
                                 "items",
                                 Some(start + index),
                                 |r| self.collect::<false>(r, child, item, depth + 1, active),
@@ -839,7 +1081,7 @@ impl Execution<'_> {
                                 if !needs {
                                     continue;
                                 }
-                                report.scoped("items", Some(index), |r| {
+                                report.scoped(self.caches, "items", Some(index), |r| {
                                     self.collect::<false>(r, child, item, depth + 1, active)
                                 })?;
                             }
@@ -877,7 +1119,7 @@ impl Execution<'_> {
                             if prior.contains_item(index) || coverage.contains_item(index) {
                                 continue;
                             }
-                            report.scoped("unevaluatedItems", Some(index), |r| {
+                            report.scoped(self.caches, "unevaluatedItems", Some(index), |r| {
                                 self.collect::<false>(
                                     r,
                                     child,
@@ -1010,14 +1252,21 @@ impl Execution<'_> {
                                     continue;
                                 }
                                 if tracked {
-                                    let result = report.schema_name(keyword, *name, |r| {
-                                        self.collect::<true>(r, *child, value, depth + 1, active)
-                                    })?;
+                                    let result =
+                                        report.schema_name(self.caches, keyword, *name, |r| {
+                                            self.collect::<true>(
+                                                r,
+                                                *child,
+                                                value,
+                                                depth + 1,
+                                                active,
+                                            )
+                                        })?;
                                     if result.status == Valid {
                                         coverage.merge(result);
                                     }
                                 } else if self.needs_diagnostics(*child, value, depth + 1)? {
-                                    report.schema_name(keyword, *name, |r| {
+                                    report.schema_name(self.caches, keyword, *name, |r| {
                                         self.collect::<false>(r, *child, value, depth + 1, active)
                                     })?;
                                 }
@@ -1061,27 +1310,28 @@ impl Execution<'_> {
                         if !self.budget.checkpoint() {
                             return Err(Unsupported);
                         }
-                        let result = report.scoped(&format!("allOf/{index}"), None, |r| {
-                            if tracked {
-                                self.collect_kind::<true>(
-                                    r,
-                                    child,
-                                    value,
-                                    depth + 1,
-                                    active,
-                                    kind_state,
-                                )
-                            } else {
-                                self.collect_kind::<false>(
-                                    r,
-                                    child,
-                                    value,
-                                    depth + 1,
-                                    active,
-                                    kind_state,
-                                )
-                            }
-                        })?;
+                        let result =
+                            report.scoped(self.caches, &format!("allOf/{index}"), None, |r| {
+                                if tracked {
+                                    self.collect_kind::<true>(
+                                        r,
+                                        child,
+                                        value,
+                                        depth + 1,
+                                        active,
+                                        kind_state,
+                                    )
+                                } else {
+                                    self.collect_kind::<false>(
+                                        r,
+                                        child,
+                                        value,
+                                        depth + 1,
+                                        active,
+                                        kind_state,
+                                    )
+                                }
+                            })?;
                         if tracked {
                             coverage.merge_diagnostics(result)?;
                         }
@@ -1141,7 +1391,7 @@ impl Execution<'_> {
                         Invalid => (no, "else"),
                     };
                     if let Some(child) = child {
-                        let result = report.scoped(segment, None, |r| {
+                        let result = report.scoped(self.caches, segment, None, |r| {
                             if tracked {
                                 self.collect_kind::<true>(
                                     r,
@@ -1190,7 +1440,7 @@ impl Execution<'_> {
                         active: Some(&frame),
                         ..active
                     };
-                    let result = report.scoped(keyword, None, |r| {
+                    let result = report.scoped(self.caches, keyword, None, |r| {
                         if tracked {
                             self.collect_kind::<true>(
                                 r,
@@ -1216,6 +1466,7 @@ impl Execution<'_> {
                     }
                 }
             }
+            self.caches.apply_report_effects(report);
             if report.silent
                 && report.failed
                 && matches!(
@@ -1226,6 +1477,7 @@ impl Execution<'_> {
                 break;
             }
         }
+        self.caches.apply_report_effects(report);
         let failed = report.failed;
         report.failed |= parent_failed;
         // Diagnostic coverage keeps local attempted locations for subsequent
@@ -1319,7 +1571,7 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
         }
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
             if c.engine.needs_diagnostics(child, item, c.depth)? {
-                report.property(segment, key, schema_key, |r| {
+                report.property(c.engine.caches, segment, key, schema_key, |r| {
                     c.engine.collect::<false>(r, child, item, c.depth, c.active)
                 })?;
             }

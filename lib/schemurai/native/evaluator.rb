@@ -29,14 +29,15 @@ module Schemurai
         @number_state = Internal::NumberChecks::State.new
         @regexps = {}
         @scope_state = []
+        @report_state = []
         @reference_state = []
         @active_state = {}.compare_by_identity
         @program = @compiled.runner(root)
-        @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state)
+        @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state, @report_state)
         @unresolved = @compiled.unresolved_references?
         @vm = VM::Evaluator.new(graph, compiler, root, content: content, format: format,
           number_state: @number_state, regexps: @regexps, dynamic_scope: @scope_state,
-          active_state: @active_state, native_references: @program)
+          active_state: @active_state, native_references: @program, native_reports: @report_state)
       end
 
       def valid?(instance, max_errors: nil, timeout: nil)
@@ -58,7 +59,7 @@ module Schemurai
           rows = @program.diagnostics_with_budget(instance, budget)
           return limited_vm.validate(instance, budget: budget) if rows.nil?
 
-          errors = rows.map do |row|
+          errors = (rows == false) ? nil : rows.map do |row|
             budget.reserve_error
             Diagnostics.error(row)
           end
@@ -67,6 +68,8 @@ module Schemurai
         end
         rows = @program.diagnostics(instance)
         return @vm.validate(instance) if rows.nil?
+
+        return Result.new(nil) if rows == false
 
         Result.new(rows.empty? ? rows : rows.map { |row| Diagnostics.error(row) })
       end
@@ -79,7 +82,7 @@ module Schemurai
           graph_size = @graph.nodes.length
           compiled = Program.new(@root, @compiler, @format, @content)
           @program = compiled.runner(@root)
-          @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state)
+          @program.share_scalar_state(@number_state, @regexps, @scope_state, @reference_state, @active_state, @report_state)
           @compiled = compiled
           @unresolved = @compiled.unresolved_references?
           @graph_size = graph_size

@@ -1046,9 +1046,25 @@ bounded calls own private caches. Retained blocks keep their original scope
 and limited-evaluator budget-clearing behavior through GC compaction.
 Reentrant calls use independent observations and cleanup. Invocation observations
 are cleared through one ensure boundary, with persistent scalar caches retained.
-Diagnostics/trials still require indexed errors and annotation export and
-retain their existing compatibility path for these special containers. Their
-guard and the depth guard run before other scalar methods in the same node.
+Array diagnostics and trials use indexed Ruby traversal with owned native
+report collectors. The collector transfers error reservations, paths and
+annotations to native child runners while Ruby retains its length, indexing,
+range and contains iteration behavior. VM and native frames share that Array
+iteration helper. Object diagnostic callbacks still require their compatibility
+path; graphs that reach them are rejected before new Array callbacks run.
+Retained native validity blocks inherit the current native report collection
+when they reach a tracked schema, including through references. Suspended
+runtime requests snapshot that collection before path scopes unwind. Their
+completed error effects are replayed with the corresponding runtime observation,
+so nested scalar calls preserve error order and trial isolation. Public reentry
+can clear a collection; replay preserves that reset and the VM's path cleanup
+behavior. Trial contexts restore their caller's collection, and bounded public
+invocations keep independent state. Interrupted child and Array frames transfer
+already collected errors when a Ruby caller rescues their exception.
+The remaining VM compatibility evaluator exposes only its active collection
+state to retained native blocks. Those blocks execute native programs and append
+their completed errors/counts to that collection without interpreting VM code.
+Their guards run before other scalar methods in the same node.
 Object pattern matching uses the shared Ruby regexp cache and deadline wrapper.
 Frames read the invocation's current budget when retained each blocks run, so
 limited blocks observe the VM's cleared budget after the public call returns.
@@ -1059,10 +1075,11 @@ the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
-Special Arrays and Hashes, including subclasses, singleton methods and
-nonstandard keys, can still delegate when child graphs contain unresolved references or require
-evaluated-location export. Tracked or detailed container evaluation beyond the native
-stack bound and defensive unsupported instructions also retain that path.
+Special containers can still delegate when child graphs contain unresolved
+references or unsupported Object diagnostic traversal. Object callbacks that
+need evaluated-location export retain the compatibility path. Tracked or detailed
+continuations require every reachable operation to have a native report path;
+defensive unsupported instructions also retain the VM path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks
 outside Rust evaluation. Small records with up to eight declared keys and eight
