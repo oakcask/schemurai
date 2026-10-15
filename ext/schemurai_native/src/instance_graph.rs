@@ -88,16 +88,24 @@ enum Work {
     Finish(Value),
 }
 
+pub(super) enum Safety {
+    Ordinary,
+    Cyclic,
+    Unsupported,
+}
+
 // A failed fingerprint may indicate either an optimization bound or Ruby
-// behavior that native equality must not skip. Prove the entire input is
-// ordinary and acyclic before substituting direct comparisons for hashing.
+// behavior that native equality must not skip. Classify every reachable value
+// before substituting direct comparisons or a stack error for hashing. Continue
+// after detecting a cycle: any special value still requires Ruby's behavior.
 // Unlike the memoization hint above, this rare path needs no depth/visit cap.
-pub(super) fn ordinary_acyclic(value: Value, budget: &budget::Budget) -> bool {
+pub(super) fn ordinary_graph(value: Value, budget: &budget::Budget) -> Safety {
     let mut work = vec![Work::Visit(value)];
     let mut states = HashMap::new();
+    let mut cyclic = false;
     while let Some(task) = work.pop() {
         if !budget.checkpoint() {
-            return false;
+            return Safety::Unsupported;
         }
         match task {
             Work::Finish(value) => {
@@ -106,12 +114,12 @@ pub(super) fn ordinary_acyclic(value: Value, budget: &budget::Budget) -> bool {
             Work::Visit(value) => {
                 if let Some(&done) = states.get(&value) {
                     if !done {
-                        return false;
+                        cyclic = true;
                     }
                     continue;
                 }
                 match unsafe { sn_kind(value) } {
-                    TYPE_UNSUPPORTED => return false,
+                    TYPE_UNSUPPORTED => return Safety::Unsupported,
                     TYPE_ARRAY => {
                         states.insert(value, false);
                         work.push(Work::Finish(value));
@@ -134,7 +142,7 @@ pub(super) fn ordinary_acyclic(value: Value, budget: &budget::Budget) -> bool {
                             )
                         } != VERDICT_VALID
                         {
-                            return false;
+                            return Safety::Unsupported;
                         }
                     }
                     _ => {}
@@ -142,7 +150,11 @@ pub(super) fn ordinary_acyclic(value: Value, budget: &budget::Budget) -> bool {
             }
         }
     }
-    true
+    if cyclic {
+        Safety::Cyclic
+    } else {
+        Safety::Ordinary
+    }
 }
 
 struct OrdinaryWalk<'a> {

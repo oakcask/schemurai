@@ -2208,9 +2208,10 @@ fn equal_iterative(
                 if len != unsafe { sn_len(b) } {
                     return Invalid;
                 }
-                // Cyclic equality still needs Ruby's stack-error behavior.
-                // Do not turn an infinitely recursive comparison into success.
+                // Report Ruby's recursive-comparison error after unwinding;
+                // an active pair is not proof of JSON equality.
                 if !active.insert((a, b)) {
+                    budget.failure.set(STATUS_STACK_ERROR);
                     return Unsupported;
                 }
                 work.push(EqualityWork::Finish(a, b, depth));
@@ -2555,7 +2556,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         return Unsupported;
     }
     if len <= 16 {
-        return unique_linear(value, depth, budget);
+        return unique_linear(value, depth, budget, false);
     }
     let values = unsafe { std::slice::from_raw_parts(sn_array_data(value), len) };
     // This is a checked optimization hint, not an instance shape assumption.
@@ -2588,19 +2589,26 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         },
         |a, b| equal_budgeted(a, b, depth, budget),
     );
-    if result == Unsupported
-        && budget.checkpoint()
-        && instance_graph::ordinary_acyclic(value, budget)
-    {
-        unique_linear(value, depth, budget)
+    if result == Unsupported && budget.failure.get() == 0 && budget.checkpoint() {
+        unique_linear(value, depth, budget, true)
     } else {
         result
     }
 }
 // Index availability is an optimization decision. Exact ordered comparisons
 // can still decide uniqueness when a depth or memory bound declines hashing.
-fn unique_linear(value: Value, depth: usize, budget: &budget::Budget) -> Verdict {
+fn unique_linear(value: Value, depth: usize, budget: &budget::Budget, check_hash: bool) -> Verdict {
     for i in 0..unsafe { sn_len(value) } {
+        if check_hash {
+            match instance_graph::ordinary_graph(unsafe { sn_entry(value, i) }, budget) {
+                instance_graph::Safety::Ordinary => {}
+                instance_graph::Safety::Cyclic => {
+                    budget.failure.set(STATUS_STACK_ERROR);
+                    return Unsupported;
+                }
+                instance_graph::Safety::Unsupported => return Unsupported,
+            }
+        }
         for previous in 0..i {
             match equal_budgeted(
                 unsafe { sn_entry(value, previous) },
@@ -3091,13 +3099,14 @@ pub unsafe extern "C" fn sn_valid(
         let e = unsafe { &*engine };
         let local = pattern::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
-        Execution {
+        let execution = Execution {
             engine: e,
             caches,
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
-        }
-        .eval(root, value, 0, scope::Context::default()) as i32
+        };
+        let result = execution.eval(root, value, 0, scope::Context::default());
+        execution.budget.status(result)
     }))
     .unwrap_or(STATUS_PANIC)
 }
@@ -3135,7 +3144,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
         unsafe {
             ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();
         }
-        result as i32
+        execution.budget.status(result)
     }));
     result.unwrap_or(STATUS_PANIC)
 }

@@ -19,10 +19,21 @@ pub struct Outcome {
 pub(super) struct Budget {
     pub limits: Limits,
     pub hit: Cell<(u32, usize)>,
+    pub failure: Cell<i32>,
     deadline: Option<Instant>,
     checks: Cell<usize>,
 }
 impl Budget {
+    // Defer Ruby exception construction until all Rust frames have unwound.
+    pub fn status(&self, verdict: super::Verdict) -> i32 {
+        let failure = self.failure.get();
+        if failure != 0 {
+            failure
+        } else {
+            verdict as i32
+        }
+    }
+
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,

@@ -979,6 +979,13 @@ pub struct Record {
     instance: Value,
     detail: usize,
 }
+fn report_outcome(result: std::thread::Result<Result<*mut Report, i32>>) -> (*mut Report, i32) {
+    match result {
+        Ok(Ok(report)) => (report, VERDICT_VALID),
+        Ok(Err(code)) => (std::ptr::null_mut(), code),
+        Err(_) => (std::ptr::null_mut(), STATUS_PANIC),
+    }
+}
 /// # Safety
 /// Engine/status must be live under the GVL; root must be in bounds and
 /// instance live. Caches must be null or live, validator-owned and not in use.
@@ -1001,25 +1008,14 @@ pub unsafe extern "C" fn sn_diagnose(
             budget: budget::Budget::default(),
         };
         let mut report = Report::default();
-        execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())?;
-        Ok::<_, Verdict>(Box::into_raw(Box::new(report)))
+        execution
+            .collect::<false>(&mut report, root, instance, 0, scope::Context::default())
+            .map_err(|verdict| execution.budget.status(verdict))?;
+        Ok::<_, i32>(Box::into_raw(Box::new(report)))
     }));
-    match result {
-        Ok(Ok(report)) => {
-            unsafe { *status = VERDICT_VALID };
-            report
-        }
-        other => {
-            unsafe {
-                *status = if other.is_err() {
-                    STATUS_PANIC
-                } else {
-                    VERDICT_UNSUPPORTED
-                }
-            };
-            std::ptr::null_mut()
-        }
-    }
+    let (report, code) = report_outcome(result);
+    unsafe { *status = code };
+    report
 }
 /// # Safety
 /// Same requirements as sn_diagnose; all limit/output pointers must be live.
@@ -1065,24 +1061,13 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
         unsafe {
             ((*outcome).kind, (*outcome).attempted) = hit;
         }
-        result.map(|_| Box::into_raw(Box::new(report)))
+        result
+            .map(|_| Box::into_raw(Box::new(report)))
+            .map_err(|verdict| execution.budget.status(verdict))
     }));
-    match result {
-        Ok(Ok(report)) => {
-            unsafe { *status = VERDICT_VALID };
-            report
-        }
-        other => {
-            unsafe {
-                *status = if other.is_err() {
-                    STATUS_PANIC
-                } else {
-                    VERDICT_UNSUPPORTED
-                }
-            };
-            std::ptr::null_mut()
-        }
-    }
+    let (report, code) = report_outcome(result);
+    unsafe { *status = code };
+    report
 }
 /// # Safety
 /// Report must be live under the GVL.

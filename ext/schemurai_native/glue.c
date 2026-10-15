@@ -85,6 +85,10 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
     }
     return self;
 }
+static void check_evaluation_status(int status, const char *panic_message) {
+    if (status == SN_STATUS_STACK_ERROR) rb_raise(rb_eSysStackError, "stack level too deep");
+    if (status < 0) rb_raise(rb_eRuntimeError, "%s", panic_message);
+}
 static VALUE valid(VALUE self, VALUE instance) {
     holder *h;
     TypedData_Get_Struct(self, holder, &engine_type, h);
@@ -92,7 +96,7 @@ static VALUE valid(VALUE self, VALUE instance) {
     if (h->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
     int status = sn_valid(h->engine, NULL, sn_root_index(h->engine), instance);
     RB_GC_GUARD(instance);
-    if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
+    check_evaluation_status(status, "native evaluator panicked");
     return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
 }
 /* Search caches and root selection belong to the owning validator. The Ruby
@@ -166,7 +170,7 @@ static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) 
     native_limits limits = read_limits(budget);
     native_outcome outcome = {0};
     int status = sn_valid_with_limits(h->engine, r->caches, r->root, instance, &limits, &outcome);
-    if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
+    check_evaluation_status(status, "native evaluator panicked");
     finish_budget(budget, &outcome);
     RB_GC_GUARD(instance);
     RB_GC_GUARD(self);
@@ -179,7 +183,7 @@ static VALUE runner_valid(VALUE self, VALUE instance) {
     int status = sn_valid(h->engine, r->caches, r->root, instance);
     RB_GC_GUARD(instance);
     RB_GC_GUARD(self);
-    if (status < 0) rb_raise(rb_eRuntimeError, "native evaluator panicked");
+    check_evaluation_status(status, "native evaluator panicked");
     return status == SN_VERDICT_UNSUPPORTED ? Qnil : (status ? Qtrue : Qfalse);
 }
 void sn_pin(VALUE value) { rb_gc_mark(value); }
@@ -530,7 +534,7 @@ static VALUE collect_diagnostics(VALUE self, VALUE instance, holder *engine, con
         native_limits limits = read_limits(budget);
         h->report = sn_diagnose_with_limits(engine->engine, caches, root, instance, &status, &limits, &outcome);
     }
-    if (status < 0) rb_raise(rb_eRuntimeError, "native diagnostics panicked");
+    check_evaluation_status(status, "native diagnostics panicked");
     if (!NIL_P(budget)) finish_budget(budget, &outcome);
     if (status == SN_VERDICT_UNSUPPORTED) return Qnil;
     size_t count = sn_report_len(h->report);
