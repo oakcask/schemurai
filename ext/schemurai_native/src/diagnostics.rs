@@ -521,7 +521,7 @@ impl Execution<'_> {
                         report.add(self.caches, "minItems", source, value, len)?;
                     }
                     if rules.unique {
-                        match unique(value, depth, self.fixnum_flag, &self.budget) {
+                        match self.unique_values(value, depth) {
                             Unsupported => return Err(Unsupported),
                             Invalid => report.add(self.caches, "uniqueItems", source, value, 0)?,
                             Valid => {}
@@ -1125,8 +1125,13 @@ impl Execution<'_> {
                 op @ (Op::Type(..) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_)),
             ] if depth <= MAX_EVALUATION_DEPTH => {
                 let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
-                if (kind == TYPE_UNSUPPORTED && matches!(op, Op::Type(..) | Op::String(..)))
-                    || (self.caches.dynamic_calls() && matches!(op, Op::String(..)))
+                if (kind == TYPE_UNSUPPORTED
+                    && matches!(
+                        op,
+                        Op::Type(..) | Op::String(..) | Op::Const(_) | Op::Enum(_)
+                    ))
+                    || (self.caches.dynamic_calls()
+                        && matches!(op, Op::String(..) | Op::Const(_) | Op::Enum(_)))
                 {
                     // Collection must execute a dynamic predicate once, rather
                     // than once here and again while recording its failure.

@@ -7,13 +7,14 @@ const MAX_INDEX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(super) struct Enumeration {
+    source: Value,
     values: Vec<Value>,
     index: Option<Index>,
     kinds: i32,
 }
 
 impl Enumeration {
-    pub(super) fn compile(values: Vec<Value>, fixnum_flag: Value) -> Self {
+    pub(super) fn compile(source: Value, values: Vec<Value>, fixnum_flag: Value) -> Self {
         let mut fingerprints = structural::Cache::batch(0);
         let budget = budget::Budget::default();
         let index = (values.len() > LINEAR_LIMIT)
@@ -31,12 +32,16 @@ impl Enumeration {
             0
         };
         Self {
+            source,
             values,
             index,
             kinds,
         }
     }
 
+    pub(super) fn runtime(&self, caches: &runtime::Caches, value: Value) -> Verdict {
+        caches.equality(self.source, value, RUNTIME_ENUM)
+    }
     pub(super) fn eval(
         &self,
         value: Value,

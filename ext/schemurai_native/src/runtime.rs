@@ -171,6 +171,20 @@ impl Caches {
             stride,
         })
     }
+    pub(super) fn equality(&self, operand: Value, instance: Value, operation: i32) -> Verdict {
+        let Ok(ordinal) = self.next_call() else {
+            return Unsupported;
+        };
+        let result = self.observe(ordinal, instance, operation);
+        if result == Unsupported {
+            self.pending_scalar.set(Some(ScalarArguments {
+                ordinal,
+                rules: operand,
+                instance,
+            }));
+        }
+        result
+    }
     pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
         self.observe(name, value, RUNTIME_REQUIRED_MISSING)
     }

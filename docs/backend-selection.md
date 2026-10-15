@@ -876,6 +876,20 @@ existing runtime operations to occurrence-based scalar frames replays before
 servicing the first frame request so earlier scalar calls cannot shift its
 identity. Ordinary strings retain borrowed native storage and scalar item
 scans; unsupported item views visit the general native scalar evaluator.
+Const, enum and uniqueItems keep their native algorithms for supported values.
+When a reached comparison or fingerprint needs custom Ruby behavior, they call
+shared Ruby value primitives through libruby. These primitives traverse values
+and preserve numeric predicates, class checks, collection methods, equality and
+hashing; they do not execute schema instructions. Indexed enums bypass native
+kind filtering for unsupported roots, retaining schema-order Ruby comparisons.
+Uniqueness keeps the VM's linear/indexed threshold and callback order by sharing
+its existing implementation. Invocation-local occurrence keys prevent repeated
+references or equivalent branches from coalescing stateful equality/hash calls.
+Native stack and budget failures remain terminal, rather than requesting Ruby
+work after a limit has already failed. VM and native runtime comparison bodies
+and limited checkpoints share one module; the Ruby backend retains its distinct
+json-kind comparison policy. Ordinary deep equality and indexed uniqueness
+remain native, including their existing iterative traversal and resource bounds.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
@@ -896,7 +910,8 @@ invocation-local fingerprints derived from the original handles. Instance
 variables do not participate in that comparison. Method-definition metadata is
 checked through libruby after Rust returns, because callable-method lookup may
 allocate. That observation lasts only for the current invocation; class-wide
-changes to type, equality or hash methods retain the VM compatibility path. The active
+changes to type, equality or hash methods request Ruby predicates/value primitives
+or retain the VM compatibility path for unsupported container operations. The active
 runner is selected through thread-local C state only while Rust evaluates,
 keeping recursive C entry and separate Ractors isolated. Ordinary JSON values
 need no method-definition request. These inputs can be nested in

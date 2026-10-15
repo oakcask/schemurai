@@ -8,6 +8,8 @@ module Schemurai
   module VM
     # VM execution with invocation-local limits; no Ruby evaluator delegation.
     class LimitedEvaluator < Evaluator
+      include Internal::ValueEquality::Checkpoints
+
       def validate(instance, max_errors: nil, timeout: nil, budget: nil)
         @budget = budget || Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
         result = super(instance)
@@ -80,16 +82,6 @@ module Schemurai
         result = super
         @budget.check_deadline!
         result
-      end
-
-      private def json_equal?(left, right)
-        @budget.checkpoint
-        super
-      end
-
-      private def json_fingerprint(value)
-        @budget.checkpoint
-        super
       end
     end
   end

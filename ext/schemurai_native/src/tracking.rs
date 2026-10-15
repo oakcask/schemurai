@@ -347,7 +347,7 @@ impl Execution<'_> {
             return Invalid;
         }
         if r.unique {
-            let result = unique(value, depth, self.fixnum_flag, &self.budget);
+            let result = self.unique_values(value, depth);
             if result != Valid {
                 return result;
             }

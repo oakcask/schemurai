@@ -804,8 +804,22 @@ static VALUE call_runtime(VALUE context) {
     runner_holder *r = call->runner;
     /* String frames check at the VM's method boundaries. Checking after each
      * yield would let a timeout overtake a later Ruby comparison exception. */
-    int string_stage = operation->kind >= SN_RUNTIME_STRING;
+    int string_stage = operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL;
     if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind >= SN_RUNTIME_EQUAL) {
+        scalar_arguments arguments;
+        sn_scalar_arguments(r->caches, &arguments);
+        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+        VALUE helper = rb_const_get(internal, rb_intern_const("ValueEquality"));
+        VALUE klass = rb_const_get(helper, rb_intern_const(NIL_P(call->budget) ? "Runtime" : "LimitedRuntime"));
+        VALUE runtime = rb_class_new_instance(1, &call->budget, klass);
+        VALUE result = rb_funcall(runtime, rb_intern_const("evaluate"), 3,
+            INT2FIX(operation->kind - SN_RUNTIME_EQUAL), arguments.rules, arguments.instance);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        RB_GC_GUARD(runtime);
+        return result;
+    }
     if (operation->kind >= SN_RUNTIME_NUMBER) {
         VALUE result = scalar_step(r, operation->kind, operation->call->budget);
         if (!NIL_P(call->budget) && !string_stage) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
