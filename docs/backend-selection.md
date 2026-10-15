@@ -716,6 +716,15 @@ word buffers are discarded, and runtime Float instances use only their scalar
 value. NaN and positive/negative Infinity retain VM behavior. This does not
 extend the exact decimal arithmetic used for `multipleOf`.
 
+Unresolved `$ref`, `$recursiveRef`, and `$dynamicRef` targets compile to native
+failure instructions retaining the resolution message. Validity returns false;
+diagnostics preserve the VM's keyword, message and schema location without
+executing the VM. A mutable registry can register the missing target later.
+Validators with unresolved instructions rebuild their native program when the
+schema graph grows, including growth during lazy external-resource indexing.
+Resolved validators keep their existing program. Shareable registries continue
+to require successful reference resolution before sharing.
+
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
 Ruby-specific patterns, content transcoding for other encodings, and numeric operands beyond

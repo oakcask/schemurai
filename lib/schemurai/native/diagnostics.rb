@@ -43,6 +43,7 @@ module Schemurai
         when "anyOf" then messages.any_of
         when "oneOf" then messages.one_of(detail)
         when "not" then messages.not
+        when "$ref", "$recursiveRef", "$dynamicRef" then operand
         else raise "unknown native diagnostic #{keyword.inspect}"
         end
       end
