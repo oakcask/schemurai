@@ -3497,9 +3497,15 @@ pub unsafe extern "C" fn sn_compile(
         e.compile_memoization();
         e.compile_native_validity_support();
         e.compile_kind_demands();
-        Ok::<_, Value>(())
+        Ok::<_, Value>(
+            !e.nodes
+                .iter()
+                .flatten()
+                .any(|op| matches!(op, Op::Unsupported)),
+        )
     })) {
-        Ok(Ok(())) => VERDICT_VALID,
+        Ok(Ok(true)) => VERDICT_VALID,
+        Ok(Ok(false)) => VERDICT_UNSUPPORTED,
         Ok(Err(value)) => {
             unsafe { *error = value };
             STATUS_EXCEPTION
