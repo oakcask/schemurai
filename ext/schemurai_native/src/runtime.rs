@@ -576,6 +576,17 @@ pub unsafe extern "C" fn sn_caches_scalar_callback(caches: *const Caches, parent
     caches.runtime_order.set(true);
 }
 /// # Safety
+/// Caches must be live and idle under the GVL, after a Ruby scalar has returned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_deadline_expired(caches: *const Caches) -> i32 {
+    i32::from(
+        unsafe { &*caches }
+            .deadline
+            .get()
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline),
+    )
+}
+/// # Safety
 /// Caches must hold a pending contains request and output must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_contains_arguments(

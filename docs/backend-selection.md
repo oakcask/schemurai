@@ -967,7 +967,8 @@ observations, with a fresh runner on reentry. Shared Ruby scalar primitives
 preserve method dispatch even for ordinary yielded values.
 The original Ruby method can rescue child exceptions and run ensure clauses.
 Children use the VM's scalar checkpoints, while the parent retains its native
-invocation deadline. A callback scope shares the owning evaluator's caches;
+invocation deadline and polls it after successful scalar yields. A callback
+scope shares the owning evaluator's caches;
 bounded calls own private caches. Retained blocks keep their original scope
 and limited-evaluator budget-clearing behavior through GC compaction.
 Reentrant calls use independent observations and cleanup. Invocation observations

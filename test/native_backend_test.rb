@@ -1524,6 +1524,27 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "polls the native deadline between scalar yields without VM execution" do
+    klass = Class.new(Array) do
+      attr_reader :yields
+
+      def any?
+        @yields = 0
+        1_000_000.times do
+          @yields += 1
+          yield 1
+        end
+        false
+      end
+    end
+    native = Schemurai.compile({"contains" => true}, backend: :native)
+    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    value = klass.new
+    expect { native.valid?(value, timeout: 0.01) }.to raise_error(Schemurai::LimitExceeded) { |error| expect(error.limit).to eq(:timeout) }
+    expect(value.yields || 0).to be < 1_000_000
+  end
+
   it "isolates a reentrant native validation from its contains callback" do # rubocop:disable RSpec/ExampleLength
     klass = Class.new(Array) do
       def initialize(validator)

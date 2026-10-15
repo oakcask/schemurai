@@ -61,6 +61,7 @@ extern void sn_message_result(const void *, VALUE);
 typedef struct { VALUE rules, instance; size_t child, depth; int required; } contains_arguments;
 extern void sn_contains_arguments(const void *, contains_arguments *);
 extern void sn_caches_scalar_callback(const void *, const void *);
+extern int sn_caches_deadline_expired(const void *);
 typedef struct { VALUE ordinal, rules, instance; } scalar_arguments;
 extern void sn_scalar_arguments(const void *, scalar_arguments *);
 extern void sn_free(void *);
@@ -1203,9 +1204,15 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
         copy_states(parent, owner, !NIL_P(parent->active_budget), 0);
     }
     VALUE budget = parent->active_budget;
-    if (!NIL_P(budget)) rb_funcall(budget, rb_intern_const("checkpoint"), 0);
+    if (!NIL_P(budget)) {
+        /* LimitedEvaluator entry, then its single scalar instruction. */
+        rb_funcall(budget, rb_intern_const("checkpoint"), 0);
+        rb_funcall(budget, rb_intern_const("checkpoint"), 0);
+    }
     VALUE result = evaluate_runner(self, instance, budget, 0);
     if (NIL_P(result)) rb_raise(rb_eRuntimeError, "scalar callback lost its native coverage proof");
+    if (!NIL_P(budget) && sn_caches_deadline_expired(parent->caches))
+        rb_funcall(budget, rb_intern_const("raise_native_limit"), 2, INT2FIX(2), INT2FIX(0));
     RB_GC_GUARD(self);
     return result;
 }
