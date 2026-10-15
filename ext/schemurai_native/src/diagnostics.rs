@@ -240,7 +240,7 @@ impl Execution<'_> {
                         report.add("type", source, value, 0)?;
                     }
                     if kind & TYPE_NUMBER != 0 {
-                        let bits = rules.failures(value)?;
+                        let bits = rules.failures(value, &self.budget)?;
                         for (bit, keyword) in [
                             (MAXIMUM, "maximum"),
                             (MINIMUM, "minimum"),
@@ -488,7 +488,7 @@ impl Execution<'_> {
                                         _ => n > limit,
                                     })
                                 } else if let Some((required, number)) = number {
-                                    match number.eval_guarded(required, item) {
+                                    match number.eval_guarded(required, item, &self.budget) {
                                         Valid => false,
                                         Invalid => true,
                                         Unsupported => return Err(Unsupported),
@@ -513,6 +513,7 @@ impl Execution<'_> {
                         };
                         let matches = evaluation::scan_contains(
                             len,
+                            evaluation::ContainsPolicy::AllMatches,
                             |index| match self.needs_diagnostics(
                                 child,
                                 values[index],
@@ -871,7 +872,7 @@ impl Execution<'_> {
         }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
-                rules.eval_guarded(*required, value)
+                rules.eval_guarded(*required, value, &self.budget)
             }
             [op @ (Op::Type(_) | Op::Boolean(_) | Op::String(..) | Op::Const(_) | Op::Enum(_))]
                 if depth <= MAX_EVALUATION_DEPTH =>

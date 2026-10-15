@@ -740,7 +740,12 @@ fn wide_float_tie(value: Value, rounded: f64) -> Option<Ordering> {
 impl Rules {
     // Shared by validity scans and diagnostic prechecks. Numeric traversal
     // borrows only opaque VALUEs and uses the compiled primitive shortcuts.
-    pub(super) fn eval_guarded(&self, required: i32, value: Value) -> Verdict {
+    pub(super) fn eval_guarded(
+        &self,
+        required: i32,
+        value: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
         let fixnum = value & self.fixnum_flag != 0;
         if fixnum {
             if required != 0 && required & TYPE_INTEGRAL_NUMBER == 0 {
@@ -768,7 +773,7 @@ impl Rules {
         } else if kind & TYPE_NUMBER == 0 {
             Valid
         } else {
-            self.eval(value)
+            self.eval(value, budget)
         }
     }
 
@@ -852,7 +857,7 @@ impl Rules {
         Valid
     }
 
-    pub(super) fn eval(&self, value: Value) -> Verdict {
+    pub(super) fn eval(&self, value: Value, budget: &budget::Budget) -> Verdict {
         if let Some(multiple) = &self.fast_multiple
             && value & self.fixnum_flag != 0
         {
@@ -865,14 +870,14 @@ impl Rules {
         }
         let result = self.check(value, |_| true);
         if result == Unsupported {
-            self.arbitrary_failures(value)
+            self.arbitrary_failures(value, budget)
                 .map_or(Unsupported, |bits| verdict(bits == 0))
         } else {
             result
         }
     }
 
-    pub(super) fn failures(&self, value: Value) -> Result<i32, Verdict> {
+    pub(super) fn failures(&self, value: Value, budget: &budget::Budget) -> Result<i32, Verdict> {
         if let Some(multiple) = &self.fast_multiple
             && value & self.fixnum_flag != 0
         {
@@ -901,7 +906,7 @@ impl Rules {
             false
         });
         if status == Unsupported {
-            self.arbitrary_failures(value)
+            self.arbitrary_failures(value, budget)
         } else {
             Ok(bits)
         }

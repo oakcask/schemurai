@@ -2463,6 +2463,50 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "raises non-finite decimal errors through libruby without VM execution" do # rubocop:disable RSpec/ExampleLength
+    capture = lambda do |validator, method, value, **options|
+      result = validator.public_send(method, value, **options)
+      [:result, (method == :validate) ? result.errors : result]
+    rescue ArgumentError => error
+      [:error, error.class, error.message]
+    end
+    number = {"multipleOf" => 0.1}
+    schemas = [number, number.merge("type" => "number"), number.merge("type" => "integer"),
+      number.merge("minimum" => 0, "maximum" => 0), {"items" => number}, {"contains" => number},
+      {"properties" => {"n" => number}}, {"allOf" => [false, number]}, {"anyOf" => [true, number]},
+      {"not" => number}, {"if" => number, "then" => false, "else" => true},
+      {"maximum" => 0.0}, {"type" => "integer", "minimum" => 0.0},
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "items" => number, "unevaluatedItems" => false}]
+    values = [Float::NAN, Float::INFINITY, -Float::INFINITY].flat_map { |value| [value, [1, value], {"n" => value}] }
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), values.map do |value|
+        [:valid?, :validate].map { |method| capture.call(vm, method, value) }
+      end, schema]
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected, schema|
+      values.zip(expected).each do |value, results|
+        [:valid?, :validate].zip(results).each do |method, result|
+          expect(capture.call(native, method, value)).to eq(result), [schema, method, value].inspect
+          expect(capture.call(native, method, value, timeout: 10)).to eq(result), [schema, method, value].inspect
+        end
+      end
+    end
+  end
+
+  it "retains earlier type failures and error limits before non-finite conversion" do
+    native = Schemurai.compile({"type" => "integer", "multipleOf" => 1e-300}, backend: :native)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect(native.valid?(Float::NAN, max_errors: 0)).to be(false)
+    expect { native.validate(Float::NAN, max_errors: 0) }.to raise_error(Schemurai::LimitExceeded)
+    expect { native.validate(Float::NAN, max_errors: 1) }.to raise_error(ArgumentError, 'invalid value for convert(): "NaN"')
+    expect(native.validate(1, max_errors: 0).valid?).to be(true)
+  end
+
   it "keeps invalid nil numeric operands lazy like the VM" do # rubocop:disable RSpec/ExampleLength
     %w[minimum maximum exclusiveMinimum exclusiveMaximum multipleOf].each do |keyword|
       vm = Schemurai.compile({keyword => nil}, backend: :vm)

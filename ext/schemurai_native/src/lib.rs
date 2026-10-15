@@ -150,6 +150,7 @@ struct Array {
     contains: Option<usize>,
     min_contains: usize,
     max_contains: Option<usize>,
+    count_contains: bool,
     unevaluated: Option<usize>,
 }
 #[derive(Debug)]
@@ -922,6 +923,9 @@ impl Engine {
                             contains: self.child(operand, b"contains\0")?,
                             min_contains: self.size_field(operand, b"min_contains\0")?.unwrap_or(1),
                             max_contains: self.size_field(operand, b"max_contains\0")?,
+                            count_contains: unsafe {
+                                sn_true(self.field(operand, b"count_contains\0")?)
+                            } != 0,
                             unevaluated: self.child(operand, b"unevaluated\0")?,
                         }),
                     )
@@ -1372,7 +1376,7 @@ impl Execution<'_> {
                 } else if kind & TYPE_NUMBER == 0 {
                     Valid
                 } else {
-                    rules.eval(value)
+                    rules.eval(value, &self.budget)
                 }
             }
             Op::String(required, rules) => {
@@ -1548,7 +1552,7 @@ impl Execution<'_> {
                         return Unsupported;
                     }
                     let result = if let Some((required, rules)) = number {
-                        rules.eval_guarded(required, item)
+                        rules.eval_guarded(required, item, &self.budget)
                     } else if let Some((required, rules)) = string {
                         if rules.pattern.is_some() {
                             rules.eval_guarded(self.caches, required, item)
@@ -1574,18 +1578,30 @@ impl Execution<'_> {
             }
         }
         if let Some(child) = r.contains {
-            if let Some(status) = self.fixnum_contains(r, child, value, len, depth) {
+            if r.count_contains
+                && let Some(status) = self.fixnum_contains(r, child, value, len, depth)
+            {
                 return status;
             }
             let matches = match evaluation::scan_contains(
                 len,
+                if r.count_contains {
+                    evaluation::ContainsPolicy::AllMatches
+                } else {
+                    evaluation::ContainsPolicy::FirstMatch
+                },
                 |index| self.eval(child, unsafe { sn_entry(value, index) }, depth, active),
                 |_| {},
             ) {
                 Ok(matches) => matches,
                 Err(status) => return status,
             };
-            if bounds(matches, Some(r.min_contains), r.max_contains) == Invalid {
+            let (min, max) = if r.count_contains {
+                (r.min_contains, r.max_contains)
+            } else {
+                (1, None)
+            };
+            if bounds(matches, Some(min), max) == Invalid {
                 return Invalid;
             }
         }
@@ -1673,7 +1689,7 @@ impl Execution<'_> {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
-                rules.eval_guarded(required, value)
+                rules.eval_guarded(required, value, &self.budget)
             } else {
                 self.eval(child, value, depth, active)
             };

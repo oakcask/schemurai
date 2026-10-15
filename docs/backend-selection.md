@@ -271,9 +271,12 @@ sparse scaling; the Cartesian O(RK) absent-lookup work is eliminated from the
 multi-name discovery path.
 
 Detailed `anyOf` and `oneOf` scans remain complete to preserve later VM
-exceptions and exact match counts. `contains` scans also retain complete
-counting and unsupported-value detection. Shared scans make these termination
-requirements explicit rather than assuming both public methods can stop at the
+exceptions and exact match counts. Counted `contains` validity, tracked
+evaluation and diagnostics also retain complete scans. Untracked validity in
+older dialects stops at the first match, matching the VM's `any?` behavior and
+avoiding exceptions in unvisited later items. The compiler's `count_contains`
+flag selects these policies in the same shared scan. Shared scans make these
+termination requirements explicit rather than assuming both public methods can stop at the
 same point.
 
 Each runtime refactoring must check native coverage without VM fallback and
@@ -356,8 +359,10 @@ The fixed and arbitrary paths share decimal-spelling parsing and bound-failure
 predicates. Arbitrary schema fractions are retained only when their components
 do not fit i128; runtime temporaries contain numeric scalars rather than a
 converted instance tree. They allocate no Ruby objects and invoke no Ruby
-methods. Non-finite decimal conversions and invalid numeric operands still
-delegate for their Ruby exceptions. Schema rational
+methods. Non-finite decimal conversions record a terminal native status for
+NaN or either Infinity; the C boundary raises the VM-compatible `ArgumentError`
+after Rust unwinds. Invalid numeric operands still delegate for their Ruby
+behavior. Schema rational
 operands and rounded bounds are captured at compilation, never recomputed by
 Ruby callbacks during evaluation. The integer-array fast scan remains available.
 Native memory reporting includes numeric metadata and retained fraction digits;
@@ -751,8 +756,8 @@ to require successful reference resolution before sharing.
 
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
-Ruby-specific patterns, content transcoding for other encodings, and exceptional
-numeric conversions or invalid numeric operands. Successful
+Ruby-specific patterns, content transcoding for other encodings, unusual Numeric
+objects and invalid numeric operands. Successful
 detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
