@@ -1428,7 +1428,12 @@ impl Execution<'_> {
         if self.unsupported_kind(node, kind) {
             return Unsupported;
         }
-        for op in &self.nodes[node] {
+        for (index, op) in self.nodes[node].iter().enumerate() {
+            // The callback entry checks the first opcode. Later instructions
+            // checkpoint only after prior Ruby assertions have completed.
+            if index != 0 && self.caches.callback_checkpoint(value) != Valid {
+                return Unsupported;
+            }
             if !self.budget.checkpoint() {
                 return Unsupported;
             }

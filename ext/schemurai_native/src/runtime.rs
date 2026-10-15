@@ -194,6 +194,15 @@ impl Caches {
         self.call_cursor.set(ordinal + 1);
         Ok(unsafe { sn_runtime_ordinal(ordinal) })
     }
+    pub(super) fn callback_checkpoint(&self, value: Value) -> Verdict {
+        if !self.scalar_callback() {
+            return Valid;
+        }
+        let Ok(ordinal) = self.next_call() else {
+            return Unsupported;
+        };
+        self.observe(ordinal, value, RUNTIME_CALLBACK_CHECKPOINT)
+    }
     pub(super) fn type_predicate(&self, value: Value, mask: i32, union: bool) -> Verdict {
         let Ok(ordinal) = self.next_call() else {
             return Unsupported;

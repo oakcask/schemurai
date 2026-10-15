@@ -954,8 +954,10 @@ Ordinary supported containers retain native size and uniqueness algorithms.
 Object validity with only count assertions needs no key scan because only its size is read.
 Contains validity can call a native scalar child from Ruby any?/count methods
 when no item-schema or unevaluated-item traversal is required. The compiler
-proof admits only one Boolean/type/number/string/const/enum instruction, with
-no inherited reference bindings or exported annotations. An iterative
+proof admits a nonempty sequence of Boolean/type/number/string/const/enum
+instructions, with no inherited reference bindings or exported annotations.
+Later child instructions request Ruby checkpoints after preceding assertions
+complete, preserving short circuits and exceptions rescued by enumeration. An iterative
 whole-program proof also requires reachable
 instructions to have complete runtime paths, static acyclic references and
 a depth within the native bound. Other roots retain the earlier guard before
