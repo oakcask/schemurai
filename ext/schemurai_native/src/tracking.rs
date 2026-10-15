@@ -142,6 +142,24 @@ pub(super) struct Tracked {
     items: Vec<u64>,
 }
 impl Tracked {
+    pub(super) fn memory_usage(&self) -> usize {
+        self.properties.capacity() * std::mem::size_of::<JsonKey>()
+            + self.items.capacity() * std::mem::size_of::<u64>()
+            + match &self.known_properties.words {
+                PropertyWords::Empty | PropertyWords::Single(..) => 0,
+                PropertyWords::Dense(_, words) => words.capacity() * std::mem::size_of::<u64>(),
+                PropertyWords::Many(words) => {
+                    words.capacity() * std::mem::size_of::<(usize, u64)>()
+                }
+            }
+    }
+    pub(super) fn mark(&self) {
+        for key in &self.properties {
+            unsafe {
+                sn_pin(key.0);
+            }
+        }
+    }
     // Bound retained annotation slots independently of the number of results.
     pub(super) fn memo_slots(&self) -> usize {
         self.properties.capacity()
@@ -251,6 +269,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Verdict {
+        if self.should_continue_report(depth) {
+            return self.eval_tracked(node, value, depth, active).status;
+        }
         if depth > MAX_EVALUATION_DEPTH || !self.budget.checkpoint() {
             return Unsupported;
         }
@@ -272,6 +293,15 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Tracked {
+        if self.should_continue_report(depth) {
+            return self.collect_trial(
+                node,
+                value,
+                depth,
+                active,
+                &InstanceKind::new(TYPE_UNCHECKED),
+            );
+        }
         if depth > MAX_EVALUATION_DEPTH {
             return Tracked::new(Unsupported);
         }
@@ -292,6 +322,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind_state: &InstanceKind,
     ) -> Tracked {
+        if self.should_continue_report(depth) {
+            return self.collect_trial(node, value, depth, active, kind_state);
+        }
         let kind = self.diagnostic_kind(node, value, kind_state);
         if !self.budget.checkpoint() {
             return Tracked::new(Unsupported);

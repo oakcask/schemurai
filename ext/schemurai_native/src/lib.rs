@@ -698,6 +698,7 @@ pub struct Engine {
     kind_demand: Vec<KindDemand>,
     callback_roots: Vec<bool>,
     validity_supported: Vec<bool>,
+    report_supported: Vec<bool>,
     has_references: bool,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
@@ -3671,6 +3672,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let callback_roots = unsafe { &*std::ptr::addr_of!((*engine).callback_roots) };
     let validity_supported = unsafe { &*std::ptr::addr_of!((*engine).validity_supported) };
+    let report_supported = unsafe { &*std::ptr::addr_of!((*engine).report_supported) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3680,7 +3682,8 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
-        + (callback_roots.capacity() + validity_supported.capacity()) * std::mem::size_of::<bool>()
+        + (callback_roots.capacity() + validity_supported.capacity() + report_supported.capacity())
+            * std::mem::size_of::<bool>()
         + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()

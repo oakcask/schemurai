@@ -70,6 +70,7 @@ impl Path {
         self.text.capacity() + self.names.capacity() * std::mem::size_of::<(usize, Value)>()
     }
 }
+#[derive(Clone)]
 pub(super) enum Rendered {
     Native(String),
     Ruby(Value),

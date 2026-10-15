@@ -1911,6 +1911,100 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "continues deep native diagnostics with original paths and error limits" do # rubocop:disable RSpec/ExampleLength
+    wrappers = [->(reference) { reference }, ->(reference) { {"allOf" => [false, reference, false]} },
+      ->(reference) { {"anyOf" => [reference, false]} }, ->(reference) { {"oneOf" => [reference, reference]} },
+      ->(reference) { {"if" => reference, "then" => false, "else" => {"type" => "null"}} }]
+    cases = [255, 256, 512].product(wrappers).map do |length, wrap|
+      leaf = {"type" => "integer", "minimum" => 5}
+      definitions = length.times.to_h { |index| ["n#{index}", (index == length - 1) ? leaf : {"$ref" => "#/$defs/n#{index + 1}"}] }
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions}.merge(wrap.call({"$ref" => "#/$defs/n0"}))
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = [1, 6, "a"].product([{}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}, {timeout: 10}]).map do |value, options|
+        [value, options, capture_validation(vm, :validate, value, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each do |value, options, result|
+        expect(capture_validation(native, :validate, value, **options)).to eq(result), [schema, options].inspect
+      end
+    end
+  end
+
+  it "roots continued diagnostic results through compaction and clears them after exceptions" do # rubocop:disable RSpec/ExampleLength
+    inspections = 0
+    messages = Schemurai.const_get(:Internal)::ErrorMessage
+    allow(messages).to receive(:type).and_wrap_original do |original, *arguments|
+      inspections += 1
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      original.call(*arguments)
+    end
+    definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? {"type" => "integer"} : {"$ref" => "#/$defs/n#{index + 1}"}] }
+    reference = {"$ref" => "#/$defs/n0"}
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions,
+              "allOf" => [reference, reference]}
+    run = lambda do |validator, options|
+      inspections = 0
+      value = "a"
+      first = capture_validation(validator, :validate, value, **options)
+      after = capture_validation(validator, :validate, 1)
+      [first, inspections, after]
+    end
+    vm = Schemurai.compile(schema, backend: :vm)
+    cases = [{}, {timeout: 10}, {max_errors: 1}].map { |options| [options, run.call(vm, options)] }
+    expect(cases.map { |entry| entry.last[1] }).to eq([2, 2, 1])
+    native = Schemurai.compile(schema, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |options, expected| expect(run.call(native, options)).to eq(expected) }
+  end
+
+  it "inherits active source guards when detailed reference cycles cross native stacks" do # rubocop:disable RSpec/ExampleLength
+    cases = [255, 512].map do |length|
+      definitions = length.times.to_h { |index| ["n#{index}", {"$ref" => "#/$defs/n#{(index + 1) % length}"}] }
+      definitions["n0"].merge!("type" => "integer", "minimum" => 5)
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions, "$ref" => "#/$defs/n0"}
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = [1, 6, "a"].product([{}, {max_errors: 1}, {max_errors: 2}, {timeout: 10}]).map do |value, options|
+        [value, options, capture_validation(vm, :validate, value, **options)]
+      end
+      expect(expected.first.last.last.length).to eq(2)
+      [Schemurai.compile(schema, backend: :native), expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      expected.each { |value, options, result| expect(capture_validation(native, :validate, value, **options)).to eq(result) }
+    end
+  end
+
+  it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength
+    string = Class.new(String) do
+      attr_reader :calls
+
+      def is_a?(type)
+        (@calls ||= []) << type
+        super
+      end
+    end
+    definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? {"type" => "integer"} : {"$ref" => "#/$defs/n#{index + 1}"}] }
+    schema = {"$defs" => definitions, "allOf" => [{"$ref" => "#/$defs/n0"}, {"items" => {"type" => "string"}}]}
+    native = Schemurai.compile(schema, backend: :native)
+    input = string.new("a")
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.diagnostics(input)).to be_nil
+    expect(input.calls).to be_nil
+    results = [:vm, :native].map do |backend|
+      value = string.new("a")
+      validator = (backend == :native) ? native : Schemurai.compile(schema, backend: backend)
+      [capture_validation(validator, :validate, value), value.calls]
+    end
+    expect(results.last).to eq(results.first)
+  end
+
   it "inherits scope and Ruby observations across native validity continuations" do # rubocop:disable RSpec/ExampleLength
     string = Class.new(String) do
       attr_reader :calls

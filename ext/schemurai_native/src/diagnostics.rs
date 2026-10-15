@@ -11,6 +11,7 @@ fn reference_keyword(opcode: i32) -> &'static str {
     }
 }
 
+#[derive(Clone)]
 struct Error {
     keyword: &'static str,
     instance_path: pointer::Rendered,
@@ -21,9 +22,11 @@ struct Error {
     detail: usize,
     message: Value,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Report {
     errors: Vec<Error>,
+    annotations: bool,
+    evaluation: Option<Tracked>,
     attempts: usize,
     instance_path: pointer::Path,
     schema_path: pointer::Path,
@@ -36,6 +39,53 @@ pub struct Report {
     limit_hit: (u32, usize),
 }
 impl Report {
+    pub(super) fn continuation(&self, annotations: bool) -> Self {
+        let mut report = self.clone();
+        report.annotations = annotations;
+        report.evaluation = None;
+        report
+    }
+    pub(super) fn adopt(&mut self, mut completed: Self) -> Tracked {
+        let evaluation = completed
+            .evaluation
+            .take()
+            .expect("completed native report");
+        completed.annotations = self.annotations;
+        *self = completed;
+        evaluation
+    }
+    pub(super) fn memory_usage(&self) -> usize {
+        self.errors.capacity() * std::mem::size_of::<Error>()
+            + self.instance_path.memory_usage()
+            + self.schema_path.memory_usage()
+            + self
+                .errors
+                .iter()
+                .map(|e| e.instance_path.memory_usage() + e.schema_path.memory_usage())
+                .sum::<usize>()
+            + self.evaluation.as_ref().map_or(0, Tracked::memory_usage)
+    }
+    pub(super) fn mark(&self) {
+        for path in [&self.instance_path, &self.schema_path] {
+            for &(_, value) in &path.names {
+                unsafe {
+                    sn_pin(value);
+                }
+            }
+        }
+        for error in &self.errors {
+            unsafe {
+                sn_pin(error.instance_path.value());
+                sn_pin(error.schema_path.value());
+                sn_pin(error.operand);
+                sn_pin(error.instance);
+                sn_pin(error.message);
+            }
+        }
+        if let Some(evaluation) = &self.evaluation {
+            evaluation.mark();
+        }
+    }
     fn add(
         &mut self,
         caches: &runtime::Caches,
@@ -222,6 +272,21 @@ impl Report {
 }
 
 impl Execution<'_> {
+    pub(super) fn should_continue_report(&self, depth: usize) -> bool {
+        depth >= MAX_EVALUATION_DEPTH && self.caches.report_continuations_allowed()
+    }
+    fn collect_report(
+        &self,
+        report: &mut Report,
+        root: usize,
+        instance: Value,
+    ) -> Result<Tracked, Verdict> {
+        if report.annotations {
+            self.collect::<true>(report, root, instance, 0, scope::Context::default())
+        } else {
+            self.collect::<false>(report, root, instance, 0, scope::Context::default())
+        }
+    }
     // Scalar trials export no annotations and need no evaluation memo entry.
     // Keep this before memo admission, especially for contains over scalar arrays.
     pub(super) fn trial_scalar(
@@ -274,6 +339,16 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind_state: &InstanceKind,
     ) -> Tracked {
+        if self.should_continue_report(depth) {
+            let mut report = Report {
+                silent: true,
+                ..Report::default()
+            };
+            return self
+                .caches
+                .report_child(node, value, &mut report, true)
+                .unwrap_or_else(Tracked::new);
+        }
         let kind = kind_state.get();
         if depth > MAX_EVALUATION_DEPTH || self.unsupported_kind(node, kind) {
             return Tracked::new(Unsupported);
@@ -296,6 +371,9 @@ impl Execution<'_> {
         depth: usize,
         active: scope::Context<'_>,
     ) -> Result<Tracked, Verdict> {
+        if self.should_continue_report(depth) {
+            return self.caches.report_child(node, value, report, ANNOTATIONS);
+        }
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
@@ -318,6 +396,9 @@ impl Execution<'_> {
         active: scope::Context<'_>,
         kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
+        if self.should_continue_report(depth) {
+            return self.caches.report_child(node, value, report, ANNOTATIONS);
+        }
         let kind = self.diagnostic_kind(node, value, kind_state);
         if self.unsupported_kind(node, kind) {
             return Err(Unsupported);
@@ -1332,13 +1413,17 @@ pub unsafe extern "C" fn sn_diagnose(
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
         };
-        let mut report = Report {
+        caches.allow_report_continuations(engine.report_continuations_safe(root));
+        let inherited = caches.initial_report();
+        let resumed = inherited.is_some();
+        let mut report = inherited.unwrap_or_else(|| Report {
             render_messages: engine.runtime_messages,
             ..Report::default()
-        };
-        execution
-            .collect::<false>(&mut report, root, instance, 0, scope::Context::default())
+        });
+        let result = execution
+            .collect_report(&mut report, root, instance)
             .map_err(|verdict| execution.budget.status(verdict))?;
+        report.evaluation = if resumed { Some(result) } else { None };
         Ok::<_, i32>(Box::into_raw(Box::new(report)))
     }));
     let (report, code) = report_outcome(result);
@@ -1367,13 +1452,16 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             memo: memo::Memo::default(),
             budget: caches.budget(limits),
         };
-        let mut report = Report {
+        caches.allow_report_continuations(execution.report_continuations_safe(root));
+        let inherited = caches.initial_report();
+        let resumed = inherited.is_some();
+        let mut report = inherited.unwrap_or_else(|| Report {
             limits,
             render_messages: execution.runtime_messages,
             ..Report::default()
-        };
+        });
         let result = if execution.budget.check_deadline() {
-            execution.collect::<false>(&mut report, root, instance, 0, scope::Context::default())
+            execution.collect_report(&mut report, root, instance)
         } else {
             Err(Unsupported)
         };
@@ -1391,7 +1479,10 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             ((*outcome).kind, (*outcome).attempted) = hit;
         }
         result
-            .map(|_| Box::into_raw(Box::new(report)))
+            .map(|evaluation| {
+                report.evaluation = if resumed { Some(evaluation) } else { None };
+                Box::into_raw(Box::new(report))
+            })
             .map_err(|verdict| execution.budget.status(verdict))
     }));
     let (report, code) = report_outcome(result);
@@ -1408,15 +1499,7 @@ pub unsafe extern "C" fn sn_report_len(report: *const Report) -> usize {
 /// Report must be live under the GVL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_report_size(report: *const Report) -> usize {
-    let r = unsafe { &*report };
-    std::mem::size_of::<Report>()
-        + r.errors.capacity() * std::mem::size_of::<Error>()
-        + r.instance_path.memory_usage()
-        + r.schema_path.memory_usage()
-        + r.errors
-            .iter()
-            .map(|e| e.instance_path.memory_usage() + e.schema_path.memory_usage())
-            .sum::<usize>()
+    std::mem::size_of::<Report>() + unsafe { &*report }.memory_usage()
 }
 /// # Safety
 /// Report must be live, index in bounds, and record a writable pointer.
@@ -1449,19 +1532,68 @@ pub unsafe extern "C" fn sn_report_record(
 /// Report must be live; call only from its synchronous Ruby GC mark callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_report_mark(report: *const Report) {
-    for error in &unsafe { &*report }.errors {
-        unsafe {
-            sn_pin(error.instance_path.value());
-            sn_pin(error.schema_path.value());
-            sn_pin(error.operand);
-            sn_pin(error.instance);
-            sn_pin(error.message);
-        }
-    }
+    unsafe { &*report }.mark();
 }
 /// # Safety
 /// Report must be owned, returned by sn_diagnose, and freed exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_report_free(report: *mut Report) {
     drop(unsafe { Box::from_raw(report) });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_seeds_and_results_own_error_paths_limits_and_locations() {
+        let mut report = Report {
+            attempts: 2,
+            failed: true,
+            ..Report::default()
+        };
+        report.instance_path.text.push_str("/item");
+        report.schema_path.text.push_str("/allOf/1");
+        report.limits = budget::Limits {
+            enabled: 1,
+            max_errors: 3,
+            ..budget::Limits::default()
+        };
+        report.errors.push(Error {
+            keyword: "type",
+            instance_path: pointer::Rendered::Native("/item".into()),
+            schema_path: pointer::Rendered::Native("/allOf/0/type".into()),
+            opcode: OP_TYPE_INTEGER,
+            operand: 0,
+            instance: 0,
+            detail: 0,
+            message: 0,
+        });
+        let mut locations = Tracked::new(Valid);
+        locations.item(4);
+        locations.item(65);
+        report.evaluation = Some(locations);
+        let mut seed = report.continuation(true);
+        assert!(seed.annotations);
+        assert!(seed.evaluation.is_none());
+        assert_eq!(seed.attempts, 2);
+        assert!(seed.failed);
+        assert_eq!(seed.limits.max_errors, 3);
+        seed.instance_path.text.push_str("/child");
+        seed.errors.clear();
+        assert_eq!(report.instance_path.text, "/item");
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.memory_usage() > 0);
+        let mut adopted = Report::default();
+        let mut completed = report.clone();
+        completed.annotations = true;
+        let mut result = adopted.adopt(completed);
+        result.item(8);
+        assert_eq!(result.item_count(), 3);
+        assert_eq!(report.evaluation.as_ref().unwrap().item_count(), 2);
+        assert!(report.evaluation.as_ref().unwrap().contains_item(65));
+        assert!(adopted.evaluation.is_none());
+        assert!(!adopted.annotations);
+        assert_eq!(adopted.attempts, 2);
+    }
 }

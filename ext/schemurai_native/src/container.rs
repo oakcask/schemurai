@@ -147,6 +147,9 @@ impl Engine {
     pub(super) fn native_continuations_safe(&self, root: usize) -> bool {
         self.validity_supported.get(root) == Some(&true)
     }
+    pub(super) fn report_continuations_safe(&self, root: usize) -> bool {
+        self.report_supported.get(root) == Some(&true)
+    }
     // Admit callbacks only when every reachable assertion has a runtime path.
     // Otherwise a later unsupported container could replay an already invoked
     // user block through the VM. Native continuations bound physical stack
@@ -164,6 +167,7 @@ impl Engine {
         let mut edges = vec![vec![]; recursive + 1];
         let mut admitted = vec![true; edges.len()];
         let mut callbacks = vec![false; edges.len()];
+        let mut report_unsupported = vec![false; edges.len()];
         for (name, bindings) in self.anchor_tables.iter().enumerate() {
             edges[count + name].extend(bindings.iter().map(|&(_, target)| target));
         }
@@ -176,6 +180,14 @@ impl Engine {
         for (node, ops) in self.nodes.iter().enumerate() {
             admitted[node] = !self.tracks[node];
             for op in ops {
+                // Full container result callbacks are introduced separately;
+                // scalar/header reports already have all required runtime paths.
+                report_unsupported[node] |= match op {
+                    Op::Array(_, rules) => !rules.header_only(),
+                    Op::Object(_, rules) => !rules.header_only(),
+                    Op::Unsupported | Op::UnresolvedRef(_) => true,
+                    _ => false,
+                };
                 match op {
                     Op::Boolean(_)
                     | Op::Type(..)
@@ -220,6 +232,11 @@ impl Engine {
         let parents = graph::parents(&edges);
         let mut unsupported: Vec<_> = admitted.into_iter().map(|allowed| !allowed).collect();
         graph::propagate(&mut unsupported, &parents);
+        graph::propagate(&mut report_unsupported, &parents);
+        self.report_supported = report_unsupported[..count]
+            .iter()
+            .map(|&blocked| !blocked)
+            .collect();
         graph::propagate(&mut callbacks, &parents);
         self.validity_supported = unsupported[..count]
             .iter()
