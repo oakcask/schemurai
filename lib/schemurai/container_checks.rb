@@ -41,6 +41,18 @@ module Schemurai
         end
       end
 
+      module Contains
+        private def valid_contains?(rules, value, &block)
+          if rules.count_contains
+            matches = value.count(&block)
+            return false if matches < rules.min_contains || matches > rules.max_contains
+          else
+            return false unless value.any?(&block)
+          end
+          true
+        end
+      end
+
       # Frames evaluate container value operations without child schemas.
       # Child schema execution remains with the native traversal.
       class Frame
@@ -122,6 +134,25 @@ module Schemurai
       end
 
       class LimitedArrayFrame < ArrayFrame
+        include ValueEquality::Checkpoints
+      end
+
+      class ContainsFrame < ArrayFrame
+        include Contains
+
+        def initialize(rules, value, budget, required, callback)
+          super(rules, value, budget, required)
+          @callback = callback
+        end
+
+        private def valid_tail?(length)
+          return false unless super
+
+          valid_contains?(@rules, @value) { |item| @callback.call(item) }
+        end
+      end
+
+      class LimitedContainsFrame < ContainsFrame
         include ValueEquality::Checkpoints
       end
 

@@ -28,7 +28,7 @@ extern int rb_hash_stlike_foreach(VALUE, st_foreach_callback_func *, st_data_t);
 typedef struct { void *engine; const void *roots; VALUE program; int compiling; } holder;
 extern void *sn_new(void);
 extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
-extern int sn_valid(const void *, const void *, size_t, VALUE);
+extern int sn_valid(const void *, const void *, size_t, VALUE, size_t);
 extern size_t sn_node_index(const void *, VALUE);
 extern size_t sn_root_index(const void *);
 extern int sn_has_unresolved_references(const void *);
@@ -58,6 +58,10 @@ typedef struct {
 } message_arguments;
 extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
+typedef struct { VALUE rules, instance; size_t child, depth; int required, scalar_kind, scalar_flags; } contains_arguments;
+extern void sn_contains_arguments(const void *, contains_arguments *);
+extern void sn_caches_scalar_callback(const void *, const void *);
+extern int sn_caches_deadline_expired(const void *);
 typedef struct { VALUE ordinal, rules, instance; } scalar_arguments;
 extern void sn_scalar_arguments(const void *, scalar_arguments *);
 extern void sn_free(void *);
@@ -132,7 +136,18 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps, limited_regexps, pointers, messages, frames, number_state, limited_number_state, string_state, limited_string_state; void *caches; size_t root; st_table *matches, *frame_indices; } runner_holder;
+typedef struct { size_t max_errors; uint32_t enabled; double timeout; } native_limits;
+typedef struct {
+    VALUE owner, parent, active_budget, callback_scope;
+    VALUE regexps, limited_regexps, pointers, messages, frames;
+    VALUE number_state, limited_number_state, string_state, limited_string_state;
+    void *caches;
+    size_t root, depth;
+    int busy, callback_context, scope_owner, closed_limited;
+    int callback_kind, callback_flags;
+    native_limits active_limits;
+    st_table *matches, *frame_indices;
+} runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -158,6 +173,9 @@ static int release_operation(st_data_t key, st_data_t value, st_data_t context) 
 static void runner_mark(void *ptr) {
     runner_holder *r = ptr;
     rb_gc_mark(r->owner);
+    rb_gc_mark(r->parent);
+    rb_gc_mark(r->active_budget);
+    rb_gc_mark(r->callback_scope);
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->limited_regexps);
     rb_gc_mark(r->pointers);
@@ -212,6 +230,28 @@ static const rb_data_type_t runner_type = {
     "Schemurai::Native::Runner", {runner_mark, runner_release, runner_size, NULL, {NULL}},
     NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
 };
+/* Share evaluator caches, never runtime observations or borrowed views.
+ * Reentrant independent bounded validations own their limited state. */
+static void copy_states(runner_holder *target, const runner_holder *source, int limited, int merge) {
+#define COPY_STATE(field) if (!merge || !NIL_P(source->field)) target->field = source->field
+    COPY_STATE(regexps);
+    COPY_STATE(number_state);
+    COPY_STATE(string_state);
+    if (limited) {
+        COPY_STATE(limited_regexps);
+        COPY_STATE(limited_number_state);
+        COPY_STATE(limited_string_state);
+    }
+#undef COPY_STATE
+}
+static void publish_states(runner_holder *runner) {
+    if (!NIL_P(runner->parent)) {
+        runner_holder *parent;
+        TypedData_Get_Struct(runner->parent, runner_holder, &runner_type, parent);
+        copy_states(parent, runner, runner->callback_context, 1);
+        publish_states(parent);
+    }
+}
 static holder *ready_program(VALUE self) {
     holder *h;
     TypedData_Get_Struct(self, holder, &engine_type, h);
@@ -242,6 +282,17 @@ static VALUE build_runner(VALUE self, size_t index) {
     runner_holder *r;
     VALUE object = TypedData_Make_Struct(klass, runner_holder, &runner_type, r);
     r->owner = self;
+    r->parent = Qnil;
+    r->active_budget = Qnil;
+    r->callback_scope = Qnil;
+    r->scope_owner = 0;
+    r->closed_limited = 0;
+    r->callback_kind = SN_CALLBACK_RUNTIME;
+    r->callback_flags = 0;
+    r->active_limits = (native_limits){0};
+    r->depth = 0;
+    r->busy = 0;
+    r->callback_context = 0;
     r->regexps = Qnil;
     r->limited_regexps = Qnil;
     r->pointers = Qnil;
@@ -262,9 +313,8 @@ static VALUE build_runner(VALUE self, size_t index) {
     RB_GC_GUARD(self);
     return object;
 }
-typedef struct { size_t max_errors; uint32_t enabled; double timeout; } native_limits;
 typedef struct { uint32_t kind; size_t attempted; } native_outcome;
-extern int sn_valid_with_limits(const void *, const void *, size_t, VALUE, const native_limits *, native_outcome *);
+extern int sn_valid_with_limits(const void *, const void *, size_t, VALUE, size_t, const native_limits *, native_outcome *);
 static native_limits read_limits(VALUE budget) {
     native_limits limits = {0};
     VALUE cap = rb_funcall(budget, rb_intern("native_max_errors"), 0);
@@ -282,6 +332,15 @@ static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) 
 }
 static VALUE runner_valid(VALUE self, VALUE instance) {
     return evaluate_runner(self, instance, Qnil, 0);
+}
+static VALUE runner_share_scalar_state(VALUE self, VALUE number_state, VALUE regexps) {
+    runner_holder *runner;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
+    if (runner->busy) rb_raise(rb_eRuntimeError, "cannot replace active scalar state");
+    runner->number_state = number_state;
+    runner->regexps = regexps;
+    runner->string_state = Qnil;
+    return self;
 }
 static VALUE valid(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
@@ -639,8 +698,28 @@ typedef struct {
     int status;
     native_limits limits;
     int limits_read;
+    int diagnostics;
 } evaluation_call;
 
+/* Retained Ruby blocks keep their evaluator cache scope. Bounded calls own
+ * their caches; unbounded scopes continue sharing the runner's persistent state. */
+static void close_callback_scope(runner_holder *runner) {
+    if (NIL_P(runner->callback_scope)) return;
+    runner_holder *scope;
+    TypedData_Get_Struct(runner->callback_scope, runner_holder, &runner_type, scope);
+    if (!NIL_P(scope->active_budget)) {
+        scope->parent = Qnil;
+        scope->closed_limited = 1;
+        scope->regexps = Qnil;
+        scope->number_state = Qnil;
+        scope->string_state = Qnil;
+    }
+    scope->active_budget = Qnil;
+    scope->active_limits = (native_limits){0};
+    scope->callback_context = 0;
+    sn_caches_begin(scope->caches);
+    runner->callback_scope = Qnil;
+}
 static VALUE clear_runtime(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     st_foreach(call->runner->matches, release_operation, 0);
@@ -663,6 +742,7 @@ static void evaluate_native(evaluation_call *call) {
         call->limits = read_limits(call->budget);
         call->limits_read = 1;
     }
+    r->active_limits = call->limits;
     const void *previous_caches = active_caches;
     active_caches = r->caches;
     if (call->report) {
@@ -674,15 +754,32 @@ static void evaluate_native(evaluation_call *call) {
                 call->instance, &call->status, &call->limits, &outcome);
         }
     } else if (NIL_P(call->budget)) {
-        call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance);
+        call->status = sn_valid(call->engine->engine, r->caches, r->root, call->instance, r->depth);
     } else {
         call->status = sn_valid_with_limits(call->engine->engine, r->caches, r->root,
-            call->instance, &call->limits, &outcome);
+            call->instance, r->depth, &call->limits, &outcome);
     }
     active_caches = previous_caches;
     check_evaluation_status(call->status,
         call->report ? "native diagnostics panicked" : "native evaluator panicked");
     if (!NIL_P(call->budget)) finish_budget(call->budget, &outcome);
+}
+static VALUE callback_scope(evaluation_call *call) {
+    runner_holder *runner = call->runner;
+    if (NIL_P(runner->callback_scope)) {
+        VALUE object = build_runner(runner->owner, runner->root);
+        runner_holder *scope;
+        TypedData_Get_Struct(object, runner_holder, &runner_type, scope);
+        scope->parent = call->self;
+        scope->scope_owner = 1;
+        scope->callback_context = 1;
+        scope->active_budget = call->budget;
+        scope->active_limits = call->limits;
+        copy_states(scope, runner, 1, 0);
+        sn_caches_scalar_callback(scope->caches, runner->caches);
+        runner->callback_scope = object;
+    }
+    return runner->callback_scope;
 }
 /* Each borrowed native text piece is copied before any Ruby method is called.
  * The owning runner keeps the request and its name handles alive across GC. */
@@ -784,6 +881,7 @@ static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
         /* Array indices remain valid if compaction moves a frame. */
         st_insert(runner->frame_indices, (st_data_t)arguments.ordinal, (st_data_t)index);
     }
+    publish_states(runner);
     int step = selector >> (string ? 8 : 6);
     VALUE result;
     if (container) {
@@ -813,6 +911,15 @@ static VALUE scalar_step(runner_holder *runner, int operation, VALUE budget) {
     RB_GC_GUARD(frame);
     return result;
 }
+/* Share Ruby type dispatch with ordinary runtime requests. Boolean and type
+ * callbacks have no per-yield observations or scalar cache writes. */
+static VALUE type_predicate(VALUE instance, int selector) {
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+    VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
+    return rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
+        INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -823,8 +930,31 @@ static VALUE call_runtime(VALUE context) {
      * check between assertions or error-rendering steps could overtake a later
      * Ruby exception. The native deadline continues across every retry. */
     int staged = (operation->kind >= SN_RUNTIME_STRING && operation->kind < SN_RUNTIME_EQUAL)
-        || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches);
+        || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches)
+        || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS) {
+        contains_arguments arguments;
+        sn_contains_arguments(r->caches, &arguments);
+        VALUE callback = build_runner(r->owner, arguments.child);
+        runner_holder *child;
+        TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+        child->parent = callback_scope(call);
+        child->depth = arguments.depth;
+        child->callback_kind = arguments.scalar_kind;
+        child->callback_flags = arguments.scalar_flags;
+        child->callback_context = 1;
+        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+        VALUE checks = rb_const_get(internal, rb_intern_const("ContainerChecks"));
+        VALUE klass = rb_const_get(checks, rb_intern_const(NIL_P(call->budget) ? "ContainsFrame" : "LimitedContainsFrame"));
+        VALUE args[] = {arguments.rules, arguments.instance, call->budget, INT2FIX(arguments.required), callback};
+        VALUE frame = rb_class_new_instance(5, args, klass);
+        VALUE result = rb_funcall(frame, rb_intern_const("valid?"), 0);
+        RB_GC_GUARD(callback);
+        RB_GC_GUARD(frame);
+        return result;
+    }
     if (operation->kind >= SN_RUNTIME_ARRAY_HEADER ||
         (operation->kind >= SN_RUNTIME_NUMBER && operation->kind < SN_RUNTIME_EQUAL)) {
         VALUE result = scalar_step(r, operation->kind, operation->call->budget);
@@ -846,12 +976,7 @@ static VALUE call_runtime(VALUE context) {
         return result;
     }
     if (operation->kind >= SN_RUNTIME_TYPE) {
-        int selector = operation->kind - SN_RUNTIME_TYPE;
-        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
-        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
-        VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
-        VALUE result = rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
-            INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+        VALUE result = type_predicate(instance, operation->kind - SN_RUNTIME_TYPE);
         if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
         return result;
     }
@@ -982,10 +1107,11 @@ static VALUE retry_runtime(VALUE context) {
     }
     return Qnil;
 }
-static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagnostics) {
-    runner_holder *r;
-    TypedData_Get_Struct(self, runner_holder, &runner_type, r);
-    evaluation_call call = {self, instance, budget, r, ready_program(r->owner), NULL, 0, {0}, 0};
+static VALUE evaluate_runner_body(VALUE context) {
+    evaluation_call call = *(evaluation_call *)context;
+    VALUE self = call.self, instance = call.instance, budget = call.budget;
+    runner_holder *r = call.runner;
+    int diagnostics = call.diagnostics;
     report_holder *h = NULL;
     VALUE owner = Qnil;
     if (diagnostics) {
@@ -994,12 +1120,23 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
         call.report = h;
     }
     clear_runtime((VALUE)&call);
+    r->active_budget = budget;
+    if (!NIL_P(r->parent)) {
+        runner_holder *parent;
+        TypedData_Get_Struct(r->parent, runner_holder, &runner_type, parent);
+        copy_states(r, parent, r->callback_context, 0);
+        if (r->callback_context) {
+            call.limits = parent->active_limits;
+            call.limits_read = 1;
+            sn_caches_scalar_callback(r->caches, parent->caches);
+        }
+    }
     evaluate_native(&call);
     VALUE source = Qnil, requested = Qnil;
     int operation = 0;
     if (call.status == SN_VERDICT_UNSUPPORTED &&
         sn_caches_pending(r->caches, &source, &requested, &operation)) {
-        rb_ensure(retry_runtime, (VALUE)&call, clear_runtime, (VALUE)&call);
+        retry_runtime((VALUE)&call);
     }
     if (call.status == SN_VERDICT_UNSUPPORTED || !diagnostics) {
         VALUE result = call.status == SN_VERDICT_UNSUPPORTED ? Qnil : (call.status ? Qtrue : Qfalse);
@@ -1029,6 +1166,69 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
     RB_GC_GUARD(instance);
     RB_GC_GUARD(self);
     return output;
+}
+static VALUE finish_evaluation(VALUE context) {
+    evaluation_call *call = (evaluation_call *)context;
+    runner_holder *runner = call->runner;
+    publish_states(runner);
+    close_callback_scope(runner);
+    clear_runtime(context);
+    runner->active_budget = Qnil;
+    runner->active_limits = (native_limits){0};
+    runner->busy = 0;
+    return Qnil;
+}
+static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagnostics) {
+    runner_holder *runner;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
+    if (runner->busy) {
+        VALUE nested = build_runner(runner->owner, runner->root);
+        runner_holder *child;
+        TypedData_Get_Struct(nested, runner_holder, &runner_type, child);
+        child->parent = self;
+        child->depth = runner->depth;
+        child->callback_context = runner->callback_context;
+        VALUE result = evaluate_runner(nested, instance, budget, diagnostics);
+        RB_GC_GUARD(nested);
+        return result;
+    }
+    evaluation_call call = {self, instance, budget, runner, ready_program(runner->owner), NULL, 0, {0}, 0, diagnostics};
+    runner->busy = 1;
+    VALUE result = rb_ensure(evaluate_runner_body, (VALUE)&call, finish_evaluation, (VALUE)&call);
+    RB_GC_GUARD(self);
+    return result;
+}
+/* A recipe can outlive the method that received its block. Each invocation
+ * owns observations, while its evaluator's budget/cache scope is shared. */
+static VALUE scalar_callback(VALUE self, VALUE instance) {
+    runner_holder *recipe, *parent;
+    TypedData_Get_Struct(self, runner_holder, &runner_type, recipe);
+    if (NIL_P(recipe->parent) || !recipe->callback_context) rb_raise(rb_eRuntimeError, "not a scalar callback");
+    TypedData_Get_Struct(recipe->parent, runner_holder, &runner_type, parent);
+    /* LimitedEvaluator's retained block reaches its cleared budget first. */
+    if (parent->closed_limited) rb_funcall(Qnil, rb_intern_const("checkpoint"), 0);
+    if (parent->scope_owner && !NIL_P(parent->parent)) {
+        runner_holder *owner;
+        TypedData_Get_Struct(parent->parent, runner_holder, &runner_type, owner);
+        copy_states(parent, owner, !NIL_P(parent->active_budget), 0);
+    }
+    VALUE budget = parent->active_budget;
+    if (!NIL_P(budget)) {
+        /* LimitedEvaluator entry, then its single scalar instruction. */
+        rb_funcall(budget, rb_intern_const("checkpoint"), 0);
+        rb_funcall(budget, rb_intern_const("checkpoint"), 0);
+    }
+    VALUE result;
+    switch (recipe->callback_kind) {
+        case SN_CALLBACK_BOOLEAN: result = recipe->callback_flags ? Qtrue : Qfalse; break;
+        case SN_CALLBACK_TYPE: result = RTEST(type_predicate(instance, recipe->callback_flags)) ? Qtrue : Qfalse; break;
+        default: result = evaluate_runner(self, instance, budget, 0); break;
+    }
+    if (NIL_P(result)) rb_raise(rb_eRuntimeError, "scalar callback lost its native coverage proof");
+    if (!NIL_P(budget) && sn_caches_deadline_expired(parent->caches))
+        rb_funcall(budget, rb_intern_const("raise_native_limit"), 2, INT2FIX(2), INT2FIX(0));
+    RB_GC_GUARD(self);
+    return result;
 }
 static VALUE diagnostics(VALUE self, VALUE instance) {
     holder *h = ready_program(self);
@@ -1081,6 +1281,8 @@ void Init_schemurai_native(void) {
     rb_define_method(klass, "unresolved_references?", has_unresolved_references, 0);
     VALUE runner_class = rb_define_class_under(klass, "Runner", rb_cObject);
     rb_undef_alloc_func(runner_class);
+    rb_define_method(runner_class, "call", scalar_callback, 1);
+    rb_define_method(runner_class, "share_scalar_state", runner_share_scalar_state, 2);
     rb_define_method(runner_class, "valid?", runner_valid, 1);
     rb_define_method(runner_class, "valid_with_budget", runner_valid_with_budget, 2);
     rb_define_method(runner_class, "diagnostics", runner_diagnostics, 1);

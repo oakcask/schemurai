@@ -368,6 +368,11 @@ impl Execution<'_> {
         kind_state: &InstanceKind,
     ) -> Result<Tracked, Verdict> {
         let kind = kind_state.get();
+        // Callback results currently carry validity only. Preserve the existing
+        // diagnostic guard before any other assertion invokes Ruby methods.
+        if kind == TYPE_UNSUPPORTED && self.scalar_contains_node(node) {
+            return Err(Unsupported);
+        }
         if depth > MAX_EVALUATION_DEPTH {
             return Err(Unsupported);
         }
