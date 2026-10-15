@@ -1716,7 +1716,7 @@ RSpec.describe "native VALUE execution" do
   it "preserves Ruby key lookup exceptions and observes method changes between calls" do # rubocop:disable RSpec/ExampleLength
     script = <<~RUBY
       require "schemurai"
-      rules = [{"required"=>[[]]}, {"required"=>["missing",[]]}, {"required"=>[[],"missing"]},
+      rules = [{"required"=>[1,[]]}, {"required"=>[[]]}, {"required"=>["missing",[]]}, {"required"=>[[],"missing"]},
         {"dependencies"=>{"present"=>[{}]}},
         {"$schema"=>"https://json-schema.org/draft/2020-12/schema", "dependentRequired"=>{"present"=>[[]]}}]
       pairs = rules.map { |rule| [Schemurai.compile(rule,backend: :vm),Schemurai.compile(rule,backend: :native)] }
@@ -1752,11 +1752,37 @@ RSpec.describe "native VALUE execution" do
       compare.call
       Hash.define_method(:key?) { |key| key.is_a?(Array) || original_key.bind_call(self,key) }
       compare.call
+      Hash.define_method(:key?,original_key)
+      Integer.define_method(:inspect) do
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        raise "earlier required message"
+      end
+      Array.define_method(:hash) { raise "later key hash" }
+      compare.call
       puts "ok"
     RUBY
     output, errors, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script)
     expect(status.success?).to be(true), errors
     expect(output).to eq("ok\n")
+  end
+
+  it "retains independent required messages through compaction and repeated calls" do
+    key = ["payload"]
+    schema = {"required" => [key, {}, key]}
+    value = {"present" => 1}
+    expected = Schemurai.compile(schema, backend: :vm).validate(value).errors
+    native = Schemurai.compile(schema, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    renderer = Schemurai.const_get(:Native)::Diagnostics
+    allow(renderer).to receive(:message).and_wrap_original do |original, *arguments|
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      original.call(*arguments)
+    end
+    errors = native.validate(value).errors
+    expect(errors).to eq(expected)
+    errors.first.message << " changed"
+    expect(errors.last.message).to eq(expected.last.message)
+    expect(native.validate(value).errors).to eq(expected)
   end
 
   it "keeps required operand runtime lookups isolated in Ractor runners" do

@@ -809,6 +809,11 @@ that raises. This also handles String operands with singleton methods without
 executing the VM. Original operand values and duplicates remain available for
 ordered diagnostics. Record masks and String fingerprints only receive ordinary
 String operands; other keys use the general native object traversal.
+Programs containing such runtime keys render diagnostic messages through libruby
+at their original evaluation positions as well. This preserves an earlier
+message-rendering exception before a later key lookup. Invocation-local message
+results and completed reports are GC-marked, and each output error receives an
+independent message String. Trials still discard errors without rendering them.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required

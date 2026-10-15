@@ -15,6 +15,25 @@ pub struct Caches {
     runtime_order: std::cell::Cell<bool>,
     pointers: std::cell::RefCell<Pointers>,
     pending_pointer: std::cell::Cell<Option<usize>>,
+    messages: std::cell::RefCell<HashMap<Message, Option<Value>>>,
+    pending_message: std::cell::Cell<Option<Message>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Message {
+    keyword: &'static str,
+    opcode: i32,
+    operand: Value,
+    instance: Value,
+    detail: usize,
+}
+#[repr(C)]
+pub struct MessageArguments {
+    keyword: *const u8,
+    keyword_len: usize,
+    opcode: i32,
+    operand: Value,
+    instance: Value,
+    detail: usize,
 }
 #[derive(Default)]
 struct Pointers {
@@ -70,6 +89,31 @@ impl Caches {
     }
     pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
         self.observe(name, value, RUNTIME_REQUIRED_MISSING)
+    }
+    pub(super) fn error_message(
+        &self,
+        keyword: &'static str,
+        source: (i32, Value),
+        instance: Value,
+        detail: usize,
+    ) -> Result<Value, Verdict> {
+        let message = Message {
+            keyword,
+            opcode: source.0,
+            operand: source.1,
+            instance,
+            detail,
+        };
+        if let Some(value) = self.messages.borrow_mut().entry(message).or_insert(None) {
+            return Ok(*value);
+        }
+        self.pending_message.set(Some(message));
+        self.pending.set(Some((
+            unsafe { sn_undefined() },
+            unsafe { sn_nil() },
+            RUNTIME_DIAGNOSTIC_MESSAGE,
+        )));
+        Err(Unsupported)
     }
     pub(super) fn pointer(&self, path: &pointer::Path) -> Result<Value, Verdict> {
         let mut pointers = self.pointers.borrow_mut();
@@ -168,7 +212,14 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
                     .map(|r| std::mem::size_of::<pointer::Path>() + r.path.memory_usage())
                     .sum::<usize>()
         });
+    let messages = unsafe { &*caches_ptr }
+        .messages
+        .try_borrow()
+        .map_or(0, |messages| {
+            messages.capacity() * std::mem::size_of::<(Message, Option<Value>)>()
+        });
     std::mem::size_of::<Caches>()
+        + messages
         + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
         + caches
@@ -186,6 +237,7 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
     caches.matches.set(matches);
     caches.pending.set(None);
     caches.pending_pointer.set(None);
+    caches.pending_message.set(None);
 }
 /// # Safety
 /// Caches must be live and called only between complete validation calls.
@@ -197,6 +249,8 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     caches.deadline.set(None);
     caches.runtime_order.set(false);
     *caches.pointers.borrow_mut() = Pointers::default();
+    *caches.messages.borrow_mut() = HashMap::new();
+    caches.pending_message.set(None);
 }
 /// # Safety
 /// Caches must be live and no Rust evaluation may be active.
@@ -205,6 +259,7 @@ pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
     caches.pending_pointer.set(None);
+    caches.pending_message.set(None);
     caches.runtime_order.set(true);
 }
 /// # Safety
@@ -244,6 +299,17 @@ pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
         }
     }
 
+    if let Ok(messages) = unsafe { &*caches }.messages.try_borrow() {
+        for (message, result) in messages.iter() {
+            unsafe {
+                sn_pin(message.operand);
+                sn_pin(message.instance);
+                if let Some(value) = result {
+                    sn_pin(*value);
+                }
+            }
+        }
+    }
     if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
         unsafe {
             sn_pin(source);
@@ -301,6 +367,36 @@ pub unsafe extern "C" fn sn_pointer_result(caches: *const Caches, value: Value) 
     let caches = unsafe { &*caches };
     caches.pointers.borrow_mut().requests[caches.pending_pointer.get().unwrap()].result =
         Some(value);
+}
+
+/// # Safety
+/// Caches must have a pending message and the output pointer must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_message_arguments(
+    caches: *const Caches,
+    output: *mut MessageArguments,
+) {
+    let message = unsafe { &*caches }.pending_message.get().unwrap();
+    unsafe {
+        *output = MessageArguments {
+            keyword: message.keyword.as_ptr(),
+            keyword_len: message.keyword.len(),
+            opcode: message.opcode,
+            operand: message.operand,
+            instance: message.instance,
+            detail: message.detail,
+        };
+    }
+}
+/// # Safety
+/// Caches must have a pending message with no active Rust evaluation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_message_result(caches: *const Caches, result: Value) {
+    let caches = unsafe { &*caches };
+    caches
+        .messages
+        .borrow_mut()
+        .insert(caches.pending_message.get().unwrap(), Some(result));
 }
 
 #[cfg(test)]

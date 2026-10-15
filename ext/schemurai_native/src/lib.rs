@@ -679,6 +679,7 @@ pub struct Engine {
     root: usize,
     fixnum_flag: Value,
     compiler: Value,
+    runtime_messages: bool,
     validate_format: bool,
     validate_content: bool,
     undefined: Value,
@@ -701,9 +702,13 @@ impl Engine {
     fn required_keys(&mut self, value: Value) -> Vec<RequiredKey> {
         self.values(value)
             .into_iter()
-            .map(|name| RequiredKey {
-                name,
-                ordinary_string: unsafe { sn_kind(name) } == TYPE_STRING,
+            .map(|name| {
+                let ordinary_string = unsafe { sn_kind(name) } == TYPE_STRING;
+                self.runtime_messages |= !ordinary_string;
+                RequiredKey {
+                    name,
+                    ordinary_string,
+                }
             })
             .collect()
     }

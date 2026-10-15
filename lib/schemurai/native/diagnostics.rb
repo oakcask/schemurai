@@ -15,9 +15,9 @@ module Schemurai
       private_constant :TYPE_NAMES, :ATTRIBUTES
 
       module_function def error(row)
-        keyword, instance_path, schema_path, opcode, operand, instance, detail = row
+        keyword, instance_path, schema_path, opcode, operand, instance, detail, rendered_message = row
         ValidationError.new(keyword: keyword, instance_path: instance_path, schema_path: schema_path,
-          message: message(keyword, opcode, operand, instance, detail))
+          message: rendered_message || message(keyword, opcode, operand, instance, detail))
       end
 
       module_function def message(keyword, opcode, operand, instance, detail) # rubocop:disable Metrics/MethodLength
