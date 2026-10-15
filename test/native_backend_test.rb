@@ -55,10 +55,10 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "retains the original duration deadline when native transfers to VM", :aggregate_failures do
-    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "type" => "array", "minItems" => 0,
-              "items" => true, "unevaluatedItems" => true}
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "type" => "object", "minProperties" => 0,
+              "properties" => {}, "unevaluatedProperties" => true}
     validator = Schemurai.compile(schema, backend: :native)
-    value = Class.new(Array).new
+    value = Class.new(Hash).new
     allow(Process).to receive(:clock_gettime).and_call_original
     allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
     vm = Schemurai.const_get(:VM).const_get(:LimitedEvaluator)
@@ -1981,6 +1981,235 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "collects special array diagnostics and locations through native children" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :calls
+
+      def is_a?(type)
+        (@calls ||= []) << [:is_a?, type]
+        super
+      end
+
+      def length
+        (@calls ||= []) << :length
+        super
+      end
+
+      def [](index)
+        (@calls ||= []) << [:index, index]
+        super
+      end
+    end
+    rules = [{"type" => "array", "items" => {"type" => "integer"}},
+      {"maxItems" => 1, "minItems" => 3, "items" => false}, {"uniqueItems" => true, "items" => true},
+      {"prefixItems" => [{"type" => "integer"}, false], "items" => {"type" => "string"}},
+      {"contains" => {"type" => "integer"}, "minContains" => 2, "maxContains" => 2},
+      {"contains" => {"type" => "integer"}, "unevaluatedItems" => false},
+      {"prefixItems" => [true], "unevaluatedItems" => {"type" => "integer"}},
+      {"allOf" => [{"prefixItems" => [true]}, {"contains" => {"type" => "integer"}}], "unevaluatedItems" => false}]
+    wrappers = [->(rule) { rule }, ->(rule) { {"allOf" => [rule, false]} },
+      ->(rule) { {"anyOf" => [rule, false]} }, ->(rule) { {"oneOf" => [rule, true]} },
+      ->(rule) { {"if" => rule, "then" => false, "else" => {"type" => "null"}} },
+      ->(rule) { {"$defs" => {"v" => rule}, "$ref" => "#/$defs/v"} }]
+    run = lambda do |validator, method, values, options|
+      value = array.new(values)
+      [capture_validation(validator, method, value, **options), value.calls]
+    end
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(wrap.call(rule))
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = [:valid?, :validate].product([[], [1], [1, "a"], [1, 1, "a"]], [{}, {max_errors: 0}, {max_errors: 1}, {timeout: 10}]).map do |method, values, options|
+        [method, values, options, run.call(vm, method, values, options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each do |method, values, options, result|
+        expect(run.call(native, method, values, options)).to eq(result), [schema, method, values, options].inspect
+      end
+    end
+  end
+
+  it "preserves custom array lengths and tuple selection in diagnostics" do # rubocop:disable RSpec/ExampleLength
+    fake = Class.new do
+      attr_reader :calls
+
+      def initialize
+        @calls = []
+      end
+
+      def is_a?(type)
+        @calls << [:is_a?, type]
+        type == Array
+      end
+
+      def length
+        @calls << :length
+        1.5
+      end
+
+      def [](index)
+        @calls << [:index, index]
+        [1, "a"][index]
+      end
+    end
+    schemas = [{"maxItems" => 1, "items" => {"type" => "integer"}},
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"type" => "integer"}, "minContains" => 2,
+       "unevaluatedItems" => false}, {"items" => [{"type" => "integer"}, false], "additionalItems" => false}]
+    run = lambda do |validator, options|
+      input = fake.new
+      [capture_validation(validator, :validate, input, **options), input.calls]
+    end
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}].map { |options| [options, run.call(vm, options)] }]
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |native, expected| expected.each { |options, result| expect(run.call(native, options)).to eq(result) } }
+  end
+
+  it "retains array range endpoints and prior errors when children mutate their parent" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :reads
+
+      def [](index)
+        (@reads ||= []) << index
+        super
+      end
+    end
+    run = lambda do |backend, options|
+      input = array.new
+      item = Object.new
+      item.define_singleton_method(:is_a?) do |type|
+        input.clear if type == Numeric
+        false
+      end
+      input.concat([item, 2])
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "items" => {"type" => "integer"}, "unevaluatedItems" => false}
+      result = capture_validation(Schemurai.compile(schema, backend: backend), :validate, input, **options)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      [result, input.reads]
+    end
+    cases = [{}, {timeout: 10}, {max_errors: 1}].map { |options| [options, run.call(:vm, options)] }
+    expect(cases.first.last.last).to eq([0, 1])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |options, expected| expect(run.call(:native, options)).to eq(expected) }
+  end
+
+  it "appends errors from retained tracked callbacks to the current diagnostic collection" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      def count(&block)
+        @saved = block
+        super
+      end
+
+      def length
+        @saved&.call(["bad"])
+        super
+      end
+    end
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+              "contains" => {"items" => {"type" => "integer"}, "unevaluatedItems" => true}}
+    run = lambda do |backend|
+      validator = Schemurai.compile(schema, backend: backend)
+      value = array.new([[1]])
+      expect(validator.valid?(value)).to be(true)
+      capture_validation(validator, :validate, value)
+    end
+    expected = run.call(:vm)
+    expect(expected.last.length).to eq(2)
+    expect(run.call(:native)).to eq(expected)
+  end
+
+  it "replays retained callback errors at nested scalar paths and isolates contains trials" do # rubocop:disable RSpec/ExampleLength
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+              "items" => {"items" => {"type" => "number"}},
+              "contains" => {"items" => {"type" => "number"}, "unevaluatedItems" => true}}
+    tracked = schema.fetch("contains")
+    schemas = [schema, schema.merge("$defs" => {"tracked" => tracked}, "contains" => {"$ref" => "#/$defs/tracked"})]
+    run = lambda do |backend, rules, options|
+      saved = nil
+      array = Class.new(Array) do
+        define_method(:count) do |&block|
+          saved = block
+          super(&block)
+        end
+      end
+      item = Object.new
+      item.define_singleton_method(:is_a?) do |type|
+        saved.call(["bad"]) if saved && type == Numeric
+        type == Numeric
+      end
+      validator = Schemurai.compile(rules, backend: backend)
+      expect(validator.valid?(array.new([[1]]))).to be(true)
+      capture_validation(validator, :validate, array.new([[item]]), **options)
+    end
+    cases = schemas.product([{}, {max_errors: 0}, {max_errors: 1}, {timeout: 10}]).map do |rules, options|
+      [rules, options, run.call(:vm, rules, options)]
+    end
+    expect(cases.first.last.last.map(&:keyword)).to eq(["type", "contains"])
+    expect(cases.first.last.last.first.instance_path).to eq("/0/0/0")
+    expect(cases.first.last.last.first.schema_path).to eq("/items/items/items/type")
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |rules, options, expected| expect(run.call(:native, rules, options)).to eq(expected) }
+  end
+
+  it "shares retained native tracked callbacks with the current object diagnostic collection" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      def count(&block)
+        @saved = block
+        super
+      end
+
+      def length
+        @saved&.call(["bad"])
+        super
+      end
+    end
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "properties" => {"v" => {
+      "contains" => {"items" => {"type" => "integer"}, "unevaluatedItems" => true}
+    }}}
+    run = lambda do |backend|
+      validator = Schemurai.compile(schema, backend: backend)
+      value = {"v" => array.new([[1]])}
+      expect(validator.valid?(value)).to be(true)
+      capture_validation(validator, :validate, value)
+    end
+    expected = run.call(:vm)
+    expect(expected.last.length).to eq(2)
+    expect(expected.last.first.instance_path).to eq("/v/0")
+    expect(run.call(:native)).to eq(expected)
+  end
+
+  it "reflects a public validity reentry clearing the active array diagnostic collection" do # rubocop:disable RSpec/ExampleLength
+    run = lambda do |backend|
+      validator = nil
+      reentered = false
+      array = Class.new(Array) do
+        define_method(:length) do
+          unless reentered
+            reentered = true
+            validator.valid?([])
+          end
+          super()
+        end
+      end
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "maxItems" => 0,
+                "items" => {"type" => "integer"}, "unevaluatedItems" => true}
+      validator = Schemurai.compile(schema, backend: backend)
+      validator.validate(array.new(["bad"])).errors
+    end
+    expected = run.call(:vm)
+    expect(expected).to be_nil
+    expect(run.call(:native)).to eq(expected)
+  end
+
   it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength
     string = Class.new(String) do
       attr_reader :calls
@@ -1991,7 +2220,7 @@ RSpec.describe "native VALUE execution" do
       end
     end
     definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? {"type" => "integer"} : {"$ref" => "#/$defs/n#{index + 1}"}] }
-    schema = {"$defs" => definitions, "allOf" => [{"$ref" => "#/$defs/n0"}, {"items" => {"type" => "string"}}]}
+    schema = {"$defs" => definitions, "allOf" => [{"$ref" => "#/$defs/n0"}, {"properties" => {"v" => {"type" => "string"}}}]}
     native = Schemurai.compile(schema, backend: :native)
     input = string.new("a")
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)

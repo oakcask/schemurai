@@ -178,12 +178,12 @@ impl Engine {
                 .filter(|&root| self.metadata[root].recursive_anchor),
         );
         for (node, ops) in self.nodes.iter().enumerate() {
-            admitted[node] = !self.tracks[node];
+            admitted[node] = true;
             for op in ops {
                 // Full container result callbacks are introduced separately;
                 // scalar/header reports already have all required runtime paths.
                 report_unsupported[node] |= match op {
-                    Op::Array(_, rules) => !rules.header_only(),
+                    Op::Array(..) => false,
                     Op::Object(_, rules) => !rules.header_only(),
                     Op::Unsupported | Op::UnresolvedRef(_) => true,
                     _ => false,
@@ -196,9 +196,14 @@ impl Engine {
                     | Op::Const(_)
                     | Op::Enum(_) => {}
                     Op::Array(_, rules) if rules.header_only() => {}
-                    Op::Array(_, rules) if rules.unevaluated.is_none() => {
+                    Op::Array(_, rules) => {
                         callbacks[node] = true;
-                        edges[node].extend(rules.callback_children().copied());
+                        edges[node].extend(
+                            rules
+                                .callback_children()
+                                .chain(rules.unevaluated.iter())
+                                .copied(),
+                        );
                     }
                     Op::Object(_, rules) if rules.header_only() => {}
                     Op::Object(_, rules) if rules.unevaluated.is_none() => {
@@ -223,16 +228,24 @@ impl Engine {
                         edges[node].push(*condition);
                         edges[node].extend(yes.iter().chain(no));
                     }
-                    Op::Array(..) | Op::Object(..) | Op::Unsupported | Op::UnresolvedRef(_) => {
+                    Op::Object(..) | Op::Unsupported | Op::UnresolvedRef(_) => {
                         admitted[node] = false
                     }
                 }
             }
         }
         let parents = graph::parents(&edges);
+        graph::propagate(&mut report_unsupported, &parents);
+        // Tracked arrays enter collection even through validity. They need the
+        // complete result path, while ordinary validity children may also use
+        // the existing object callbacks.
+        for node in 0..count {
+            if self.tracks[node] {
+                admitted[node] &= !report_unsupported[node];
+            }
+        }
         let mut unsupported: Vec<_> = admitted.into_iter().map(|allowed| !allowed).collect();
         graph::propagate(&mut unsupported, &parents);
-        graph::propagate(&mut report_unsupported, &parents);
         self.report_supported = report_unsupported[..count]
             .iter()
             .map(|&blocked| !blocked)
@@ -268,6 +281,12 @@ impl Engine {
     // Runtime children inherit reference context but export validity only.
     pub(super) fn array_callbacks(&self, rules: &Array) -> bool {
         rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())
+    }
+    pub(super) fn array_report_callbacks(&self, rules: &Array) -> bool {
+        rules
+            .callback_children()
+            .chain(rules.unevaluated.iter())
+            .all(|&child| self.report_supported.get(child) == Some(&true))
     }
     pub(super) fn object_callbacks(&self, rules: &Object) -> bool {
         rules.unevaluated.is_none() && self.callback_children_safe(rules.callback_children())

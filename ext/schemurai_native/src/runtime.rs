@@ -161,22 +161,64 @@ impl Caches {
         report: &mut diagnostics::Report,
         annotations: bool,
     ) -> Result<tracking::Tracked, Verdict> {
-        let ordinal = self.next_call()?;
-        if self.observe(ordinal, value, RUNTIME_NATIVE_REPORT) == Unsupported {
-            self.reports
-                .request(ordinal, report.continuation(annotations));
-            self.pending_contains.set(Some(ContainsArguments {
+        self.report_request(
+            ContainsArguments {
                 rules: unsafe { sn_nil() },
                 instance: value,
                 child: node,
                 required: 0,
                 scalar_kind: CALLBACK_RUNTIME,
                 scalar_flags: 0,
-            }));
+            },
+            RUNTIME_NATIVE_REPORT,
+            report,
+            annotations,
+            None,
+        )
+    }
+    pub(super) fn array_report(
+        &self,
+        node: usize,
+        value: Value,
+        header: (Value, i32),
+        report: &mut diagnostics::Report,
+        prior: &tracking::Tracked,
+        annotations: bool,
+    ) -> Result<tracking::Tracked, Verdict> {
+        self.report_request(
+            ContainsArguments {
+                rules: header.0,
+                instance: value,
+                child: node,
+                required: header.1,
+                scalar_kind: CALLBACK_RUNTIME,
+                scalar_flags: 0,
+            },
+            RUNTIME_ARRAY_REPORT,
+            report,
+            annotations,
+            Some(prior),
+        )
+    }
+    fn report_request(
+        &self,
+        arguments: ContainsArguments,
+        operation: i32,
+        report: &mut diagnostics::Report,
+        annotations: bool,
+        prior: Option<&tracking::Tracked>,
+    ) -> Result<tracking::Tracked, Verdict> {
+        let ordinal = self.next_call()?;
+        if self.observe(ordinal, arguments.instance, operation) == Unsupported {
+            let seed = match prior {
+                Some(prior) => report.array_continuation(annotations, prior),
+                None => report.continuation(annotations),
+            };
+            self.reports.request(ordinal, seed);
+            self.pending_contains.set(Some(arguments));
             return Err(Unsupported);
         }
-        let completed = self.reports.result(ordinal).ok_or(Unsupported)?;
-        Ok(report.adopt(completed))
+        Ok(report.adopt(self.reports.result(ordinal).ok_or(Unsupported)?))
     }
     pub(super) fn native_child(&self, child: usize, instance: Value) -> Verdict {
         self.children_request(
@@ -436,7 +478,7 @@ impl Caches {
     ) -> bool {
         let key = (frame, ordinal, keyword);
         if self.rescued_strings.borrow().contains(&key) {
-            self.scopes.apply(scopes::Key::Rescue(key));
+            self.apply_runtime(scopes::Key::Rescue(key));
             return false;
         }
         self.pending_rescue.set(Some(key));
@@ -447,10 +489,10 @@ impl Caches {
     }
     fn message(&self, message: Message) -> Result<Value, Verdict> {
         if let Some(value) = self.messages.borrow_mut().entry(message).or_insert(None) {
-            self.scopes.apply(scopes::Key::Message(message));
+            self.apply_runtime(scopes::Key::Message(message));
             return Ok(*value);
         }
-        self.scopes.request(scopes::Key::Message(message));
+        self.request_runtime(scopes::Key::Message(message));
         self.pending_message.set(Some(message));
         self.pending.set(Some((
             unsafe { sn_undefined() },
@@ -473,10 +515,10 @@ impl Caches {
             index
         };
         if let Some(value) = pointers.requests[index].result {
-            self.scopes.apply(scopes::Key::Pointer(index));
+            self.apply_runtime(scopes::Key::Pointer(index));
             return Ok(value);
         }
-        self.scopes.request(scopes::Key::Pointer(index));
+        self.request_runtime(scopes::Key::Pointer(index));
         self.pending_pointer.set(Some(index));
         self.pending.set(Some((
             unsafe { sn_undefined() },
@@ -498,29 +540,39 @@ impl Caches {
             && unsafe { sn_cached_runtime(matches, RUNTIME_REGEXP_ASSERTION, source, value) }
                 == REGEXP_INVALID;
         if invalid {
-            self.scopes
-                .apply(scopes::Key::Value(source, value, RUNTIME_REGEXP_ASSERTION));
+            self.apply_runtime(scopes::Key::Value(source, value, RUNTIME_REGEXP_ASSERTION));
         }
         invalid
+    }
+    pub(super) fn capture_report(&self, report: &crate::diagnostics::Report) {
+        self.reports.capture(report);
+    }
+    pub(super) fn apply_report_effects(&self, report: &mut crate::diagnostics::Report) {
+        self.reports.apply(report);
+    }
+    fn request_runtime(&self, key: scopes::Key) {
+        self.scopes.request(key);
+        self.reports.request_runtime(key);
+    }
+    fn apply_runtime(&self, key: scopes::Key) {
+        self.scopes.apply(key);
+        self.reports.apply_runtime(key);
     }
     fn observe(&self, source: Value, value: Value, operation: i32) -> Verdict {
         let matches = self.matches.get();
         if !matches.is_null() {
             let cached = unsafe { sn_cached_runtime(matches, operation, source, value) };
             if operation == RUNTIME_REGEXP_ASSERTION && cached == REGEXP_INVALID {
-                self.scopes
-                    .apply(scopes::Key::Value(source, value, operation));
+                self.apply_runtime(scopes::Key::Value(source, value, operation));
                 return Invalid;
             }
             let result = decode(cached);
             if result != Unsupported {
-                self.scopes
-                    .apply(scopes::Key::Value(source, value, operation));
+                self.apply_runtime(scopes::Key::Value(source, value, operation));
                 return result;
             }
         }
-        self.scopes
-            .request(scopes::Key::Value(source, value, operation));
+        self.request_runtime(scopes::Key::Value(source, value, operation));
         self.pending.set(Some((source, value, operation)));
         Unsupported
     }

@@ -1325,7 +1325,11 @@ impl Engine {
                 Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
                     KindDemand::Predicate
                 }
-                Op::Array(_, rules) if rules.header_only() || self.array_callbacks(rules) => {
+                Op::Array(_, rules)
+                    if rules.header_only()
+                        || self.array_callbacks(rules)
+                        || self.array_report_callbacks(rules) =>
+                {
                     KindDemand::Predicate
                 }
                 Op::Object(_, rules) if rules.header_only() || self.object_callbacks(rules) => {
@@ -1422,6 +1426,9 @@ impl Execution<'_> {
             .caches
             .scope_guard(frame.resource, self.metadata[node].enters_scope);
         if self.tracks[node] {
+            if let Some(result) = self.caches.callback_tracked(node, value) {
+                return result;
+            }
             return match known_kind {
                 Some(kind) => {
                     self.eval_tracked_kind(node, value, depth, active, kind)
@@ -2240,7 +2247,9 @@ impl Execution<'_> {
     fn unsupported_kind(&self, node: usize, kind: i32) -> bool {
         kind == TYPE_UNSUPPORTED
             && (self.kind_demand[node] == KindDemand::Data
-                || (!self.caches.callbacks_allowed() && self.callback_container_node(node)))
+                || (!self.caches.callbacks_allowed()
+                    && !self.caches.report_continuations_allowed()
+                    && self.callback_container_node(node)))
     }
     fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
         if kind == TYPE_UNSUPPORTED
@@ -3570,6 +3579,7 @@ pub unsafe extern "C" fn sn_valid(
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
         caches.allow_callbacks(e.scalar_callbacks_safe(root));
         caches.allow_continuations(e.native_continuations_safe(root));
+        caches.allow_report_continuations(e.report_continuations_safe(root));
         let execution = Execution {
             engine: e,
             caches,
@@ -3577,6 +3587,7 @@ pub unsafe extern "C" fn sn_valid(
             budget: budget::Budget::default(),
         };
         let result = execution.eval(root, value, depth, scope::Context::default());
+        caches.finish_callback_report(result);
         execution.budget.status(result)
     }))
     .unwrap_or(STATUS_PANIC)
@@ -3599,6 +3610,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
         let e = unsafe { &*engine };
         caches.allow_callbacks(e.scalar_callbacks_safe(root));
         caches.allow_continuations(e.native_continuations_safe(root));
+        caches.allow_report_continuations(e.report_continuations_safe(root));
         let execution = Execution {
             engine: unsafe { &*engine },
             caches,
@@ -3618,6 +3630,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
         unsafe {
             ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();
         }
+        caches.finish_callback_report(result);
         execution.budget.status(result)
     }));
     result.unwrap_or(STATUS_PANIC)
