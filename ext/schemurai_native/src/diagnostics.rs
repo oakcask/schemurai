@@ -3,6 +3,7 @@
 use super::*;
 use tracking::Tracked;
 mod array;
+mod object;
 
 fn reference_keyword(opcode: i32) -> &'static str {
     match opcode {
@@ -35,7 +36,7 @@ pub struct Report {
     errors: Vec<Error>,
     annotations: bool,
     evaluation: Option<Tracked>,
-    array_prior: Option<Tracked>,
+    container_prior: Option<Tracked>,
     entry: Option<ErrorEntry>,
     attempts: usize,
     collection_reset: usize,
@@ -126,7 +127,7 @@ impl Report {
         let mut report = self.clone();
         report.annotations = annotations;
         report.evaluation = None;
-        report.array_prior = None;
+        report.container_prior = None;
         report.entry = None;
         report
     }
@@ -137,7 +138,7 @@ impl Report {
             .expect("completed native report");
         completed.annotations = self.annotations;
         completed.evaluation = self.evaluation.take();
-        completed.array_prior = self.array_prior.take();
+        completed.container_prior = self.container_prior.take();
         let instance_path = std::mem::take(&mut self.instance_path);
         let schema_path = std::mem::take(&mut self.schema_path);
         *self = completed;
@@ -155,7 +156,10 @@ impl Report {
                 .map(|e| e.instance_path.memory_usage() + e.schema_path.memory_usage())
                 .sum::<usize>()
             + self.evaluation.as_ref().map_or(0, Tracked::memory_usage)
-            + self.array_prior.as_ref().map_or(0, Tracked::memory_usage)
+            + self
+                .container_prior
+                .as_ref()
+                .map_or(0, Tracked::memory_usage)
     }
     pub(super) fn mark(&self) {
         for path in [&self.instance_path, &self.schema_path] {
@@ -177,7 +181,7 @@ impl Report {
         if let Some(evaluation) = &self.evaluation {
             evaluation.mark();
         }
-        if let Some(prior) = &self.array_prior {
+        if let Some(prior) = &self.container_prior {
             prior.mark();
         }
         if let Some(entry) = &self.entry {
@@ -188,9 +192,39 @@ impl Report {
             }
         }
     }
-    pub(super) fn array_continuation(&self, annotations: bool, prior: &Tracked) -> Self {
+    fn container_error(
+        &self,
+        engine: &Engine,
+        node: usize,
+        instance: Value,
+        keyword: &'static str,
+        frame: Value,
+        object: bool,
+    ) -> Self {
+        let source = engine.nodes[node]
+            .iter()
+            .zip(&engine.error_operands[node])
+            .find_map(|(op, &source)| {
+                (if object {
+                    matches!(op, Op::Object(..))
+                } else {
+                    matches!(op, Op::Array(..))
+                })
+                .then_some(source)
+            })
+            .expect("container source");
+        let mut seed = self.continuation(false);
+        seed.entry = Some(ErrorEntry {
+            source,
+            instance,
+            keyword,
+            frame,
+        });
+        seed
+    }
+    pub(super) fn container_continuation(&self, annotations: bool, prior: &Tracked) -> Self {
         let mut report = self.continuation(annotations);
-        report.array_prior = Some(prior.clone());
+        report.container_prior = Some(prior.clone());
         report.evaluation = Some(Tracked::new(Valid));
         report
     }
@@ -584,14 +618,9 @@ impl Execution<'_> {
         if self.unsupported_kind(node, kind) {
             return Err(Unsupported);
         }
-        if report.silent {
-            let result = self.eval_tracked_kind(node, value, depth, active, kind_state);
-            if result.status == Unsupported {
-                return Err(Unsupported);
-            }
-            report.failed |= result.status == Invalid;
-            return Ok(result);
-        }
+        // Silent children share this collection's failure state. Only actual
+        // trials create a fresh report in collect_trial; another isolated trial
+        // here would discard earlier failures when a Ruby caller rescues a raise.
         // A diagnostic success is established by complete traversal, never by
         // a short-circuit validity result. Keep exported annotations and the
         // collection policy separate; failures retain their path-specific errors.
@@ -647,9 +676,11 @@ impl Execution<'_> {
         // diagnostic guard before any other assertion invokes Ruby methods.
         if kind == TYPE_UNSUPPORTED
             && (self.callback_container_node(node)
-                || self.nodes[node]
-                    .iter()
-                    .any(|op| matches!(op, Op::Array(_, rules) if !rules.header_only())))
+                || self.nodes[node].iter().any(|op| match op {
+                    Op::Array(_, rules) => !rules.header_only(),
+                    Op::Object(_, rules) => !rules.header_only(),
+                    _ => false,
+                }))
             && !self.caches.report_continuations_allowed()
         {
             return Err(Unsupported);
@@ -814,18 +845,20 @@ impl Execution<'_> {
                 Op::Array(required, rules) => {
                     if self.caches.report_continuations_allowed()
                         && !rules.header_only()
-                        && (kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls())
+                        && (kind == TYPE_UNSUPPORTED
+                            || self.caches.dynamic_calls()
+                            || prior.has_runtime_properties())
                     {
-                        let result = self.caches.array_report(
+                        let result = self.caches.container_report(
                             node,
                             value,
-                            (source.1, *required),
+                            (source.1, *required, false),
                             report,
                             &prior,
                             tracked,
                         )?;
                         if tracked {
-                            prior.merge_diagnostics(result)?;
+                            prior.merge_diagnostics(self, result)?;
                         }
                         if report.silent && report.failed {
                             break;
@@ -1132,10 +1165,32 @@ impl Execution<'_> {
                         }
                     }
                     if tracked {
-                        prior.merge_diagnostics(coverage)?;
+                        prior.merge_diagnostics(self, coverage)?;
                     }
                 }
                 Op::Object(required, rules) => {
+                    if self.caches.report_continuations_allowed()
+                        && !rules.header_only()
+                        && (kind == TYPE_UNSUPPORTED
+                            || self.caches.dynamic_calls()
+                            || prior.has_runtime_properties())
+                    {
+                        let result = self.caches.container_report(
+                            node,
+                            value,
+                            (source.1, *required, true),
+                            report,
+                            &prior,
+                            tracked,
+                        )?;
+                        if tracked {
+                            prior.merge_diagnostics(self, result)?;
+                        }
+                        if report.silent && report.failed {
+                            break;
+                        }
+                        continue;
+                    }
                     if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
                         if report.collect_header(
                             self.caches,
@@ -1262,8 +1317,10 @@ impl Execution<'_> {
                                                 active,
                                             )
                                         })?;
-                                    if result.status == Valid {
-                                        coverage.merge(result);
+                                    if result.status == Valid
+                                        && coverage.merge_runtime(self, result) == Unsupported
+                                    {
+                                        return Err(Unsupported);
                                     }
                                 } else if self.needs_diagnostics(*child, value, depth + 1)? {
                                     report.schema_name(self.caches, keyword, *name, |r| {
@@ -1301,7 +1358,7 @@ impl Execution<'_> {
                         }
                     }
                     if tracked {
-                        prior.merge_diagnostics(coverage)?;
+                        prior.merge_diagnostics(self, coverage)?;
                     }
                 }
                 Op::All(nodes) => {
@@ -1333,11 +1390,11 @@ impl Execution<'_> {
                                 }
                             })?;
                         if tracked {
-                            coverage.merge_diagnostics(result)?;
+                            coverage.merge_diagnostics(self, result)?;
                         }
                     }
                     if tracked {
-                        prior.merge_diagnostics(coverage)?;
+                        prior.merge_diagnostics(self, coverage)?;
                     }
                 }
                 Op::Any(nodes) | Op::One(nodes) => {
@@ -1353,6 +1410,13 @@ impl Execution<'_> {
                         evaluation::BranchPolicy::Complete,
                         self.caches.dynamic_calls(),
                         |child| self.eval_tracked_kind(child, value, depth + 1, active, kind_state),
+                        |coverage, branch| {
+                            if coverage.merge_runtime(self, branch) == Unsupported {
+                                Err(Unsupported)
+                            } else {
+                                Ok(())
+                            }
+                        },
                     )?;
                     if !branch_kind.accepts(result.matches) {
                         report.add(
@@ -1363,7 +1427,7 @@ impl Execution<'_> {
                             result.matches,
                         )?;
                     } else if tracked {
-                        prior.merge_diagnostics(result.coverage)?;
+                        prior.merge_diagnostics(self, result.coverage)?;
                     }
                 }
                 Op::Not(child) => {
@@ -1383,8 +1447,8 @@ impl Execution<'_> {
                     let (child, segment) = match condition.status {
                         Unsupported => return Err(Unsupported),
                         Valid => {
-                            if tracked {
-                                coverage.merge(condition);
+                            if tracked && coverage.merge_runtime(self, condition) == Unsupported {
+                                return Err(Unsupported);
                             }
                             (yes, "then")
                         }
@@ -1413,11 +1477,11 @@ impl Execution<'_> {
                             }
                         })?;
                         if tracked {
-                            coverage.merge_diagnostics(result)?;
+                            coverage.merge_diagnostics(self, result)?;
                         }
                     }
                     if tracked {
-                        prior.merge_diagnostics(coverage)?;
+                        prior.merge_diagnostics(self, coverage)?;
                     }
                 }
                 Op::Ref(target) => {
@@ -1462,7 +1526,7 @@ impl Execution<'_> {
                         }
                     })?;
                     if tracked {
-                        prior.merge_diagnostics(result)?;
+                        prior.merge_diagnostics(self, result)?;
                     }
                 }
             }
@@ -1665,7 +1729,7 @@ pub unsafe extern "C" fn sn_diagnose(
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
         };
-        caches.allow_report_continuations(engine.report_continuations_safe(root));
+        caches.admit(engine, root);
         let inherited = caches.initial_report();
         let resumed = inherited.is_some();
         let mut report = inherited.unwrap_or_else(|| Report {
@@ -1704,7 +1768,7 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
             memo: memo::Memo::default(),
             budget: caches.budget(limits),
         };
-        caches.allow_report_continuations(execution.report_continuations_safe(root));
+        caches.admit(execution.engine, root);
         let inherited = caches.initial_report();
         let resumed = inherited.is_some();
         let mut report = inherited.unwrap_or_else(|| Report {

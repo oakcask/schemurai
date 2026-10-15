@@ -3,7 +3,7 @@
 require_relative "../decimal"
 require "base64"
 require "json"
-require "set" # rubocop:disable Lint/RedundantRequireStatement -- Required on Ruby 3.4.
+require_relative "../evaluation_pool"
 require_relative "../evaluation"
 require_relative "../error_message"
 require_relative "../unique_items"
@@ -16,44 +16,7 @@ require_relative "../string_checks"
 
 module Schemurai
   module VM
-    class EvaluationBuffer
-      attr_reader :evaluated_properties, :evaluated_items
-
-      def initialize
-        # Applicators can overlap. Array membership makes collecting and merging
-        # their annotations quadratic in the number of instance locations.
-        @evaluated_properties = Set.new
-        @evaluated_items = Set.new
-      end
-
-      def valid? = true
-
-      def reset
-        @evaluated_properties.clear
-        @evaluated_items.clear
-        self
-      end
-
-      def record_property(name)
-        @evaluated_properties.add(name)
-        self
-      end
-
-      def record_item(index)
-        @evaluated_items.add(index)
-        self
-      end
-
-      def merge(other)
-        return Evaluation.invalid unless other.valid?
-
-        properties = other.evaluated_properties
-        items = other.evaluated_items
-        @evaluated_properties.merge(properties) unless properties.empty?
-        @evaluated_items.merge(items) unless items.empty?
-        self
-      end
-    end
+    EvaluationBuffer = Internal::EvaluationBuffer
     private_constant :EvaluationBuffer
 
     class Evaluator
@@ -63,11 +26,12 @@ module Schemurai
       include Internal::ContainerChecks::ObjectChildren
       include Internal::ContainerChecks::ArrayChildren
       include Internal::ContainerChecks::ArrayDiagnostics
+      include Internal::ContainerChecks::ObjectDiagnostics
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
 
-      MISSING_SEGMENT = Object.new.freeze
+      MISSING_SEGMENT = Internal::ContainerChecks::ObjectDiagnostics::MISSING_SEGMENT
 
       def backend = :vm
 
@@ -86,8 +50,7 @@ module Schemurai
         @dynamic_scope = dynamic_scope
         @instance_path_buffer = nil
         @schema_path_buffer = nil
-        @evaluation_pool = nil
-        @evaluation_pool_index = 0
+        @evaluation_pool = native_reports ? native_reports[1] : Internal::EvaluationPool.new
       end
 
       def validate(instance)
@@ -256,14 +219,11 @@ module Schemurai
       end
 
       private def reset_evaluation_pool
-        @evaluation_pool_index = 0
+        @evaluation_pool.reset
       end
 
       private def tracked_evaluation
-        pool = (@evaluation_pool ||= [])
-        index = @evaluation_pool_index
-        @evaluation_pool_index += 1
-        (pool[index] ||= EvaluationBuffer.new).reset
+        @evaluation_pool.acquire
       end
 
       private def evaluate(program, instance)
@@ -559,134 +519,6 @@ module Schemurai
         return false unless valid_required_keys?(rules.required, value)
 
         valid_object_children?(rules, value) { |child, item| evaluate_valid(child, item) }
-      end
-
-      private def check_object(rules, value, prior_evaluation)
-        evaluation = nil
-        if rules.max_properties && value.length > rules.max_properties
-          return Evaluation.invalid unless @errors
-
-          add_error("maxProperties") do
-            Internal::ErrorMessage.size("maxProperties", rules.max_properties, value.length)
-          end
-        end
-        if rules.min_properties && value.length < rules.min_properties
-          return Evaluation.invalid unless @errors
-
-          add_error("minProperties") do
-            Internal::ErrorMessage.size("minProperties", rules.min_properties, value.length)
-          end
-        end
-        if (required = rules.required)
-          required.each do |name|
-            @budget&.checkpoint
-            next if value.key?(name)
-            return Evaluation.invalid unless @errors
-
-            add_error("required") { Internal::ErrorMessage.required(name) }
-          end
-        end
-
-        properties = rules.properties
-        patterns = rules.patterns
-        value.each do |name, property_value|
-          @budget&.checkpoint
-          matched = false
-          if (child = properties[name])
-            matched = true
-            valid = evaluate_child_at(child, property_value, name, "properties", name)
-            return Evaluation.invalid if !valid && !@errors
-            (evaluation ||= tracked_evaluation).record_property(name)
-          end
-          if patterns
-            patterns.each do |pattern, child|
-              @budget&.checkpoint
-              next unless ecma_regexp(pattern).match?(name)
-              matched = true
-              valid = evaluate_child_at(child, property_value, name, "patternProperties", pattern)
-              return Evaluation.invalid if !valid && !@errors
-              (evaluation ||= tracked_evaluation).record_property(name)
-            end
-          end
-          if !matched && (additional = rules.additional)
-            valid = evaluate_child_at(additional, property_value, name, "additionalProperties")
-            return Evaluation.invalid if !valid && !@errors
-            (evaluation ||= tracked_evaluation).record_property(name)
-          end
-        end
-
-        if (property_names = rules.property_names)
-          value.each_key do |name|
-            @budget&.checkpoint
-            valid = evaluate_child_at(property_names, name, name, "propertyNames")
-            return Evaluation.invalid if !valid && !@errors
-          end
-        end
-        if (dependencies = rules.dependencies)
-          dependencies.each do |name, dependency|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            if dependency.is_a?(Array)
-              dependency.each do |required_name|
-                @budget&.checkpoint
-                unless value.key?(required_name)
-                  return Evaluation.invalid unless @errors
-
-                  add_error("dependencies") { Internal::ErrorMessage.dependent_required(name, required_name) }
-                end
-              end
-            else
-              result = evaluate_at(dependency, value, MISSING_SEGMENT, "dependencies", name)
-              if result.valid? && !result.evaluated_properties.empty?
-                result.evaluated_properties.each do |property|
-                  @budget&.checkpoint
-                  (evaluation ||= tracked_evaluation).record_property(property)
-                end
-              end
-            end
-          end
-        end
-        if (dependent_required = rules.dependent_required)
-          dependent_required.each do |name, required_names|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            required_names.each do |required_name|
-              @budget&.checkpoint
-              unless value.key?(required_name)
-                return Evaluation.invalid unless @errors
-
-                add_error("dependentRequired") { Internal::ErrorMessage.dependent_required(name, required_name) }
-              end
-            end
-          end
-        end
-        if (dependent_schemas = rules.dependent_schemas)
-          dependent_schemas.each do |name, child|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            result = evaluate_at(child, value, MISSING_SEGMENT, "dependentSchemas", name)
-            if result.valid? && !result.evaluated_properties.empty?
-              result.evaluated_properties.each do |property|
-                @budget&.checkpoint
-                (evaluation ||= tracked_evaluation).record_property(property)
-              end
-            end
-          end
-        end
-        if (unevaluated = rules.unevaluated)
-          prior_properties = prior_evaluation.evaluated_properties
-          value.each_key do |name|
-            @budget&.checkpoint
-            next if prior_properties.include?(name) || evaluation&.evaluated_properties&.include?(name)
-
-            valid = evaluate_child_at(unevaluated, value[name], name, "unevaluatedProperties")
-            return Evaluation.invalid if !valid && !@errors
-            (evaluation ||= tracked_evaluation).record_property(name)
-          end
-        end
-        return Evaluation.valid unless evaluation
-
-        evaluation
       end
 
       private def check_combiner(opcode, operand, value)

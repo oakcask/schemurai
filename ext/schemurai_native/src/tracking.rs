@@ -1,5 +1,6 @@
-//! Evaluated locations stay in native buffers, scoped to one instance location.
-//! Keys remain borrowed VALUEs; no Ruby objects or instance trees are allocated.
+//! Ordinary locations use native buffers; runtime locations retain opaque Ruby
+//! buffers without borrowing their sets. This module never allocates Ruby objects
+//! or decodes instance trees.
 use super::*;
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -23,6 +24,47 @@ impl Hash for JsonKey {
     }
 }
 pub(super) type KeySet = HashSet<JsonKey, BuildHasherDefault<BucketHasher>>;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RuntimeLocations {
+    pub(crate) buffer: Value,
+    pub(crate) properties: Value,
+    pub(crate) items: Value,
+}
+impl RuntimeLocations {
+    pub(crate) fn mark(&self) {
+        for value in [self.buffer, self.properties, self.items] {
+            unsafe {
+                sn_pin(value);
+            }
+        }
+    }
+}
+
+// An owned export snapshot can be traversed by C across Ruby allocations.
+pub struct PropertyLocations {
+    pub(crate) set: Option<Value>,
+    pub(crate) keys: Vec<Value>,
+}
+impl PropertyLocations {
+    pub(crate) fn new(engine: &Engine, tracked: &Tracked) -> Self {
+        Self {
+            set: tracked.properties_set(),
+            keys: tracked.native_properties(engine),
+        }
+    }
+    pub(crate) fn mark(&self) {
+        for &value in self.set.iter().chain(&self.keys) {
+            unsafe {
+                sn_pin(value);
+            }
+        }
+    }
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.keys.capacity() * std::mem::size_of::<Value>()
+    }
+}
 
 // Store only nonempty words. The common single-word case needs no allocation,
 // even when its property IDs are near the end of a large compiled engine.
@@ -138,6 +180,7 @@ impl PropertyBits {
 pub(super) struct Tracked {
     pub status: Verdict,
     properties: KeySet,
+    runtime: Option<RuntimeLocations>,
     known_properties: PropertyBits,
     items: Vec<u64>,
 }
@@ -154,6 +197,9 @@ impl Tracked {
             }
     }
     pub(super) fn mark(&self) {
+        if let Some(runtime) = self.runtime {
+            runtime.mark();
+        }
         for key in &self.properties {
             unsafe {
                 sn_pin(key.0);
@@ -162,7 +208,8 @@ impl Tracked {
     }
     // Bound retained annotation slots independently of the number of results.
     pub(super) fn memo_slots(&self) -> usize {
-        self.properties.capacity()
+        self.runtime.map_or(0, |_| 3)
+            + self.properties.capacity()
             + self.items.capacity()
             + match &self.known_properties.words {
                 PropertyWords::Empty | PropertyWords::Single(..) => 0,
@@ -174,6 +221,7 @@ impl Tracked {
         Self {
             status,
             properties: KeySet::default(),
+            runtime: None,
             known_properties: PropertyBits::default(),
             items: vec![],
         }
@@ -197,7 +245,13 @@ impl Tracked {
         self.known_properties.contains(index)
     }
     pub(super) fn property_count(&self) -> usize {
-        self.properties.len() + self.known_properties.count
+        // Runtime sets can be reset or changed by retained blocks. Returning
+        // zero disables native count-based scan elision; Ruby reads live sets.
+        if self.runtime.is_some() {
+            0
+        } else {
+            self.properties.len() + self.known_properties.count
+        }
     }
     pub(super) fn item_count(&self) -> usize {
         self.items
@@ -206,6 +260,7 @@ impl Tracked {
             .sum()
     }
     pub(super) fn merge(&mut self, other: Self) -> Verdict {
+        debug_assert!(self.runtime.is_none() && other.runtime.is_none());
         if other.status != Valid {
             return other.status;
         }
@@ -218,16 +273,85 @@ impl Tracked {
         merge_bits(&mut self.items, other.items);
         Valid
     }
-    pub(super) fn merge_diagnostics(&mut self, other: Self) -> Result<(), Verdict> {
+    pub(super) fn merge_diagnostics(
+        &mut self,
+        execution: &Execution<'_>,
+        other: Self,
+    ) -> Result<(), Verdict> {
         if other.status == Unsupported {
             return Err(Unsupported);
         }
         if self.status != Valid || other.status != Valid {
             *self = Self::new(Invalid);
         } else {
-            self.merge(other);
+            if self.merge_runtime(execution, other) == Unsupported {
+                return Err(Unsupported);
+            }
         }
         Ok(())
+    }
+    pub(super) fn has_runtime_properties(&self) -> bool {
+        self.runtime.is_some()
+    }
+    pub(super) fn runtime_locations(&self) -> Option<RuntimeLocations> {
+        self.runtime
+    }
+    pub(super) fn properties_set(&self) -> Option<Value> {
+        self.runtime.map(|runtime| runtime.properties)
+    }
+    pub(super) fn items_set(&self) -> Option<Value> {
+        self.runtime.map(|runtime| runtime.items)
+    }
+    pub(super) fn set_runtime(&mut self, runtime: RuntimeLocations) {
+        debug_assert!(
+            self.properties.is_empty() && self.known_properties.count == 0 && self.items.is_empty()
+        );
+        self.runtime = Some(runtime);
+    }
+    pub(super) fn native_items(&self) -> Vec<usize> {
+        let mut result = vec![];
+        for (word, &bits) in self.items.iter().enumerate() {
+            let mut bits = bits;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                result.push(word * 64 + bit);
+                bits &= bits - 1;
+            }
+        }
+        result
+    }
+    pub(super) fn native_properties(&self, engine: &Engine) -> Vec<Value> {
+        let mut known: Vec<_> = engine
+            .property_ids
+            .iter()
+            .filter(|(_, index)| self.contains_known_property(**index))
+            .map(|(key, &index)| (index, key.0))
+            .collect();
+        known.sort_unstable_by_key(|&(index, _)| index);
+        known
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(self.properties.iter().map(|key| key.0))
+            .collect()
+    }
+    pub(super) fn merge_runtime(&mut self, execution: &Execution<'_>, other: Self) -> Verdict {
+        if other.status != Valid {
+            return other.status;
+        }
+        if !self.has_runtime_properties() && !other.has_runtime_properties() {
+            return self.merge(other);
+        }
+        let Ok(runtime) = execution
+            .caches
+            .merge_properties(execution.engine, self, &other)
+        else {
+            return Unsupported;
+        };
+        self.properties.clear();
+        self.known_properties = PropertyBits::default();
+        self.items.clear();
+        self.runtime = Some(runtime);
+        Valid
     }
     pub(super) fn property(&mut self, engine: &Engine, value: Value) {
         let key = JsonKey::new(value);
@@ -513,7 +637,8 @@ impl Execution<'_> {
                 return Unsupported;
             }
             if !missing(value, key, self.undefined) {
-                let result = evaluation.merge(self.eval_tracked(child, value, depth, active));
+                let result =
+                    evaluation.merge_runtime(self, self.eval_tracked(child, value, depth, active));
                 if result != Valid {
                     return result;
                 }

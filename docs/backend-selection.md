@@ -1050,8 +1050,10 @@ Array diagnostics and trials use indexed Ruby traversal with owned native
 report collectors. The collector transfers error reservations, paths and
 annotations to native child runners while Ruby retains its length, indexing,
 range and contains iteration behavior. VM and native frames share that Array
-iteration helper. Object diagnostic callbacks still require their compatibility
-path; graphs that reach them are rejected before new Array callbacks run.
+iteration helper. Object reports now use the same owned collector boundary and
+share their property, pattern, name, dependency and unevaluated traversal with
+the VM. Both container callback graphs require every reachable report operation
+to have a native path before any user callback runs.
 Retained native validity blocks inherit the current native report collection
 when they reach a tracked schema, including through references. Suspended
 runtime requests snapshot that collection before path scopes unwind. Their
@@ -1061,6 +1063,24 @@ can clear a collection; replay preserves that reset and the VM's path cleanup
 behavior. Trial contexts restore their caller's collection, and bounded public
 invocations keep independent state. Interrupted child and Array frames transfer
 already collected errors when a Ruby caller rescues their exception.
+Ruby container traversal shares the VM's data-only evaluation pool. A buffer
+retains both its property and item Sets, including when an older Object block
+runs after the same slot has been reused by an Array. Native results retain
+opaque buffer handles; merges call the shared buffer's merge method after Rust
+unwinds, preserving receiver identity and key hash/equality behavior. Native
+code never borrows those Ruby sets or caches their cardinality for scan elision.
+Ordinary invocations without exposed Ruby buffers keep their native location
+bitsets. Once a validator has used the shared pool, later public invocations
+start with ordered container traversal so buffer acquisition order stays the
+same. Bounded invocations own independent pools. Owned export snapshots root
+native property handles across Ruby allocation and compaction.
+Retained Object iterator blocks follow the active collection while preserving
+their original program and budget owner. Silent failures still affect the
+current trial's verdict even when a Ruby caller rescues a retained block's
+nonlocal return or a later primitive exception. Silent children share the active
+failure collection; only explicit trials isolate it. Validity and diagnostic
+entrypoints share graph admission, including validity children reached from
+silent diagnostic trials beyond the native physical stack bound.
 The remaining VM compatibility evaluator exposes only its active collection
 state to retained native blocks. Those blocks execute native programs and append
 their completed errors/counts to that collection without interpreting VM code.
@@ -1076,9 +1096,9 @@ The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Special containers can still delegate when child graphs contain unresolved
-references or unsupported Object diagnostic traversal. Object callbacks that
-need evaluated-location export retain the compatibility path. Tracked or detailed
-continuations require every reachable operation to have a native report path;
+references or unsupported operands/instructions. Object report callbacks export
+evaluated property sets through owned results. Tracked or detailed continuations
+require every reachable operation to have a native report path;
 defensive unsupported instructions also retain the VM path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

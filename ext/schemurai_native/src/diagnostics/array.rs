@@ -58,12 +58,6 @@ pub unsafe extern "C" fn sn_array_report_error(
     keyword: i32,
     frame: Value,
 ) -> *mut Report {
-    let engine = unsafe { &*engine };
-    let source = engine.nodes[node]
-        .iter()
-        .zip(&engine.error_operands[node])
-        .find_map(|(op, &source)| matches!(op, Op::Array(..)).then_some(source))
-        .expect("array source");
     let keyword = match keyword {
         0 => "type",
         1 => "maxItems",
@@ -72,13 +66,14 @@ pub unsafe extern "C" fn sn_array_report_error(
         4 => "contains",
         _ => unreachable!(),
     };
-    let mut seed = unsafe { &*report }.continuation(false);
-    seed.entry = Some(ErrorEntry {
-        source,
+    let seed = unsafe { &*report }.container_error(
+        unsafe { &*engine },
+        node,
         instance,
         keyword,
         frame,
-    });
+        false,
+    );
     Box::into_raw(Box::new(seed))
 }
 /// # Safety
@@ -115,7 +110,7 @@ pub unsafe extern "C" fn sn_array_report_contains(
     let report = unsafe { &*report };
     i32::from(
         if prior != 0 {
-            &report.array_prior
+            &report.container_prior
         } else {
             &report.evaluation
         }
@@ -145,7 +140,7 @@ pub unsafe extern "C" fn sn_report_verdict(report: *const Report) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_array_report_finish(report: *mut Report, valid: i32) {
     let report = unsafe { &mut *report };
-    report.array_prior = None;
+    report.container_prior = None;
     if valid == 0 {
         report.failed = true;
         report.evaluation = Some(Tracked::new(Invalid));
@@ -212,7 +207,7 @@ mod tests {
         assert!(!completed.failed);
         assert!(completed.silent);
         let effect = completed.effect_since(&before).unwrap();
-        let mut receiver = before.array_continuation(true, &Tracked::new(Valid));
+        let mut receiver = before.container_continuation(true, &Tracked::new(Valid));
         receiver.instance_path.index(5);
         receiver.apply_effect(effect);
         assert!(receiver.annotations);
@@ -246,7 +241,7 @@ mod tests {
         base.schema_path.text.push_str("/allOf/1");
         let mut prior = Tracked::new(Valid);
         prior.item(65);
-        let mut report = base.array_continuation(true, &prior);
+        let mut report = base.container_continuation(true, &prior);
         unsafe {
             sn_array_report_record(&mut report, 4);
         }
@@ -298,7 +293,7 @@ mod tests {
         }
         assert_eq!(unsafe { sn_report_verdict(&report) }, VERDICT_VALID);
         assert!(report.failed);
-        assert!(report.array_prior.is_none());
+        assert!(report.container_prior.is_none());
     }
 }
 
@@ -378,4 +373,20 @@ pub unsafe extern "C" fn sn_report_partial(report: *const Report) -> *mut Report
     let mut report = unsafe { &*report }.clone();
     report.complete_callback(false);
     Box::into_raw(Box::new(report))
+}
+
+/// # Safety
+/// Report is live, immutable and C-rooted. Prior selects inherited locations.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_items_set(report: *const Report, prior: i32) -> Value {
+    let report = unsafe { &*report };
+    let locations = if prior != 0 {
+        &report.container_prior
+    } else {
+        &report.evaluation
+    };
+    locations
+        .as_ref()
+        .and_then(Tracked::items_set)
+        .unwrap_or_else(|| unsafe { sn_nil() })
 }
