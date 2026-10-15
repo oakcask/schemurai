@@ -693,25 +693,13 @@ module Schemurai
             @budget&.checkpoint
             next unless value.key?(name)
             if dependency.is_a?(Array)
-              return false unless dependency.all? do |required_name|
-                @budget&.checkpoint
-                value.key?(required_name)
-              end
+              return false unless all_keys_present?(dependency, value)
             else
               return false unless evaluate_valid(dependency, value)
             end
           end
         end
-        if (dependent_required = rules.dependent_required)
-          dependent_required.each do |name, required_names|
-            @budget&.checkpoint
-            next unless value.key?(name)
-            return false unless required_names.all? do |required_name|
-              @budget&.checkpoint
-              value.key?(required_name)
-            end
-          end
-        end
+        return false unless valid_dependency_keys?(rules.dependent_required, value)
         if (dependent_schemas = rules.dependent_schemas)
           dependent_schemas.each do |name, child|
             @budget&.checkpoint

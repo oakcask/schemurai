@@ -19,14 +19,29 @@ module Schemurai
         private def valid_required_keys?(required, value)
           return true unless required
 
-          required.all? do |name|
+          all_keys_present?(required, value)
+        end
+
+        private def all_keys_present?(names, value)
+          names.all? do |name|
             @budget&.checkpoint
             value.key?(name)
           end
         end
+
+        private def valid_dependency_keys?(entries, value)
+          return true unless entries
+
+          entries.each do |name, names|
+            @budget&.checkpoint
+            next unless value.key?(name)
+            return false unless all_keys_present?(names, value)
+          end
+          true
+        end
       end
 
-      # Frames evaluate only container applicability, bounds and uniqueness.
+      # Frames evaluate container value operations without child schemas.
       # Child schema execution remains with the native traversal.
       class Frame
         include Bounds
@@ -117,26 +132,27 @@ module Schemurai
 
         def check(step)
           return super if step < 7
-          return true unless @rules.required
 
           if step == 7
+            return true unless @rules.required
+
             # Preserve errors from malformed required operands before iteration.
             @rules.required.each { break }
             return true
           end
-          if Array === @rules.required
-            return check_required_name(@rules.required[step - 8])
+          index = step - 8
+          count = iteration_length(@rules.required)
+          if index < count
+            return check_required_name(iteration_name(@rules.required, index))
           end
-          @rules.required.each_with_index do |name, index|
-            next unless index == step - 8
-
-            return check_required_name(name)
-          end
-          true
+          check_dependency(index - count)
         end
 
         def message(keyword, rescued)
           return ErrorMessage.required(@required_name) if keyword == "required"
+          if keyword == "dependencies" || keyword == "dependentRequired"
+            return ErrorMessage.dependent_required(@dependency_name, @required_name)
+          end
 
           super
         end
@@ -144,7 +160,43 @@ module Schemurai
         private def type_name = "object"
         private def maximum = @rules.max_properties
         private def minimum = @rules.min_properties
-        private def valid_tail?(_length) = valid_required_keys?(@rules.required, @value)
+        private def valid_tail?(_length)
+          valid_required_keys?(@rules.required, @value) &&
+            valid_dependency_keys?(@rules.dependencies, @value) &&
+            valid_dependency_keys?(@rules.dependent_required, @value)
+        end
+
+        private def iteration_length(names)
+          (Array === names || Hash === names) ? names.length : 0
+        end
+
+        private def iteration_name(names, at)
+          return names[at] if Array === names
+
+          names.each_with_index { |name, index| return name if index == at }
+        end
+
+        private def dependency_steps
+          @dependency_steps ||= [@rules.dependencies, @rules.dependent_required].flat_map do |entries|
+            (entries || []).flat_map do |name, names|
+              [[:trigger, name], [:prepare, names]] + Array.new(iteration_length(names)) { |index| [:key, names, index] }
+            end
+          end
+        end
+
+        private def check_dependency(index)
+          kind, operand, at = dependency_steps.fetch(index)
+          case kind
+          when :trigger
+            @dependency_name = operand
+            @budget&.checkpoint
+            @value.key?(operand) || false
+          when :prepare
+            operand.each { break }
+            true
+          when :key then check_required_name(iteration_name(operand, at))
+          end
+        end
         private def check_required_name(name)
           @required_name = name
           @budget&.checkpoint

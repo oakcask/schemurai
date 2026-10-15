@@ -2167,7 +2167,7 @@ impl Execution<'_> {
             return TYPE_UNCHECKED;
         }
         if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)]
-            if rules.record.is_some() && (!rules.header_only() || !rules.inspect_required))
+            if rules.record.is_some() && (!rules.header_only() || (!rules.inspect_required && rules.dependent_required.is_empty())))
         {
             unsafe { sn_shallow_kind(value) }
         } else {
