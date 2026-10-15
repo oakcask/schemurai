@@ -2672,13 +2672,43 @@ RSpec.describe "native VALUE execution" do
     expect(program.valid?("bad")).to be(false)
   end
 
-  it "preserves late reference resolution in a mutable registry" do # rubocop:disable RSpec/ExampleLength
+  it "reports unresolved reference diagnostics without VM execution" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    missing = {"$ref" => "urn:missing"}
+    schemas = [missing, {"$ref" => "#/$defs/missing"}, {"$ref" => "#unknown"},
+      {"allOf" => [false, missing]}, {"anyOf" => [true, missing]},
+      {"oneOf" => [true, missing]}, {"not" => missing},
+      {"properties" => {"a/b~c" => missing}, "unevaluatedProperties" => false},
+      {"items" => missing, "unevaluatedItems" => false},
+      {"$dynamicRef" => "urn:missing#n"}].map { |schema| dialect.merge(schema) }
+    schemas << {"$schema" => "https://json-schema.org/draft/2019-09/schema", "$recursiveRef" => "urn:missing"}
+    expect_native_policy_results(schemas, [nil, 1, "bad", [], [1, 2], {}, {"a/b~c" => 1}])
+  end
+
+  it "enforces limits on unresolved reference diagnostics without VM execution" do
+    validator = Schemurai.compile({"$ref" => "urn:missing"}, backend: :native)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect(validator.valid?(nil, timeout: 10)).to be(false)
+    expect(validator.validate(nil, timeout: 10, max_errors: 1).errors.first.keyword).to eq("$ref")
+    expect { validator.validate(nil, max_errors: 0) }.to raise_error(Schemurai::LimitExceeded)
+  end
+
+  it "preserves late reference resolution in a mutable registry without VM execution" do # rubocop:disable RSpec/ExampleLength
     registry = Schemurai::SchemaRegistry.new(backend: :native)
     validator = registry.compile({"$ref" => "urn:late"})
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     expect(validator.valid?(1)).to be(false)
+    expect(validator.validate(1).errors.first.keyword).to eq("$ref")
     registry.compile({"$id" => "urn:late", "type" => "integer"})
+    compiler = validator.instance_variable_get(:@evaluator).instance_variable_get(:@compiler)
+    allow(compiler).to receive(:resolve).and_raise(RuntimeError, "resolution interrupted")
+    expect { validator.valid?(1) }.to raise_error(RuntimeError, "resolution interrupted")
+    allow(compiler).to receive(:resolve).and_call_original
     expect(validator.valid?(1)).to be(true)
+    expect(validator.validate(1).errors).to be_empty
     expect(validator.valid?("bad")).to be(false)
+    expect(validator.validate("bad").errors.first.keyword).to eq("type")
   end
 
   it "unions successful anyOf array annotations and discards failed branches" do # rubocop:disable RSpec/ExampleLength

@@ -3,6 +3,14 @@
 use super::*;
 use tracking::Tracked;
 
+fn reference_keyword(opcode: i32) -> &'static str {
+    match opcode {
+        OP_RECURSIVE_REF => "$recursiveRef",
+        OP_DYNAMIC_REF => "$dynamicRef",
+        _ => "$ref",
+    }
+}
+
 struct Error {
     keyword: &'static str,
     instance_path: String,
@@ -36,7 +44,10 @@ impl Report {
             return Err(Unsupported);
         }
         self.failed = true;
-        let schema_path = if keyword == "falseSchema" {
+        let schema_path = if matches!(
+            keyword,
+            "falseSchema" | "$ref" | "$recursiveRef" | "$dynamicRef"
+        ) {
             self.schema_path.clone()
         } else {
             format!("{}/{keyword}", self.schema_path)
@@ -195,6 +206,11 @@ impl Execution<'_> {
             }
             match op {
                 Op::Unsupported => return Err(Unsupported),
+                Op::UnresolvedRef(message) => {
+                    let keyword = reference_keyword(source.0);
+                    report.add(keyword, (source.0, *message), value, 0)?;
+                    prior = Tracked::new(Invalid);
+                }
                 Op::Boolean(false) => {
                     report.add("falseSchema", source, value, 0)?;
                     prior = Tracked::new(Invalid);
@@ -817,11 +833,7 @@ impl Execution<'_> {
                         value,
                         parent: active.active,
                     };
-                    let keyword = match source.0 {
-                        OP_RECURSIVE_REF => "$recursiveRef",
-                        OP_DYNAMIC_REF => "$dynamicRef",
-                        _ => "$ref",
-                    };
+                    let keyword = reference_keyword(source.0);
                     let target = self.reference_target(*target, active);
                     let active = scope::Context {
                         active: Some(&frame),

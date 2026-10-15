@@ -122,6 +122,7 @@ const MAX_UNIQUE_INDEX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 enum Op {
     Unsupported,
+    UnresolvedRef(Value),
     Boolean(bool),
     Ref(scope::Reference),
     Type(i32),
@@ -1147,7 +1148,8 @@ impl Engine {
                     let mut target = 0;
                     if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
                         if unsafe { sn_resolution_error(target) } != 0 {
-                            Op::Unsupported
+                            let message = self.field(target, b"message\0")?;
+                            Op::UnresolvedRef(message)
                         } else {
                             return Err(target);
                         }
@@ -1359,6 +1361,7 @@ impl Execution<'_> {
     fn leaf(&self, op: &Op, kind: i32, value: Value, depth: usize) -> Verdict {
         match op {
             Op::Unsupported => Unsupported,
+            Op::UnresolvedRef(_) => Invalid,
             Op::Boolean(v) => verdict(*v),
             Op::Type(mask) => verdict(kind & mask != 0),
             Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
@@ -2908,6 +2911,18 @@ pub unsafe extern "C" fn sn_node_index(engine: *const Engine, program: Value) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_root_index(engine: *const Engine) -> usize {
     unsafe { &*engine }.root
+}
+/// # Safety
+/// Engine must be live and compilation must have finished.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_has_unresolved_references(engine: *const Engine) -> i32 {
+    i32::from(
+        unsafe { &*engine }
+            .nodes
+            .iter()
+            .flatten()
+            .any(|op| matches!(op, Op::UnresolvedRef(_))),
+    )
 }
 /// # Safety
 /// Roots must be live and compilation must have finished.

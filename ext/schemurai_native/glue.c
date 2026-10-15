@@ -22,6 +22,7 @@ extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
 extern int sn_valid(const void *, const void *, size_t, VALUE);
 extern size_t sn_node_index(const void *, VALUE);
 extern size_t sn_root_index(const void *);
+extern int sn_has_unresolved_references(const void *);
 extern size_t sn_root_count(const void *);
 extern VALUE sn_root_at(const void *, size_t);
 extern void *sn_caches_new(void);
@@ -117,6 +118,9 @@ static holder *ready_program(VALUE self) {
     if (!h->engine) rb_raise(rb_eRuntimeError, "uninitialized native program");
     if (h->compiling) rb_raise(rb_eRuntimeError, "native program is still compiling");
     return h;
+}
+static VALUE has_unresolved_references(VALUE self) {
+    return sn_has_unresolved_references(ready_program(self)->engine) ? Qtrue : Qfalse;
 }
 static VALUE make_shareable(VALUE self) {
     holder *h = ready_program(self);
@@ -598,6 +602,7 @@ void Init_schemurai_native(void) {
     rb_define_method(klass, "diagnostics", diagnostics, 1);
     rb_define_method(klass, "make_shareable", make_shareable, 0);
     rb_define_method(klass, "runner", runner, 1);
+    rb_define_method(klass, "unresolved_references?", has_unresolved_references, 0);
     VALUE runner_class = rb_define_class_under(klass, "Runner", rb_cObject);
     rb_undef_alloc_func(runner_class);
     rb_define_method(runner_class, "valid?", runner_valid, 1);

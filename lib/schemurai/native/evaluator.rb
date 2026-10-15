@@ -15,12 +15,15 @@ module Schemurai
         @root = root
         @content = content
         @format = format
+        @graph_size = @graph.nodes.length
         @compiled = compiled || Program.new(root, compiler, format, content)
         @program = @compiled.runner(root)
+        @unresolved = @compiled.unresolved_references?
         @vm = VM::Evaluator.new(graph, compiler, root, content: content, format: format)
       end
 
       def valid?(instance, max_errors: nil, timeout: nil)
+        refresh_unresolved
         if !max_errors.nil? || !timeout.nil?
           budget = Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
           result = @program.valid_with_budget(instance, budget)
@@ -32,6 +35,7 @@ module Schemurai
       end
 
       def validate(instance, max_errors: nil, timeout: nil)
+        refresh_unresolved
         if !max_errors.nil? || !timeout.nil?
           budget = Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
           rows = @program.diagnostics_with_budget(instance, budget)
@@ -51,6 +55,17 @@ module Schemurai
       end
       private def limited_vm
         VM::LimitedEvaluator.new(@graph, @compiler, @root, content: @content, format: @format)
+      end
+
+      private def refresh_unresolved
+        while @unresolved && @graph_size != @graph.nodes.length
+          graph_size = @graph.nodes.length
+          compiled = Program.new(@root, @compiler, @format, @content)
+          @program = compiled.runner(@root)
+          @compiled = compiled
+          @unresolved = @compiled.unresolved_references?
+          @graph_size = graph_size
+        end
       end
     end
   end
