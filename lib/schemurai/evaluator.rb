@@ -6,6 +6,7 @@ require_relative "evaluation"
 require_relative "error_message"
 require_relative "unique_items"
 require_relative "ecma_regexp"
+require_relative "json_pointer"
 
 module Schemurai
   module Internal
@@ -858,7 +859,7 @@ module Schemurai
       end
 
       private def append_pointer_segment(pointer, segment)
-        pointer << "/" << segment.to_s.gsub("~", "~0").gsub("/", "~1")
+        pointer << "/" << Internal::JsonPointer.escape(segment)
       end
 
       private_constant :MISSING_SEGMENT

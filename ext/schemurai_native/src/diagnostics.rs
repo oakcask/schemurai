@@ -13,8 +13,8 @@ fn reference_keyword(opcode: i32) -> &'static str {
 
 struct Error {
     keyword: &'static str,
-    instance_path: String,
-    schema_path: String,
+    instance_path: pointer::Rendered,
+    schema_path: pointer::Rendered,
     opcode: i32,
     operand: Value,
     instance: Value,
@@ -23,8 +23,8 @@ struct Error {
 #[derive(Default)]
 pub struct Report {
     errors: Vec<Error>,
-    instance_path: String,
-    schema_path: String,
+    instance_path: pointer::Path,
+    schema_path: pointer::Path,
     // Explicit failure signal for the current evaluation, independent of the
     // number or rendering of diagnostic records. Child evaluations isolate it.
     failed: bool,
@@ -34,6 +34,7 @@ pub struct Report {
 impl Report {
     fn add(
         &mut self,
+        caches: &runtime::Caches,
         keyword: &'static str,
         source: (i32, Value),
         instance: Value,
@@ -44,17 +45,16 @@ impl Report {
             return Err(Unsupported);
         }
         self.failed = true;
-        let schema_path = if matches!(
+        let instance_path = self.instance_path.render(caches, None)?;
+        let keyword_segment = (!matches!(
             keyword,
             "falseSchema" | "$ref" | "$recursiveRef" | "$dynamicRef"
-        ) {
-            self.schema_path.clone()
-        } else {
-            format!("{}/{keyword}", self.schema_path)
-        };
+        ))
+        .then_some(keyword);
+        let schema_path = self.schema_path.render(caches, keyword_segment)?;
         self.errors.push(Error {
             keyword,
-            instance_path: self.instance_path.clone(),
+            instance_path,
             schema_path,
             opcode: source.0,
             operand: source.1,
@@ -69,13 +69,12 @@ impl Report {
         instance: Option<usize>,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
     ) -> Result<T, Verdict> {
-        use std::fmt::Write;
-        let schema_len = self.schema_path.len();
-        let instance_len = self.instance_path.len();
-        self.schema_path.push('/');
+        let schema_len = self.schema_path.checkpoint();
+        let instance_len = self.instance_path.checkpoint();
+        self.schema_path.push_str("/");
         self.schema_path.push_str(segment);
         if let Some(index) = instance {
-            write!(self.instance_path, "/{index}").unwrap();
+            self.instance_path.index(index);
         }
         let result = visit(self);
         self.schema_path.truncate(schema_len);
@@ -89,34 +88,28 @@ impl Report {
         schema_key: Option<Value>,
         visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
     ) -> Result<T, Verdict> {
-        let name = pointer_name(key)?;
-        let segment = if let Some(key) = schema_key {
-            format!("{segment}/{}", pointer_name(key)?)
+        let instance_len = self.instance_path.checkpoint();
+        self.instance_path.name(key)?;
+        let result = if let Some(key) = schema_key {
+            self.schema_name(segment, key, visit)
         } else {
-            segment.to_owned()
+            self.scoped(segment, None, visit)
         };
-        let instance_len = self.instance_path.len();
-        self.instance_path.push('/');
-        self.instance_path.push_str(&name);
-        let result = self.scoped(&segment, None, visit);
         self.instance_path.truncate(instance_len);
         result
     }
-}
 
-fn pointer_name(value: Value) -> Result<String, Verdict> {
-    if unsafe { sn_kind(value) } != TYPE_STRING {
-        return Err(Unsupported);
+    fn schema_name<T>(
+        &mut self,
+        segment: &str,
+        key: Value,
+        visit: impl FnOnce(&mut Self) -> Result<T, Verdict>,
+    ) -> Result<T, Verdict> {
+        self.scoped(segment, None, |report| {
+            report.schema_path.name(key)?;
+            visit(report)
+        })
     }
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
-    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-    if encoding == ENCODING_OTHER || (encoding == ENCODING_ASCII && !bytes.is_ascii()) {
-        return Err(Unsupported);
-    }
-    let name = std::str::from_utf8(bytes).map_err(|_| Unsupported)?;
-    Ok(name.replace('~', "~0").replace('/', "~1"))
 }
 
 impl Execution<'_> {
@@ -208,22 +201,23 @@ impl Execution<'_> {
                 Op::Unsupported => return Err(Unsupported),
                 Op::UnresolvedRef(message) => {
                     let keyword = reference_keyword(source.0);
-                    report.add(keyword, (source.0, *message), value, 0)?;
+                    report.add(self.caches, keyword, (source.0, *message), value, 0)?;
                     prior = Tracked::new(Invalid);
                 }
                 Op::Boolean(false) => {
-                    report.add("falseSchema", source, value, 0)?;
+                    report.add(self.caches, "falseSchema", source, value, 0)?;
                     prior = Tracked::new(Invalid);
                 }
                 Op::Boolean(true) => {}
                 Op::Type(mask) => {
                     if kind & mask == 0 {
-                        report.add("type", source, value, 0)?;
+                        report.add(self.caches, "type", source, value, 0)?;
                     }
                 }
                 Op::Const(..) | Op::Enum(..) => match self.leaf(op, kind, value, depth) {
                     Unsupported => return Err(Unsupported),
                     Invalid => report.add(
+                        self.caches,
                         if matches!(op, Op::Const(_)) {
                             "const"
                         } else {
@@ -237,7 +231,7 @@ impl Execution<'_> {
                 },
                 Op::Number(required, rules) => {
                     if *required != 0 && kind & required == 0 {
-                        report.add("type", source, value, 0)?;
+                        report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind & TYPE_NUMBER != 0 {
                         let bits = rules.failures(value, &self.budget)?;
@@ -252,14 +246,14 @@ impl Execution<'_> {
                                 return Err(Unsupported);
                             }
                             if bits & bit != 0 {
-                                report.add(keyword, source, value, 0)?;
+                                report.add(self.caches, keyword, source, value, 0)?;
                             }
                         }
                     }
                 }
                 Op::String(required, rules) => {
                     if *required != 0 && kind != TYPE_STRING {
-                        report.add("type", source, value, 0)?;
+                        report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind == TYPE_STRING {
                         let len = if rules.min.is_some() || rules.max.is_some() {
@@ -268,17 +262,23 @@ impl Execution<'_> {
                             0
                         };
                         if rules.max.is_some_and(|max| len > max) {
-                            report.add("maxLength", source, value, len)?;
+                            report.add(self.caches, "maxLength", source, value, len)?;
                         }
                         if rules.min.is_some_and(|min| len < min) {
-                            report.add("minLength", source, value, len)?;
+                            report.add(self.caches, "minLength", source, value, len)?;
                         }
                         if let Some(pattern) = &rules.pattern {
                             match pattern.assertion(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => {
                                     let invalid = pattern.invalid(self.caches, value);
-                                    report.add("pattern", source, value, usize::from(invalid))?;
+                                    report.add(
+                                        self.caches,
+                                        "pattern",
+                                        source,
+                                        value,
+                                        usize::from(invalid),
+                                    )?;
                                     if invalid {
                                         continue;
                                     }
@@ -289,7 +289,7 @@ impl Execution<'_> {
                         if let Some(format) = &rules.format {
                             match format.eval(value) {
                                 Unsupported => return Err(Unsupported),
-                                Invalid => report.add("format", source, value, 0)?,
+                                Invalid => report.add(self.caches, "format", source, value, 0)?,
                                 Valid => {}
                             }
                         }
@@ -297,6 +297,7 @@ impl Execution<'_> {
                             match content.eval(self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => report.add(
+                                    self.caches,
                                     if content.base64 {
                                         "contentEncoding"
                                     } else {
@@ -316,7 +317,7 @@ impl Execution<'_> {
                         return Err(Unsupported);
                     }
                     if *required != 0 && kind != TYPE_ARRAY {
-                        report.add("type", source, value, 0)?;
+                        report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind != TYPE_ARRAY {
                         continue;
@@ -324,15 +325,15 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxItems", source, value, len)?;
+                        report.add(self.caches, "maxItems", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minItems", source, value, len)?;
+                        report.add(self.caches, "minItems", source, value, len)?;
                     }
                     if rules.unique {
                         match unique(value, depth, self.fixnum_flag, &self.budget) {
                             Unsupported => return Err(Unsupported),
-                            Invalid => report.add("uniqueItems", source, value, 0)?,
+                            Invalid => report.add(self.caches, "uniqueItems", source, value, 0)?,
                             Valid => {}
                         }
                     }
@@ -540,7 +541,7 @@ impl Execution<'_> {
                         )?;
                         if bounds(matches, Some(rules.min_contains), rules.max_contains) == Invalid
                         {
-                            report.add("contains", source, value, matches)?;
+                            report.add(self.caches, "contains", source, value, matches)?;
                         }
                     }
                     if let Some(child) = rules
@@ -575,7 +576,7 @@ impl Execution<'_> {
                         return Err(Unsupported);
                     }
                     if *required != 0 && kind != TYPE_OBJECT {
-                        report.add("type", source, value, 0)?;
+                        report.add(self.caches, "type", source, value, 0)?;
                     }
                     if kind != TYPE_OBJECT {
                         continue;
@@ -583,17 +584,17 @@ impl Execution<'_> {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
-                        report.add("maxProperties", source, value, len)?;
+                        report.add(self.caches, "maxProperties", source, value, len)?;
                     }
                     if rules.min.is_some_and(|min| len < min) {
-                        report.add("minProperties", source, value, len)?;
+                        report.add(self.caches, "minProperties", source, value, len)?;
                     }
                     for &name in &rules.required_order {
                         if !self.budget.checkpoint() {
                             return Err(Unsupported);
                         }
                         if missing(value, name, self.undefined) {
-                            report.add("required", source, name, 0)?;
+                            report.add(self.caches, "required", source, name, 0)?;
                         }
                     }
                     let mut context = ObjectDiagnostics {
@@ -648,7 +649,13 @@ impl Execution<'_> {
                                         return Err(Unsupported);
                                     }
                                     if missing(value, required, self.undefined) {
-                                        report.add(keyword, (source.0, *name), required, 0)?;
+                                        report.add(
+                                            self.caches,
+                                            keyword,
+                                            (source.0, *name),
+                                            required,
+                                            0,
+                                        )?;
                                     }
                                 }
                             }
@@ -657,19 +664,9 @@ impl Execution<'_> {
                                     continue;
                                 }
                                 if tracked {
-                                    let result = report.scoped(
-                                        &format!("{keyword}/{}", pointer_name(*name)?),
-                                        None,
-                                        |r| {
-                                            self.collect::<true>(
-                                                r,
-                                                *child,
-                                                value,
-                                                depth + 1,
-                                                active,
-                                            )
-                                        },
-                                    )?;
+                                    let result = report.schema_name(keyword, *name, |r| {
+                                        self.collect::<true>(r, *child, value, depth + 1, active)
+                                    })?;
                                     if result.status == Valid {
                                         coverage.merge(result);
                                     }
@@ -679,19 +676,9 @@ impl Execution<'_> {
                                     depth + 1,
                                     active,
                                 )? {
-                                    report.scoped(
-                                        &format!("{keyword}/{}", pointer_name(*name)?),
-                                        None,
-                                        |r| {
-                                            self.collect::<false>(
-                                                r,
-                                                *child,
-                                                value,
-                                                depth + 1,
-                                                active,
-                                            )
-                                        },
-                                    )?;
+                                    report.schema_name(keyword, *name, |r| {
+                                        self.collect::<false>(r, *child, value, depth + 1, active)
+                                    })?;
                                 }
                             }
                         }
@@ -776,7 +763,13 @@ impl Execution<'_> {
                         }
                     };
                     if !branch_kind.accepts(result.matches) {
-                        report.add(branch_kind.keyword(), source, value, result.matches)?;
+                        report.add(
+                            self.caches,
+                            branch_kind.keyword(),
+                            source,
+                            value,
+                            result.matches,
+                        )?;
                     } else if tracked {
                         prior.merge_diagnostics(result.coverage)?;
                     }
@@ -784,7 +777,7 @@ impl Execution<'_> {
                 Op::Not(child) => {
                     match self.eval_with_kind(*child, value, depth + 1, active, Some(kind)) {
                         Unsupported => return Err(Unsupported),
-                        Valid => report.add("not", source, value, 0)?,
+                        Valid => report.add(self.caches, "not", source, value, 0)?,
                         Invalid => {}
                     }
                 }
@@ -985,6 +978,8 @@ pub struct Record {
     instance_len: usize,
     schema_path: *const u8,
     schema_len: usize,
+    instance_pointer: Value,
+    schema_pointer: Value,
     opcode: i32,
     operand: Value,
     instance: Value,
@@ -1093,11 +1088,11 @@ pub unsafe extern "C" fn sn_report_size(report: *const Report) -> usize {
     let r = unsafe { &*report };
     std::mem::size_of::<Report>()
         + r.errors.capacity() * std::mem::size_of::<Error>()
-        + r.instance_path.capacity()
-        + r.schema_path.capacity()
+        + r.instance_path.memory_usage()
+        + r.schema_path.memory_usage()
         + r.errors
             .iter()
-            .map(|e| e.instance_path.capacity() + e.schema_path.capacity())
+            .map(|e| e.instance_path.memory_usage() + e.schema_path.memory_usage())
             .sum::<usize>()
 }
 /// # Safety
@@ -1113,10 +1108,12 @@ pub unsafe extern "C" fn sn_report_record(
         *record = Record {
             keyword: e.keyword.as_ptr(),
             keyword_len: e.keyword.len(),
-            instance_path: e.instance_path.as_ptr(),
-            instance_len: e.instance_path.len(),
-            schema_path: e.schema_path.as_ptr(),
-            schema_len: e.schema_path.len(),
+            instance_path: e.instance_path.bytes().as_ptr(),
+            instance_len: e.instance_path.bytes().len(),
+            schema_path: e.schema_path.bytes().as_ptr(),
+            schema_len: e.schema_path.bytes().len(),
+            instance_pointer: e.instance_path.value(),
+            schema_pointer: e.schema_path.value(),
             opcode: e.opcode,
             operand: e.operand,
             instance: e.instance,
@@ -1130,6 +1127,8 @@ pub unsafe extern "C" fn sn_report_record(
 pub unsafe extern "C" fn sn_report_mark(report: *const Report) {
     for error in &unsafe { &*report }.errors {
         unsafe {
+            sn_pin(error.instance_path.value());
+            sn_pin(error.schema_path.value());
             sn_pin(error.operand);
             sn_pin(error.instance);
         }

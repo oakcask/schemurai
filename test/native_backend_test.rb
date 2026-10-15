@@ -1603,6 +1603,121 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  def capture_pointer_validation(validator, method, value, **options)
+    outcome = capture_validation(validator, method, value, **options)
+    return outcome unless method == :validate && outcome.first == :result
+
+    [:result, outcome.last.map { |error| [error, error.instance_path.encoding, error.schema_path.encoding] }]
+  end
+
+  it "builds encoded diagnostic pointers through libruby without VM execution" do # rubocop:disable RSpec/ExampleLength
+    keys = ["a~/b", "é~/x", "é~/x".encode(Encoding::ISO_8859_1), "ミ~/x".encode(Encoding::Shift_JIS),
+      "\xff~/x".b, "a~/b".b, "a".encode(Encoding::UTF_16LE), "\xff".dup.force_encoding(Encoding::UTF_8),
+      "\xff".dup.force_encoding(Encoding::US_ASCII)]
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rule = {"additionalProperties" => false}
+    schemas = [rule, {"items" => rule}, {"additionalProperties" => rule},
+      {"propertyNames" => {"maxLength" => 0}}, dialect.merge("unevaluatedProperties" => false)]
+    values = keys.flat_map { |key| [{key => 1}, [{key => 1}], {"outer" => {key => 1}}, {key => {key => 1}}] }
+    values += [{"é" => {keys[2] => 1}}, {keys[2] => {"é" => 1}}, {keys[2] => {keys[3] => 1}}]
+    combinations = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}])
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), combinations.map do |value, method, options|
+        capture_pointer_validation(vm, method, value, **options)
+      end]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      combinations.zip(expected).each do |(value, method, options), result|
+        expect(capture_pointer_validation(native, method, value, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "retains encoded schema pointer names for properties and dependencies" do # rubocop:disable RSpec/ExampleLength
+    keys = ["é~/x".encode(Encoding::ISO_8859_1), "ミ~/x".encode(Encoding::Shift_JIS), "\xff~/x".b]
+    cases = keys.flat_map do |key|
+      schemas = [{"properties" => {key => false}}, {"dependencies" => {key => {"required" => ["missing"]}}},
+        {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentSchemas" => {key => {"required" => ["missing"]}}}]
+      schemas.map do |schema|
+        value = {key => 1}
+        vm = Schemurai.compile(schema, backend: :vm)
+        [Schemurai.compile(schema, backend: :native), value, capture_pointer_validation(vm, :validate, value)]
+      end
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, value, expected|
+      expect(capture_pointer_validation(native, :validate, value)).to eq(expected)
+      expect(capture_pointer_validation(native, :validate, value, timeout: 10)).to eq(expected)
+    end
+  end
+
+  it "raises pointer exceptions at the first recorded error before later regexp exceptions" do
+    incompatible = "a".encode(Encoding::UTF_16LE)
+    schema = {"properties" => {"later" => {"pattern" => "(?=a)a"}}, "additionalProperties" => false}
+    values = [{incompatible => 1, "later" => incompatible}, {"later" => incompatible, incompatible => 1}]
+    vm = Schemurai.compile(schema, backend: :vm)
+    native = Schemurai.compile(schema, backend: :native)
+    expected = values.map { |value| capture_pointer_validation(vm, :validate, value) }
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    values.zip(expected).each do |value, result|
+      expect(capture_pointer_validation(native, :validate, value)).to eq(result)
+      expect(capture_pointer_validation(native, :validate, value, timeout: 10)).to eq(result)
+    end
+  end
+
+  it "pins encoded pointer strings across compaction and clears observations between calls" do
+    key = "é~/x".encode(Encoding::ISO_8859_1)
+    native = Schemurai.compile({"additionalProperties" => false}, backend: :native)
+    helper = Schemurai.const_get(:Internal)::JsonPointer
+    allow(helper).to receive(:escape).and_wrap_original do |original, segment|
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      original.call(segment)
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    value = {key => 1}
+    expect(native.validate(value).errors.first.instance_path).to eq("/é~0~1x".encode(Encoding::ISO_8859_1))
+    value.clear
+    value["ミ".encode(Encoding::Shift_JIS)] = 1
+    result = native.validate(value, timeout: 10)
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    expect(result.errors.first.instance_path).to eq("/ミ".encode(Encoding::Shift_JIS))
+    expect(native.validate({}).errors).to be_empty
+  end
+
+  it "returns independently mutable encoded paths for repeated errors" do
+    schema = {"additionalProperties" => {"allOf" => [false, false]}}
+    key = "é".encode(Encoding::ISO_8859_1)
+    native = Schemurai.compile(schema, backend: :native)
+    expected = Schemurai.compile(schema, backend: :vm).validate({key => 1}).errors
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    errors = native.validate({key => 1}).errors
+    expect(errors).to eq(expected)
+    errors.first.instance_path.replace("changed")
+    expect(errors.last.instance_path).to eq("/é".encode(Encoding::ISO_8859_1))
+    expect(native.validate({key => 1}).errors).to eq(expected)
+  end
+
+  it "keeps encoded diagnostic pointer requests private to each Ractor" do
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:pointers" => {"additionalProperties" => false}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:pointers")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        key = "é".encode(Encoding::ISO_8859_1)
+        GC.start
+        first = runner.diagnostics({key => 1}).first
+        second = runner.diagnostics({"\xff".b => 1}).first
+        [first[1], first[1].encoding, first[2], second[1], second[1].encoding]
+      end
+    end
+    expected = ["/é".encode(Encoding::ISO_8859_1), Encoding::ISO_8859_1, "/additionalProperties", "/\xff".b, Encoding::ASCII_8BIT]
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq(expected) }
+  end
+
   it "pins diagnostic operands and instances during GC stress and compaction" do
     validator = Schemurai.compile({"items" => {"type" => "string", "minLength" => 4}}, backend: :native)
     instance = ["a".dup, "b".dup]
@@ -3571,14 +3686,15 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "retains the native duration deadline across Ruby assertion retries" do
-    cases = [[{"pattern" => "(?=a)a"}, Array.new(20_000) { |i| "a#{i}" }, "a"],
-      [{"contentMediaType" => "application/json"}, Array.new(20_000) { |i| "[#{i}]".encode(Encoding::UTF_16LE) }, "[]".encode(Encoding::UTF_16LE)]]
+    cases = [[{"pattern" => "(?=a)a"}, Array.new(20_000) { |i| "a#{i}" }, "a", [:valid?, :validate]],
+      [{"contentMediaType" => "application/json"}, Array.new(20_000) { |i| "[#{i}]".encode(Encoding::UTF_16LE) }, "[]".encode(Encoding::UTF_16LE), [:valid?, :validate]],
+      [{"additionalProperties" => false}, Array.new(20_000) { {"é".encode(Encoding::ISO_8859_1) => 1} }, {}, [:validate]]]
+    cases.map! { |rule, values, valid, methods| [Schemurai.compile({"items" => rule}, content: true, backend: :native), values, valid, methods] }
     allow(Process).to receive(:clock_gettime).and_call_original
     allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
     allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
-    cases.each do |rule, values, valid|
-      native = Schemurai.compile({"items" => rule}, content: true, backend: :native)
-      [:valid?, :validate].each do |method|
+    cases.each do |native, values, valid, methods|
+      methods.each do |method|
         expect { native.public_send(method, values, timeout: 0.005) }.to raise_error(Schemurai::LimitExceeded) { |error| expect(error.limit).to eq(:timeout) }
       end
       expect(native.valid?([valid], timeout: 10)).to be(true)

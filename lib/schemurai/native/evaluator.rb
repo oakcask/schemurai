@@ -2,6 +2,7 @@
 
 require_relative "../vm/limited_evaluator"
 require_relative "../ecma_regexp"
+require_relative "../json_pointer"
 require "schemurai_native"
 require_relative "diagnostics"
 
