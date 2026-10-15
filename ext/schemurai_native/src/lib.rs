@@ -2511,6 +2511,7 @@ fn fingerprint_cached(
     }
     let result = match kind {
         TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
+        TYPE_IDENTITY_SCALAR => Some(mix(value as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
         TYPE_NULL => Some(mix(TYPE_NULL as u64)),
         TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
             2
