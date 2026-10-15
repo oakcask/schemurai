@@ -970,29 +970,9 @@ impl Engine {
         // Cyclic candidates can reuse results only under an exact guard/scope
         // context. Propagate unsupported instructions and nested iteration
         // through reverse edges without a per-candidate graph walk.
-        let mut parents = vec![vec![]; edges.len()];
-        for (parent, children) in edges.iter().enumerate() {
-            for &child in children {
-                parents[child].push(parent);
-            }
-        }
-        fn propagate(flags: &mut [bool], parents: &[Vec<usize>]) {
-            let mut queue: std::collections::VecDeque<_> = flags
-                .iter()
-                .enumerate()
-                .filter_map(|(node, &set)| set.then_some(node))
-                .collect();
-            while let Some(node) = queue.pop_front() {
-                for &parent in &parents[node] {
-                    if !flags[parent] {
-                        flags[parent] = true;
-                        queue.push_back(parent);
-                    }
-                }
-            }
-        }
-        propagate(&mut unsupported, &parents);
-        propagate(&mut repeated_subtree, &parents);
+        let parents = graph::parents(&edges);
+        graph::propagate(&mut unsupported, &parents);
+        graph::propagate(&mut repeated_subtree, &parents);
         // Iterative Kosaraju analysis identifies the only active sources
         // whose guards can affect descendants: sources lying on a schema cycle.
         fn cycle_nodes(edges: &[Vec<usize>], parents: &[Vec<usize>]) -> Vec<bool> {
@@ -1074,19 +1054,10 @@ impl Engine {
                 }
             }
         }
-        fn reverse(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
-            let mut parents = vec![vec![]; edges.len()];
-            for (parent, children) in edges.iter().enumerate() {
-                for &child in children {
-                    parents[child].push(parent);
-                }
-            }
-            parents
-        }
-        let scalar_parents = reverse(&same_edges);
+        let scalar_parents = graph::parents(&same_edges);
         self.memo_guard_scalar_sources =
             cycle_nodes(&same_edges, &scalar_parents)[..count].to_vec();
-        propagate(&mut scalar_refs, &scalar_parents);
+        graph::propagate(&mut scalar_refs, &scalar_parents);
         let mut scalar_amplification = vec![false; edges.len()];
         for (node, ops) in self.nodes.iter().enumerate() {
             for op in ops {
@@ -1108,7 +1079,7 @@ impl Engine {
                 scalar_amplification[node] |= references > 1;
             }
         }
-        propagate(&mut scalar_amplification, &scalar_parents);
+        graph::propagate(&mut scalar_amplification, &scalar_parents);
         self.memo_guard_scalar_amplification = scalar_amplification[..count].to_vec();
         // Object dependencies keep the same value; all other container child
         // edges change positions. Scalar/array inputs cannot take dependencies.
@@ -1121,7 +1092,7 @@ impl Engine {
             }
         }
         self.memo_guard_same_sources =
-            cycle_nodes(&same_edges, &reverse(&same_edges))[..count].to_vec();
+            cycle_nodes(&same_edges, &graph::parents(&same_edges))[..count].to_vec();
         self.memo_guard_sources = cyclic[..count].to_vec();
         self.memo_guarded = vec![false; count];
         for node in 0..count {

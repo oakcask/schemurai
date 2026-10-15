@@ -26,43 +26,32 @@ pub(super) fn postorder(edges: &[Vec<usize>], seen: &mut [bool]) -> Vec<usize> {
     order
 }
 
-// A functional graph has at most one outgoing edge per node. Return lengths
-// only for cycle members, leaving prefixes and terminal paths unproven. Each
-// path is visited once, and a finished marker prevents stale walk positions
-// from treating a shared tail as another cycle.
-pub(super) fn functional_cycle_lengths(next: &[Option<usize>]) -> Vec<Option<usize>> {
-    let mut lengths = vec![None; next.len()];
-    let mut positions = vec![usize::MAX; next.len()];
-    for root in 0..next.len() {
-        if positions[root] != usize::MAX || next[root].is_none() {
-            continue;
-        }
-        let mut path = vec![];
-        let mut node = root;
-        loop {
-            let position = positions[node];
-            if position == usize::MAX - 1 {
-                break;
-            }
-            if position != usize::MAX {
-                let length = path.len() - position;
-                for &member in &path[position..] {
-                    lengths[member] = Some(length);
-                }
-                break;
-            }
-            positions[node] = path.len();
-            path.push(node);
-            let Some(child) = next[node] else {
-                break;
-            };
-            node = child;
-        }
-        for node in path {
-            positions[node] = usize::MAX - 1;
+pub(super) fn parents(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut parents = vec![vec![]; edges.len()];
+    for (parent, children) in edges.iter().enumerate() {
+        for &child in children {
+            parents[child].push(parent);
         }
     }
-    lengths
+    parents
+}
+
+// Reachability flags flow from children to parents, including through cycles.
+// Each newly marked node enters the queue once.
+pub(super) fn propagate(flags: &mut [bool], parents: &[Vec<usize>]) {
+    let mut queue: std::collections::VecDeque<_> = flags
+        .iter()
+        .enumerate()
+        .filter_map(|(node, &set)| set.then_some(node))
+        .collect();
+    while let Some(node) = queue.pop_front() {
+        for &parent in &parents[node] {
+            if !flags[parent] {
+                flags[parent] = true;
+                queue.push_back(parent);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -79,17 +68,12 @@ mod tests {
     }
 
     #[test]
-    fn functional_cycles_exclude_prefixes_and_shared_terminal_tails() {
-        assert_eq!(
-            functional_cycle_lengths(&[Some(1), Some(2), Some(1), Some(2), Some(4), None, Some(5)]),
-            [None, Some(2), Some(2), None, Some(1), None, None]
-        );
-        let count = 100_000;
-        let mut next: Vec<_> = (1..count).map(Some).collect();
-        next.push(Some(count - 1));
-        let result = functional_cycle_lengths(&next);
-        assert!(result[..count - 1].iter().all(Option::is_none));
-        assert_eq!(result[count - 1], Some(1));
+    fn flags_propagate_through_cycles_without_marking_disconnected_nodes() {
+        let parents = vec![vec![2], vec![0], vec![1, 3], vec![], vec![4]];
+        let mut flags = vec![false, true, false, false, false];
+        propagate(&mut flags, &parents);
+        assert_eq!(flags, [true, true, true, true, false]);
+        propagate(&mut [], &[]);
     }
 
     #[test]

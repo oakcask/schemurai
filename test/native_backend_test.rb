@@ -1811,6 +1811,13 @@ RSpec.describe "native VALUE execution" do
     cases = schemas.product([nil] + (1..20).to_a, [{timeout: 10}, {max_errors: 0}], ["a", "b", ["a"], %w[a b], {"x" => "a"}, {"x" => "b", "y" => "a"}]).map do |schema, fail_at, options, text|
       [schema, fail_at, options, text, run.call(:vm, schema, fail_at, options, text)]
     end
+    definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? leaf : {"$ref" => "#/$defs/n#{index + 1}"}] }
+    deep = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+            "contains" => {"$id" => "urn:contains-deep", "$defs" => definitions, "$ref" => "#/$defs/n0"}}
+    [nil, 511, 513, 515].product([{timeout: 10}, {max_errors: 0}], ["a", "b"]).each do |fail_at, options, text|
+      cases << [deep, fail_at, options, text, run.call(:vm, deep, fail_at, options, text)]
+    end
+    expect(cases.find { |schema, fail_at, _options, _text, _expected| schema.equal?(deep) && fail_at == 515 }.last.last).to include([:rescue, "checkpoint 515"])
     expect(cases.first.last.last).to include(:checkpoint)
     expect(cases.find { |_schema, fail_at, _options, _text, _expected| fail_at == 1 }.last.last).to include([:rescue, "checkpoint 1"])
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -1847,7 +1854,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "keeps static alias cycle callbacks within the native depth bound" do # rubocop:disable RSpec/ExampleLength
+  it "continues static alias cycle callbacks across native stack boundaries" do # rubocop:disable RSpec/ExampleLength
     array = Class.new(Array) do
       attr_reader :calls
 
@@ -1856,19 +1863,138 @@ RSpec.describe "native VALUE execution" do
         super
       end
     end
-    [254, 255].each do |length|
+    [254, 255, 512].each do |length|
       definitions = length.times.to_h { |index| ["n#{index}", {"$ref" => "#/$defs/n#{(index + 1) % length}"}] }
       schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions,
                 "contains" => {"$ref" => "#/$defs/n0"}}
       validator = Schemurai.compile(schema, backend: :native)
       program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
       input = array.new([nil])
-      if length == 254
-        expect(program.valid?(input)).to be(true)
-        expect(input.calls).to eq(1)
+      expect(program.valid?(input)).to be(true)
+      expect(input.calls).to eq(1)
+    end
+  end
+
+  it "continues deep untracked validity through native runners without VM execution" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :saved, :calls
+
+      def count(&block)
+        @saved = block
+        @calls = (@calls || 0) + 1
+        super
+      end
+    end
+    leaves = [{"type" => "integer"}, {"contains" => {"type" => "integer"}},
+      {"allOf" => [{"type" => "integer"}, {"minimum" => 0}]}]
+    cases = leaves.product([255, 256, 512]).map do |leaf, length|
+      definitions = length.times.to_h { |index| ["n#{index}", (index == length - 1) ? leaf : {"$ref" => "#/$defs/n#{index + 1}"}] }
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions, "$ref" => "#/$defs/n0"}
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = [1, "a", array.new([1]), array.new(["a"])].product([{}, {timeout: 10}, {max_errors: 0}]).map do |value, options|
+        result = capture_validation(vm, :valid?, value, **options)
+        saved = value.saved if value.respond_to?(:saved)
+        later = capture_validation(saved, :call, "a") if saved
+        [value, options, result, later]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each do |value, options, result, later|
+        input = value.is_a?(array) ? array.new(value) : value
+        expect(capture_validation(native, :valid?, input, **options)).to eq(result), [schema, options].inspect
+        expect(input.calls).to eq(1) if input.respond_to?(:calls) && input.saved
+        expect(capture_validation(input.saved, :call, "a")).to eq(later) if input.respond_to?(:saved) && input.saved
+      end
+    end
+  end
+
+  it "inherits scope and Ruby observations across native validity continuations" do # rubocop:disable RSpec/ExampleLength
+    string = Class.new(String) do
+      attr_reader :calls
+      attr_accessor :explode
+
+      def is_a?(type)
+        (@calls ||= []) << type.name
+        raise ArgumentError, "deep string type" if @explode && type == String
+
+        super
+      end
+    end
+    run = lambda do |backend, scoped, options, explode|
+      value = string.new("a")
+      value.explode = explode
+      leaf = if scoped
+        {"$id" => "urn:deep-base", "$defs" => {"x" => {"$dynamicAnchor" => "x", "type" => "integer"}},
+         "properties" => {"v" => {"$dynamicRef" => "#x"}}}
       else
-        expect(program.valid?(input)).to be_nil
-        expect(input.calls).to be_nil
+        {"type" => "string"}
+      end
+      input = scoped ? Class.new(Hash)["v", value] : value
+      definitions = {"x" => {"$dynamicAnchor" => "x", "type" => "string"}}
+      300.times do |index|
+        definitions["n#{index}"] = leaf
+        leaf = {"$ref" => "#/$defs/n#{index}"}
+        input = [input] unless scoped
+        leaf = {"items" => leaf} unless scoped
+      end
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$id" => "urn:deep-scope", "$defs" => definitions}.merge(leaf)
+      validator = Schemurai.compile(schema, backend: backend)
+      result = capture_validation(validator, :valid?, input, **options)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      value.explode = false
+      after = capture_validation(validator, :valid?, input, **options)
+      [result, after, value.calls]
+    end
+    cases = [false, true].product([{}, {timeout: 10}], [false, true]).map do |scoped, options, explode|
+      [scoped, options, explode, run.call(:vm, scoped, options, explode)]
+    end
+    expect(cases.map { |entry| entry.last[1] }).to all(eq([:result, true]))
+    expect(cases.select { |entry| entry[2] }.map { |entry| entry.last.first }).to all(eq([:error, ArgumentError, "deep string type"]))
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |scoped, options, explode, expected| expect(run.call(:native, scoped, options, explode)).to eq(expected) }
+  end
+
+  it "executes recursive validity graphs through native continuations and callbacks" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    reference = {"$ref" => "#/$defs/node"}
+    logical = {"allOf" => [reference, {"type" => "integer"}]}
+    positional = {"anyOf" => [{"type" => "integer"}, {"type" => "array", "items" => reference},
+      {"type" => "object", "properties" => {"v" => reference}}]}
+    schemas = [{"$defs" => {"node" => logical}, "contains" => reference},
+      {"$defs" => {"node" => logical}, "items" => reference},
+      {"$defs" => {"node" => logical}, "properties" => {"v" => reference}},
+      {"$defs" => {"node" => positional}, "$ref" => "#/$defs/node"},
+      {"$defs" => {"node" => {"$dynamicAnchor" => "x", "allOf" => [{"$dynamicRef" => "#x"}, {"type" => "integer"}]}},
+       "contains" => {"$dynamicRef" => "#x"}}].map { |schema| dialect.merge(schema) }
+    schemas << {"$schema" => "https://json-schema.org/draft/2019-09/schema", "$recursiveAnchor" => true,
+                "contains" => {"$recursiveRef" => "#"}}
+    array = Class.new(Array)
+    object = Class.new(Hash)
+    cyclic_array = array.new
+    cyclic_array << cyclic_array
+    cyclic_object = object.new
+    cyclic_object["v"] = cyclic_object
+    values = [array.new([1]), array.new(["a"]), array.new([array.new([1])]), object["v", 1], object["v", "a"],
+      cyclic_array, cyclic_object]
+    deep = 1
+    300.times { deep = [deep] }
+    values << deep
+    cases = schemas.map do |schema|
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([{}, {timeout: 10}, {max_errors: 0}]).map do |value, options|
+        [value, options, capture_validation(vm, :valid?, value, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each do |value, options, result|
+        expect(capture_validation(native, :valid?, value, **options)).to eq(result), [schema, options].inspect
       end
     end
   end
@@ -1897,12 +2023,8 @@ RSpec.describe "native VALUE execution" do
       [{"allOf" => [rule, {"items" => {"unevaluatedProperties" => true}}]}, ->(value) { value }],
       [{"items" => {"allOf" => [rule, {"unevaluatedProperties" => true}]}}, ->(value) { [value] }],
       [{"properties" => {"v" => rule}, "unevaluatedProperties" => true}, ->(value) { {"v" => value} }],
-      [{"$defs" => {"loop" => {"allOf" => [{"$ref" => "#/$defs/loop"}]}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }],
       [{"contains" => {"anyOf" => [true, {"unevaluatedProperties" => true}]}}, ->(value) { value }],
-      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"unevaluatedProperties" => true}}, ->(value) { value }],
-      [{"$defs" => {"loop" => {"allOf" => [{"$ref" => "#/$defs/loop"}]}}, "contains" => {"$ref" => "#/$defs/loop"}}, ->(value) { value }],
-      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"x" => {"$dynamicAnchor" => "x", "$dynamicRef" => "#x"}},
-        "contains" => {"$dynamicRef" => "#x"}}, ->(value) { value }]
+      [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"unevaluatedProperties" => true}}, ->(value) { value }]
     ]
     cases.each do |schema, wrap|
       schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema)
