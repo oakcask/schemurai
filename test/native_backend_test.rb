@@ -1233,6 +1233,8 @@ RSpec.describe "native VALUE execution" do
       fake, BasicObject.new, [1, "a"], nil, {Object.new => 1}]
     children = [true, false, {"type" => "integer"}, {"type" => %w[number string]}, {"type" => "array"},
       {"type" => "null"}, {"type" => "boolean"}, {"type" => "number"}, {"type" => "string"}, {"type" => "object"},
+      {"type" => "integer", "const" => 1}, {"type" => %w[integer string], "enum" => [1, "a"], "const" => "a"},
+      {"type" => "string", "const" => "a", "minLength" => 2}, {"enum" => [1, "a"], "maximum" => 0},
       {"maximum" => 0}, {"type" => "number", "multipleOf" => 0.1},
       {"minLength" => 2, "pattern" => "^a", "format" => "ipv4"},
       {"contentEncoding" => "base64", "contentMediaType" => "application/json"}, {"const" => [1]}, {"enum" => [1, "a"]}]
@@ -1262,6 +1264,71 @@ RSpec.describe "native VALUE execution" do
       expected.each_with_index do |(input, options, outcome), index|
         expect(capture_validation(native, :valid?, input, **options)).to eq(outcome), [schema, options, index].inspect
       end
+    end
+  end
+
+  it "preserves checkpoints and rescued exceptions between contains child instructions" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      def initialize(state, value)
+        super([value])
+        @state = state
+      end
+
+      def any?
+        @state[:active] = true
+        yield first
+      rescue ArgumentError => error
+        @state[:calls] << [:rescue, error.message]
+        true
+      ensure
+        @state[:active] = false
+        @state[:calls] << :ensure
+      end
+    end
+    string = Class.new(String) do
+      def initialize(calls, text)
+        super(text)
+        @calls = calls
+      end
+
+      def is_a?(type)
+        @calls << [:is_a?, type]
+        super
+      end
+
+      def ==(other)
+        @calls << [:equal, other]
+        super
+      end
+    end
+    state = nil
+    budget_class = Schemurai.const_get(:Internal)::LimitBudget
+    allow(budget_class).to receive(:new).and_wrap_original do |original, **options|
+      budget = original.call(**options)
+      allow(budget).to receive(:checkpoint).and_wrap_original do |checkpoint|
+        if state[:active]
+          state[:checks] += 1
+          state[:calls] << :checkpoint
+          raise ArgumentError, "checkpoint #{state[:checks]}" if state[:checks] == state[:fail_at]
+        end
+        checkpoint.call
+      end
+      budget
+    end
+    schema = {"contains" => {"type" => "string", "enum" => ["a"], "const" => "a", "minLength" => 1}}
+    run = lambda do |backend, fail_at, options, text|
+      state = {calls: [], checks: 0, fail_at: fail_at, active: false}
+      value = array.new(state, string.new(state[:calls], text))
+      outcome = capture_validation(Schemurai.compile(schema, backend: backend), :valid?, value, **options)
+      [outcome, state[:calls]]
+    end
+    cases = ([nil] + (1..7).to_a).product([{timeout: 10}, {max_errors: 0}], %w[a b]).map do |fail_at, options, text|
+      [fail_at, options, text, run.call(:vm, fail_at, options, text)]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |fail_at, options, text, expected|
+      expect(run.call(:native, fail_at, options, text)).to eq(expected), [fail_at, options, text].inspect
     end
   end
 

@@ -933,6 +933,10 @@ static VALUE call_runtime(VALUE context) {
         || operation->kind >= SN_RUNTIME_ARRAY_HEADER || sn_caches_frame_error(r->caches)
         || r->callback_context || operation->kind == SN_RUNTIME_SCALAR_CONTAINS;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
+        return Qtrue;
+    }
     if (operation->kind == SN_RUNTIME_SCALAR_CONTAINS) {
         contains_arguments arguments;
         sn_contains_arguments(r->caches, &arguments);

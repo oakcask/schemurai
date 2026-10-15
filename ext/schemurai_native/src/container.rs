@@ -218,20 +218,24 @@ impl Engine {
             .iter()
             .any(|op| matches!(op, Op::Array(_, rules) if self.scalar_contains(rules)))
     }
-    // Scalar children need neither inherited reference bindings nor exported
+    // Scalar instruction sequences need neither inherited reference bindings nor exported
     // annotations. This proof keeps the first callback protocol self-contained.
     pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
         rules.has_no_item_schemas()
             && rules.contains.is_some_and(|child| {
-                matches!(
-                    self.nodes[child].as_slice(),
-                    [Op::Boolean(_)
-                        | Op::Type(..)
-                        | Op::Number(..)
-                        | Op::String(..)
-                        | Op::Const(_)
-                        | Op::Enum(_)]
-                )
+                let ops = &self.nodes[child];
+                !ops.is_empty()
+                    && ops.iter().all(|op| {
+                        matches!(
+                            op,
+                            Op::Boolean(_)
+                                | Op::Type(..)
+                                | Op::Number(..)
+                                | Op::String(..)
+                                | Op::Const(_)
+                                | Op::Enum(_)
+                        )
+                    })
             })
     }
     pub(super) fn container_header(
