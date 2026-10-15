@@ -54,23 +54,31 @@ RSpec.describe "native VALUE execution" do
     expect(validator.validate([], max_errors: 0, timeout: nil).valid?).to be(true)
   end
 
-  it "retains the original duration deadline when native transfers to VM", :aggregate_failures do
+  it "retains the original duration deadline through unresolved container callbacks", :aggregate_failures do
     schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "type" => "object", "minProperties" => 0,
               "properties" => {"x" => {"$ref" => "urn:missing-limit"}}, "unevaluatedProperties" => true}
-    validator = Schemurai.compile(schema, backend: :native)
-    value = Class.new(Hash).new
-    allow(Process).to receive(:clock_gettime).and_call_original
-    allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
-    vm = Schemurai.const_get(:VM).const_get(:LimitedEvaluator)
-    allow(vm).to receive(:new).and_wrap_original do |original, *args, **options|
-      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2)
-      original.call(*args, **options)
+    value_class = Class.new(Hash) do
+      attr_accessor :advance_clock
+
+      def each(&block)
+        advance_clock.call
+        super
+      end
     end
-    expect { validator.valid?(value, timeout: 0.1) }.to raise_error(Schemurai::LimitExceeded) { |error|
-      expect(error.limit).to eq(:timeout)
-      expect(error.attempted).to eq(0.2)
-    }
-    expect(vm).to have_received(:new).once
+    allow(Process).to receive(:clock_gettime).and_call_original
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    [:valid?, :validate].each do |method|
+      allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+      value = value_class["x", 1]
+      value.advance_clock = -> { allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2) }
+      validator = Schemurai.compile(schema, backend: :native)
+      expect { validator.public_send(method, value, timeout: 0.1) }.to raise_error(Schemurai::LimitExceeded) { |error|
+        expect(error.limit).to eq(:timeout)
+        expect(error.attempted).to eq(0.2)
+      }
+    end
   end
 
   it "includes Ruby message rendering in the original duration budget", :aggregate_failures do
@@ -2614,7 +2622,7 @@ RSpec.describe "native VALUE execution" do
     cases.zip(expected).each { |(value, method, options), result| expect(run.call(:native, value, method, options)).to eq(result) }
   end
 
-  it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength
+  it "runs report continuations with later unresolved container children without replaying Ruby calls" do # rubocop:disable RSpec/ExampleLength
     string = Class.new(String) do
       attr_reader :calls
 
@@ -2626,10 +2634,8 @@ RSpec.describe "native VALUE execution" do
     definitions = 260.times.to_h { |index| ["n#{index}", (index == 259) ? {"type" => "integer"} : {"$ref" => "#/$defs/n#{index + 1}"}] }
     schema = {"$defs" => definitions, "allOf" => [{"$ref" => "#/$defs/n0"}, {"properties" => {"v" => {"$ref" => "urn:missing-child"}}}]}
     native = Schemurai.compile(schema, backend: :native)
-    input = string.new("a")
-    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(program.diagnostics(input)).to be_nil
-    expect(input.calls).to be_nil
+    evaluator = native.instance_variable_get(:@evaluator)
+    allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
     results = [:vm, :native].map do |backend|
       value = string.new("a")
       validator = (backend == :native) ? native : Schemurai.compile(schema, backend: backend)
@@ -2726,7 +2732,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "declines contains callbacks before a later unsupported traversal can replay them" do # rubocop:disable RSpec/ExampleLength
+  it "runs contains callbacks with later unresolved traversals without replaying them" do # rubocop:disable RSpec/ExampleLength
     klass = Class.new(Array) do
       attr_reader :calls
 
@@ -2756,14 +2762,17 @@ RSpec.describe "native VALUE execution" do
     cases.each do |schema, wrap|
       schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema)
       native = Schemurai.compile(schema, backend: :native)
-      value = klass.new
-      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-      expect(program.valid?(wrap.call(value))).to be_nil, schema.inspect
-      expect(value.calls).to be_empty
-      expected_value = klass.new
-      expected = capture_validation(Schemurai.compile(schema, backend: :vm), :valid?, wrap.call(expected_value))
-      expect(capture_validation(native, :valid?, wrap.call(value))).to eq(expected)
-      expect(value.calls).to eq(expected_value.calls)
+      evaluator = native.instance_variable_get(:@evaluator)
+      allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+      allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
+      allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+      [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}]).each do |method, options|
+        value = klass.new
+        expected_value = klass.new
+        expected = capture_validation(Schemurai.compile(schema, backend: :vm), method, wrap.call(expected_value), **options)
+        expect(capture_validation(native, method, wrap.call(value), **options)).to eq(expected)
+        expect(value.calls).to eq(expected_value.calls)
+      end
     end
   end
 
@@ -6763,6 +6772,41 @@ RSpec.describe "native VALUE execution" do
     expect_native_policy_results(schemas, [nil, 1, "bad", [], [1, 2], {}, {"a/b~c" => 1}])
   end
 
+  it "executes unresolved reference children in special containers without VM execution" do # rubocop:disable RSpec/ExampleLength
+    missing = {"$ref" => "urn:missing-container-child"}
+    rules = [{"items" => missing}, {"prefixItems" => [missing]}, {"contains" => missing},
+      {"properties" => {"x" => missing}}, {"patternProperties" => {"^x" => missing}},
+      {"propertyNames" => missing}, {"additionalProperties" => missing},
+      {"dependentSchemas" => {"x" => missing}}, {"unevaluatedProperties" => missing}, {"unevaluatedItems" => missing}]
+    schemas = rules.flat_map do |rule|
+      [rule, {"allOf" => [true, rule]}, {"anyOf" => [rule, false]}, {"oneOf" => [rule, true]},
+        {"if" => rule, "then" => false}, {"$defs" => {"value" => rule}, "$ref" => "#/$defs/value"}]
+        .map { |schema| {"$schema" => "https://json-schema.org/draft/2020-12/schema"}.merge(schema) }
+    end
+    hash = Class.new(Hash)
+    array = Class.new(Array)
+    values = [hash.new, hash["x", 1], hash[:x, 1], array.new, array.new([1]), array.new([hash["x", 1]])]
+    [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}].each do |options|
+      cases = schemas.map do |schema|
+        vm = Schemurai.compile(schema, backend: :vm)
+        native = Schemurai.compile(schema, backend: :native)
+        evaluator = native.instance_variable_get(:@evaluator)
+        allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+        allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
+        allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+        [native, values.product([:valid?, :validate]).map do |value, method|
+          [value, method, capture_validation(vm, method, value, **options)]
+        end]
+      end
+      GC.verify_compaction_references(double_heap: true, toward: :empty)
+      cases.each do |native, expected|
+        expected.each do |value, method, outcome|
+          expect(capture_validation(native, method, value, **options)).to eq(outcome)
+        end
+      end
+    end
+  end
+
   it "enforces limits on unresolved reference diagnostics without VM execution" do
     validator = Schemurai.compile({"$ref" => "urn:missing"}, backend: :native)
     allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
@@ -6787,6 +6831,30 @@ RSpec.describe "native VALUE execution" do
     expect(validator.validate(1).errors).to be_empty
     expect(validator.valid?("bad")).to be(false)
     expect(validator.validate("bad").errors.first.keyword).to eq("type")
+  end
+
+  it "refreshes unresolved special-container children after registration without VM execution" do # rubocop:disable RSpec/ExampleLength
+    schemas = [{"items" => {"$ref" => "urn:late-child"}}, {"properties" => {"x" => {"$ref" => "urn:late-child"}}},
+      {"contains" => {"$ref" => "urn:late-child"}}, {"dependentSchemas" => {"x" => {"$ref" => "urn:late-child"}}}]
+    schemas.each do |schema|
+      registries = [:vm, :native].map { |backend| Schemurai::SchemaRegistry.new(backend: backend) }
+      validators = registries.map { |registry| registry.compile(schema) }
+      evaluator = validators.last.instance_variable_get(:@evaluator)
+      allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+      allow(evaluator.instance_variable_get(:@vm)).to receive(:valid?).and_raise("VM execution")
+      allow(evaluator.instance_variable_get(:@vm)).to receive(:validate).and_raise("VM execution")
+      values = [Class.new(Array).new([1, "bad"]), Class.new(Hash)["x", 1], Class.new(Hash)["x", "bad"]]
+      2.times do |phase|
+        if phase == 1
+          registries.each { |registry| registry.compile({"$id" => "urn:late-child", "type" => "integer"}) }
+          GC.verify_compaction_references(double_heap: true, toward: :empty)
+        end
+        values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |value, method, options|
+          expected = capture_validation(validators.first, method, value, **options)
+          expect(capture_validation(validators.last, method, value, **options)).to eq(expected)
+        end
+      end
+    end
   end
 
   it "unions successful anyOf array annotations and discards failed branches" do # rubocop:disable RSpec/ExampleLength

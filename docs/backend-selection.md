@@ -1095,8 +1095,10 @@ the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
-Special containers can still delegate when child graphs contain unresolved
-references or unsupported operands/instructions. Object report callbacks export
+Unresolved reference children use native failure and diagnostic paths, including
+special containers and native continuations. Later registry additions rebuild
+the native program before execution. Special containers can still delegate when
+child graphs contain unsupported operands/instructions. Object report callbacks export
 evaluated property sets through owned results. Tracked or detailed continuations
 require every reachable operation to have a native report path;
 defensive unsupported instructions also retain the VM path.

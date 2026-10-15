@@ -180,16 +180,12 @@ impl Engine {
         for (node, ops) in self.nodes.iter().enumerate() {
             admitted[node] = true;
             for op in ops {
-                // Full container result callbacks are introduced separately;
-                // scalar/header reports already have all required runtime paths.
-                report_unsupported[node] |= match op {
-                    Op::Array(..) => false,
-                    Op::Object(..) => false,
-                    Op::Unsupported | Op::UnresolvedRef(_) => true,
-                    _ => false,
-                };
+                // Unresolved references have native failure and report paths;
+                // only instructions without an execution path block callbacks.
+                report_unsupported[node] |= matches!(op, Op::Unsupported);
                 match op {
-                    Op::Boolean(_)
+                    Op::UnresolvedRef(_)
+                    | Op::Boolean(_)
                     | Op::Type(..)
                     | Op::Number(..)
                     | Op::String(..)
@@ -233,7 +229,7 @@ impl Engine {
                         edges[node].push(*condition);
                         edges[node].extend(yes.iter().chain(no));
                     }
-                    Op::Unsupported | Op::UnresolvedRef(_) => admitted[node] = false,
+                    Op::Unsupported => admitted[node] = false,
                 }
             }
         }
@@ -435,5 +431,30 @@ impl Object {
             && self.names.is_none()
             && self.dependent_schemas.is_empty()
             && self.unevaluated.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admits_unresolved_reports_but_propagates_unsupported_instructions() {
+        let mut engine = Engine {
+            nodes: vec![
+                vec![Op::UnresolvedRef(0)],
+                vec![Op::All(vec![0, 1])],
+                vec![Op::Unsupported],
+                vec![Op::All(vec![1, 2])],
+            ],
+            tracks: vec![false, true, false, true],
+            metadata: vec![scope::Metadata::default(); 4],
+            ..Engine::default()
+        };
+        engine.compile_native_validity_support();
+        for root in 0..4 {
+            assert_eq!(engine.native_continuations_safe(root), root < 2);
+            assert_eq!(engine.report_continuations_safe(root), root < 2);
+        }
     }
 }
