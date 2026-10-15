@@ -343,11 +343,16 @@ impl ScalarFrame<'_> {
         self.arguments.ordinal
     }
     pub(super) fn step(&self, step: i32) -> Verdict {
-        let result = self.caches.observe(
-            self.arguments.ordinal,
-            self.arguments.instance,
-            self.base + step * self.stride + self.required,
-        );
+        let Some(operation) = step
+            .checked_mul(self.stride)
+            .and_then(|step| self.base.checked_add(step))
+            .and_then(|operation| operation.checked_add(self.required))
+        else {
+            return Unsupported;
+        };
+        let result =
+            self.caches
+                .observe(self.arguments.ordinal, self.arguments.instance, operation);
         if result == Unsupported {
             self.caches.pending_scalar.set(Some(self.arguments));
         }

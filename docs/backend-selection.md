@@ -929,6 +929,14 @@ Container assertions without child-schema traversal use libruby frames when
 their applicability, length or comparison methods require Ruby behavior. This
 covers minItems/maxItems, minProperties/maxProperties, uniqueItems and the
 empty tuple gate, including Array/Hash subclasses and singleton methods.
+Object assertions with required keys and no child-schema operations also use
+these frames for special inputs. Required validity shares its ordered key
+checks with the VM; diagnostics yield after each key and render each missing
+key before attempting the next. Duplicate names retain distinct calls.
+Malformed required operands retain their Ruby iteration or method errors,
+without borrowing Array storage from non-array values. Generated Hash iteration
+pairs remain rooted through message rendering, and ordinary supported Hashes
+keep native required-key lookup, including identity Hashes.
 Bounds validity shares its comparison rules with the VM; diagnostics retain
 fresh length reads for each assertion and message. Object diagnostics also
 retain the original Hash iteration and property lookup, even without child
@@ -941,7 +949,7 @@ and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Array/Hash subclasses, singleton-method containers, and Hashes with nonstandard keys
 can still delegate to the VM when reached container assertions require child
-traversal, required keys or dependencies. Schema evaluation beyond the native
+traversal or dependencies. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

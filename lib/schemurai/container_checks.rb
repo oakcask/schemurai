@@ -15,6 +15,17 @@ module Schemurai
         end
       end
 
+      module Required
+        private def valid_required_keys?(required, value)
+          return true unless required
+
+          required.all? do |name|
+            @budget&.checkpoint
+            value.key?(name)
+          end
+        end
+      end
+
       # Frames evaluate only container applicability, bounds and uniqueness.
       # Child schema execution remains with the native traversal.
       class Frame
@@ -100,11 +111,45 @@ module Schemurai
       end
 
       class ObjectFrame < Frame
+        include Required
+
         def container? = @value.is_a?(Hash)
+
+        def check(step)
+          return super if step < 7
+          return true unless @rules.required
+
+          if step == 7
+            # Preserve errors from malformed required operands before iteration.
+            @rules.required.each { break }
+            return true
+          end
+          if Array === @rules.required
+            return check_required_name(@rules.required[step - 8])
+          end
+          @rules.required.each_with_index do |name, index|
+            next unless index == step - 8
+
+            return check_required_name(name)
+          end
+          true
+        end
+
+        def message(keyword, rescued)
+          return ErrorMessage.required(@required_name) if keyword == "required"
+
+          super
+        end
 
         private def type_name = "object"
         private def maximum = @rules.max_properties
         private def minimum = @rules.min_properties
+        private def valid_tail?(_length) = valid_required_keys?(@rules.required, @value)
+        private def check_required_name(name)
+          @required_name = name
+          @budget&.checkpoint
+          @value.key?(name) || false
+        end
       end
     end
   end
