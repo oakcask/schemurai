@@ -722,8 +722,11 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     [Class.new(Array).new, Class.new(Hash).new, Class.new(String).new("item")].each do |special|
-      expect(program.valid?(values + [{"special" => special}])).to be_nil
-      expect(program.diagnostics(values + [{"special" => special}])).to be_nil
+      expect(program.valid?(values + [{"special" => special}])).to be(true)
+      expect(program.diagnostics(values + [{"special" => special}])).to eq([])
+      duplicates = values + Array.new(2) { {"special" => special} }
+      expect(program.valid?(duplicates)).to be_nil
+      expect(program.diagnostics(duplicates)).to be_nil
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -950,12 +953,15 @@ RSpec.describe "native VALUE execution" do
     expect(program.valid?(values)).to be(false)
     values[-1][0] = 63
     expect(program.valid?(values)).to be(true)
-    # The same container is reachable at a supported and an unsupported depth.
-    # A shallow cached hash must not bypass the evaluator's depth fallback.
+    # The same container is reachable at shallow and deep fingerprint depths.
+    # Exact native comparisons remain available when the deeper hash declines.
     deep = shared
     520.times { deep = [deep] }
-    expect(program.valid?([*values, deep])).to be_nil
+    expect(program.valid?([*values, deep])).to be(true)
+    expect(program.diagnostics([*values, deep])).not_to be_nil
     shared[0] = Object.new
+    expect(program.valid?(values)).to be(true)
+    values[-1][0] = 0
     expect(program.valid?(values)).to be_nil
   end
 
@@ -1105,15 +1111,64 @@ RSpec.describe "native VALUE execution" do
     expect(program.diagnostics([16])).not_to be_nil
     expect(program.valid?(42)).to be(false)
     expect(program.diagnostics(42)).not_to be_nil
-    expect(program.valid?(deep)).to be_nil
-    expect(program.diagnostics(deep)).to be_nil
+    expect(program.valid?(deep)).to be(true)
+    expect(program.diagnostics(deep)).to eq([])
     [[16], 42, deep].each do |value|
       expect(native.valid?(value)).to eq(vm.valid?(value))
       expect(native.validate(value).errors).to eq(vm.validate(value).errors)
     end
   end
 
-  it "preserves enum depth fallback" do # rubocop:disable RSpec/ExampleLength
+  it "compares deep constants and enum candidates without VM execution" do # rubocop:disable RSpec/ExampleLength
+    wrap = lambda do |value|
+      300.times { |i| value = i.even? ? [value] : {"a/b~c" => value} }
+      value
+    end
+    constant = wrap.call(1)
+    schemas = [{"const" => constant}, {"enum" => [constant]},
+      {"enum" => Array.new(17) { |i| i } + [constant]}]
+    expect_native_policy_results(schemas, [wrap.call(1.0), wrap.call(2), wrap.call(Float::NAN), []])
+  end
+
+  it "compares very deep uniqueness operands on an explicit native stack" do # rubocop:disable RSpec/ExampleLength
+    left = 1
+    right = 1.0
+    20_000.times do |i|
+      left = i.even? ? [left] : {"n" => left}
+      right = i.even? ? [right] : {"n" => right}
+    end
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(native.valid?([left, right])).to be(false)
+    expect(native.validate([left, right]).errors.map(&:keyword)).to eq(["uniqueItems"])
+    expect(native.valid?([*Array.new(17) { |i| i }, left, right], timeout: 10)).to be(false)
+    expect(native.validate([left, right], timeout: 10).errors.map(&:keyword)).to eq(["uniqueItems"])
+  end
+
+  it "preserves depth-first unsupported equality after the recursive prefix" do
+    left = [Object.new, 0]
+    right = [Object.new, 1]
+    300.times do
+      left = [left]
+      right = [right]
+    end
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?([left, right])).to be_nil
+    expect(program.diagnostics([left, right])).to be_nil
+  end
+
+  it "retains unsupported cyclic equality without treating an active pair as equal" do
+    cycle = []
+    cycle << cycle
+    native = Schemurai.compile({"uniqueItems" => true}, backend: :native)
+    program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    expect(program.valid?([cycle, cycle])).to be_nil
+    expect(program.diagnostics([cycle, cycle])).to be_nil
+  end
+
+  it "keeps enum comparisons native at the schema evaluation depth boundary" do # rubocop:disable RSpec/ExampleLength
     rule = {"enum" => Array.new(17) { |index| [index] }}
     instance = [16]
     256.times do
@@ -1123,8 +1178,8 @@ RSpec.describe "native VALUE execution" do
     native = Schemurai.compile(rule, backend: :native)
     vm = Schemurai.compile(rule, backend: :vm)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
-    expect(program.valid?(instance)).to be_nil
-    expect(program.diagnostics(instance)).to be_nil
+    expect(program.valid?(instance)).to be(true)
+    expect(program.diagnostics(instance)).to eq([])
     expect(native.valid?(instance)).to eq(vm.valid?(instance))
     expect(native.validate(instance).errors).to eq(vm.validate(instance).errors)
   end
@@ -2618,7 +2673,7 @@ RSpec.describe "native VALUE execution" do
     vm = Schemurai.compile(schema, backend: :vm)
     program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
     [Object.new, :key, Class.new(String).new("key")].each do |key|
-      values = Array.new(20) { |i| [i] } + [{"nested" => {key => 1}}]
+      values = Array.new(20) { |i| [i] } + [{"nested" => {key => 1}}, {"nested" => {key => 2}}]
       expect(program.valid?(values)).to be_nil
       expect(program.diagnostics(values)).to be_nil
       expect(native.valid?(values)).to eq(vm.valid?(values))
