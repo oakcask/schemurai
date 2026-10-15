@@ -10,12 +10,14 @@ pub(super) struct Reports {
     pending: RefCell<Option<(Value, Report)>>,
     completed: RefCell<HashMap<Value, Report>>,
     live: RefCell<Option<Report>>,
+    boundary: RefCell<Option<Report>>,
     runtime_key: std::cell::Cell<Option<scopes::Key>>,
     effects: RefCell<HashMap<scopes::Key, Report>>,
     replay: RefCell<Vec<Report>>,
 }
 impl Reports {
     pub(super) fn clear(&self) {
+        self.boundary.borrow_mut().take();
         self.live.borrow_mut().take();
         self.runtime_key.set(None);
         self.effects.borrow_mut().clear();
@@ -26,6 +28,7 @@ impl Reports {
         *self.completed.borrow_mut() = HashMap::new();
     }
     pub(super) fn capture(&self, report: &Report) {
+        *self.boundary.borrow_mut() = Some(report.clone());
         if self.live.borrow().is_none() {
             *self.live.borrow_mut() = Some(report.clone());
         }
@@ -45,6 +48,7 @@ impl Reports {
     }
     pub(super) fn reset(&self) {
         *self.callback.borrow_mut() = self.initial.borrow().clone();
+        self.boundary.borrow_mut().take();
         self.live.borrow_mut().take();
         self.runtime_key.set(None);
         self.replay.borrow_mut().clear();
@@ -60,7 +64,7 @@ impl Reports {
         self.completed.borrow().get(&key).cloned()
     }
     pub(super) fn memory_usage(&self) -> usize {
-        [&self.live, &self.initial, &self.callback]
+        [&self.live, &self.boundary, &self.initial, &self.callback]
             .iter()
             .map(|cell| {
                 cell.try_borrow()
@@ -86,6 +90,11 @@ impl Reports {
         // C additionally roots every completed report and inherited seed.
         // Pending snapshots use input/schema handles and runtime observations
         // already owned by the runner while a stopped pass borrows this state.
+        if let Ok(boundary) = self.boundary.try_borrow()
+            && let Some(report) = &*boundary
+        {
+            report.mark();
+        }
         if let Ok(callback) = self.callback.try_borrow()
             && let Some(report) = &*callback
         {
@@ -229,4 +238,29 @@ pub unsafe extern "C" fn sn_callback_report_result(
         .expect("callback report");
     report.complete_callback(valid != 0);
     Box::into_raw(Box::new(report))
+}
+
+/// # Safety
+/// Caches are idle while C unwinds an interrupted runner. C owns a non-null result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_interrupted(caches: *const Caches) -> *mut Report {
+    let reports = &unsafe { &*caches }.reports;
+    let mut report = reports
+        .boundary
+        .borrow()
+        .clone()
+        .or_else(|| reports.callback.borrow().clone());
+    if let Some(report) = &mut report {
+        if let Some(key) = reports.runtime_key.get()
+            && let Some(live) = &*reports.live.borrow()
+            && report.same_collection_policy(live)
+            && let Some(effect) = reports.effects.borrow().get(&key)
+        {
+            report.apply_effect(effect.clone());
+        }
+        report.complete_callback(false);
+    }
+    report.map_or(std::ptr::null_mut(), |report| {
+        Box::into_raw(Box::new(report))
+    })
 }

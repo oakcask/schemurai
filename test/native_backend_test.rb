@@ -2160,6 +2160,34 @@ RSpec.describe "native VALUE execution" do
     cases.each { |rules, options, expected| expect(run.call(:native, rules, options)).to eq(expected) }
   end
 
+  it "retains failures from saved blocks after successful scalar runtime checks in silent trials" do # rubocop:disable RSpec/ExampleLength
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {
+      "type" => "string", "maxLength" => 5, "unevaluatedItems" => true
+    }}
+    run = lambda do |backend|
+      saved = nil
+      array = Class.new(Array) do
+        define_method(:count) do |&block|
+          saved = block
+          super(&block)
+        end
+      end
+      string = Class.new(String) do
+        define_method(:length) do
+          saved&.call("too long")
+          super()
+        end
+      end
+      validator = Schemurai.compile(schema, backend: backend)
+      expect(validator.valid?(array.new(["ok"]))).to be(true)
+      capture_validation(validator, :validate, array.new([string.new("ok")]))
+    end
+    expected = run.call(:vm)
+    expect(expected.last.map(&:keyword)).to eq(["contains"])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    expect(run.call(:native)).to eq(expected)
+  end
+
   it "shares retained native tracked callbacks with the current object diagnostic collection" do # rubocop:disable RSpec/ExampleLength
     array = Class.new(Array) do
       def count(&block)
@@ -2187,27 +2215,93 @@ RSpec.describe "native VALUE execution" do
     expect(run.call(:native)).to eq(expected)
   end
 
-  it "reflects a public validity reentry clearing the active array diagnostic collection" do # rubocop:disable RSpec/ExampleLength
-    run = lambda do |backend|
+  it "keeps errors appended before retained native blocks raise into their Ruby caller" do # rubocop:disable RSpec/ExampleLength
+    inner = {"contains" => {"items" => {"type" => "integer"}, "unevaluatedItems" => true}}
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    cases = [dialect.merge(inner), dialect.merge("properties" => {"v" => inner})]
+    run = lambda do |backend, schema|
+      bomb = Object.new
+      bomb.define_singleton_method(:is_a?) { |_type| raise "interrupted child" }
+      array = Class.new(Array) do
+        def count(&block)
+          @saved = block
+          super
+        end
+
+        define_method(:length) do
+          begin
+            @saved&.call(["bad", bomb])
+          rescue RuntimeError
+            nil
+          end
+          super()
+        end
+      end
+      validator = Schemurai.compile(schema, backend: backend)
+      value = array.new([[1]])
+      value = {"v" => value} if schema.key?("properties")
+      expect(validator.valid?(value)).to be(true)
+      result = capture_validation(validator, :validate, value)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      result
+    end
+    expected = cases.map { |schema| run.call(:vm, schema) }
+    expect(expected.map { |result| result.last.length }).to eq([2, 2])
+    cases.zip(expected).each { |schema, result| expect(run.call(:native, schema)).to eq(result) }
+  end
+
+  it "reflects public reentry clearing collections while trial and limited callers retain theirs" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    branch = {"maxItems" => 0, "items" => {"type" => "integer"}, "unevaluatedItems" => true}
+    schemas = [dialect.merge(branch), dialect.merge("allOf" => [{"type" => "string"}, branch]),
+      dialect.merge("allOf" => [{"type" => "string"}, {"anyOf" => [branch, true]}])]
+    run = lambda do |backend, rules, method, options|
       validator = nil
       reentered = false
       array = Class.new(Array) do
         define_method(:length) do
           unless reentered
             reentered = true
-            validator.valid?([])
+            validator.public_send(method, [])
           end
           super()
         end
       end
-      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "maxItems" => 0,
-                "items" => {"type" => "integer"}, "unevaluatedItems" => true}
-      validator = Schemurai.compile(schema, backend: backend)
-      validator.validate(array.new(["bad"])).errors
+      validator = Schemurai.compile(rules, backend: backend)
+      capture_validation(validator, :validate, array.new(["bad"]), **options)
     end
-    expected = run.call(:vm)
-    expect(expected).to be_nil
-    expect(run.call(:native)).to eq(expected)
+    cases = schemas.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 2}]).map do |rules, method, options|
+      [rules, method, options, run.call(:vm, rules, method, options)]
+    end
+    expect(cases.first.last).to eq([:result, nil])
+    cases.each { |rules, method, options, expected| expect(run.call(:native, rules, method, options)).to eq(expected) }
+  end
+
+  it "cleans up array child paths after public reentry from a scalar predicate" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    rules = [dialect.merge("items" => {"type" => "number"}), dialect.merge("prefixItems" => [{"type" => "number"}])]
+    run = lambda do |backend, schema, method, options|
+      validator = nil
+      reentered = false
+      value = Object.new
+      value.define_singleton_method(:is_a?) do |type|
+        unless reentered
+          reentered = true
+          validator.public_send(method, [])
+        end
+        type == Numeric
+      end
+      array = Class.new(Array)
+      validator = Schemurai.compile(schema, backend: backend)
+      capture_validation(validator, :validate, array.new([value]), **options)
+    end
+    cases = rules.product([:valid?, :validate], [{}, {timeout: 10}]).map do |schema, method, options|
+      [schema, method, options, run.call(:vm, schema, method, options)]
+    end
+    expect(cases.first.last).to eq([:error, NoMethodError, "undefined method 'pop' for nil"])
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each { |schema, method, options, expected| expect(run.call(:native, schema, method, options)).to eq(expected) }
   end
 
   it "guards report continuations before a later unsupported container can replay Ruby calls" do # rubocop:disable RSpec/ExampleLength

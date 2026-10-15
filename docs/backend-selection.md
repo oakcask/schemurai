@@ -1057,7 +1057,13 @@ when they reach a tracked schema, including through references. Suspended
 runtime requests snapshot that collection before path scopes unwind. Their
 completed error effects are replayed with the corresponding runtime observation,
 so nested scalar calls preserve error order and trial isolation. Public reentry
-and collection sharing with the remaining VM path are still under validation.
+can clear a collection; replay preserves that reset and the VM's path cleanup
+behavior. Trial contexts restore their caller's collection, and bounded public
+invocations keep independent state. Interrupted child and Array frames transfer
+already collected errors when a Ruby caller rescues their exception.
+The remaining VM compatibility evaluator exposes only its active collection
+state to retained native blocks. Those blocks execute native programs and append
+their completed errors/counts to that collection without interpreting VM code.
 Their guards run before other scalar methods in the same node.
 Object pattern matching uses the shared Ruby regexp cache and deadline wrapper.
 Frames read the invocation's current budget when retained each blocks run, so

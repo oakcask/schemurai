@@ -199,6 +199,44 @@ mod tests {
     }
 
     #[test]
+    fn collection_reset_replaces_prior_errors_and_counts_without_exporting_trial_policy() {
+        let before = Report {
+            attempts: 2,
+            failed: true,
+            ..Report::default()
+        };
+        let mut completed = before.clone();
+        completed.instance_path.index(7);
+        completed.clear_collection(true);
+        assert_eq!(completed.attempts, 0);
+        assert!(!completed.failed);
+        assert!(completed.silent);
+        let effect = completed.effect_since(&before).unwrap();
+        let mut receiver = before.array_continuation(true, &Tracked::new(Valid));
+        receiver.instance_path.index(5);
+        receiver.apply_effect(effect);
+        assert!(receiver.annotations);
+        assert!(receiver.silent);
+        assert_eq!(receiver.attempts, 0);
+        assert!(!receiver.failed);
+        assert!(receiver.instance_path.text.is_empty());
+        assert_eq!(receiver.collection_reset, 1);
+        assert!(receiver.evaluation.is_some());
+        let mut outer = before.clone();
+        let trial = outer.continuation(true);
+        let mut trial_result = trial.clone();
+        trial_result.clear_collection(true);
+        assert!(!outer.same_collection_policy(&trial_result));
+        outer.apply_effect(Report {
+            attempts: 1,
+            failed: true,
+            ..Report::default()
+        });
+        assert_eq!(outer.attempts, 3);
+        assert!(!outer.silent);
+    }
+
+    #[test]
     fn item_results_preserve_accumulators_paths_and_independent_trial_policy() {
         let mut base = Report {
             attempts: 1,
@@ -262,4 +300,82 @@ mod tests {
         assert!(report.failed);
         assert!(report.array_prior.is_none());
     }
+}
+
+/// # Safety
+/// Report is the current idle C-owned collection and C guards mutation as for adoption.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_clear_collection(report: *mut Report, paths_nil: i32) {
+    unsafe { &mut *report }.clear_collection(paths_nil != 0);
+}
+
+/// # Safety
+/// Path arguments are nil or library-owned Arrays rooted by C. No Ruby calls or
+/// allocation occur before the completed owned seed is returned to C.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_context(
+    silent: i32,
+    attempts: usize,
+    instance_path: Value,
+    schema_path: Value,
+) -> *mut Report {
+    let mut report = Report {
+        silent: silent != 0,
+        attempts,
+        annotations: true,
+        render_messages: true,
+        ..Report::default()
+    };
+    for (value, path) in [
+        (instance_path, &mut report.instance_path),
+        (schema_path, &mut report.schema_path),
+    ] {
+        if value == unsafe { sn_nil() } {
+            continue;
+        }
+        for i in 0..unsafe { sn_len(value) } {
+            path.text.push('/');
+            path.names
+                .push((path.text.len(), unsafe { sn_entry(value, i) }));
+        }
+    }
+    Box::into_raw(Box::new(report))
+}
+/// # Safety
+/// Report is live, idle and C-rooted. Baseline is its original collection count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_context_count(report: *const Report, baseline: usize) -> usize {
+    let report = unsafe { &*report };
+    let count = if report.collection_reset == 0 {
+        report.attempts.saturating_sub(baseline)
+    } else {
+        report.attempts
+    };
+    if report.silent && report.failed {
+        count.max(1)
+    } else {
+        count
+    }
+}
+/// # Safety
+/// Report is live, idle and C-rooted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_context_reset(report: *const Report) -> i32 {
+    let report = unsafe { &*report };
+    if report.collection_reset == 0 {
+        0
+    } else if report.reset_path_pops {
+        1
+    } else {
+        2
+    }
+}
+
+/// # Safety
+/// Report is live, immutable and rooted by C. C owns the partial result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_report_partial(report: *const Report) -> *mut Report {
+    let mut report = unsafe { &*report }.clone();
+    report.complete_callback(false);
+    Box::into_raw(Box::new(report))
 }

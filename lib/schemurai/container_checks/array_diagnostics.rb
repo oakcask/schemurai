@@ -10,17 +10,17 @@ module Schemurai
         private def check_array(rules, value, prior_evaluation)
           evaluation = nil
           if rules.max_items && value.length > rules.max_items
-            return Evaluation.invalid unless @errors
+            return Evaluation.invalid unless collecting_array_errors?
 
             array_error("maxItems", rules, value)
           end
           if rules.min_items && value.length < rules.min_items
-            return Evaluation.invalid unless @errors
+            return Evaluation.invalid unless collecting_array_errors?
 
             array_error("minItems", rules, value)
           end
           if rules.unique && !unique_items?(value)
-            return Evaluation.invalid unless @errors
+            return Evaluation.invalid unless collecting_array_errors?
 
             array_error("uniqueItems", rules, value)
           end
@@ -30,7 +30,7 @@ module Schemurai
               @budget&.checkpoint
               break if index >= value.length
               valid = evaluate_child_at(child, value[index], index, "prefixItems", index)
-              return Evaluation.invalid if !valid && !@errors
+              return Evaluation.invalid if !valid && !collecting_array_errors?
               (evaluation ||= tracked_evaluation).record_item(index)
             end
           end
@@ -41,14 +41,14 @@ module Schemurai
               @budget&.checkpoint
               break if index >= value.length
               valid = evaluate_child_at(child, value[index], index, "items", index)
-              return Evaluation.invalid if !valid && !@errors
+              return Evaluation.invalid if !valid && !collecting_array_errors?
               (evaluation ||= tracked_evaluation).record_item(index)
             end
             if value.length > items.length && (additional = rules.additional)
               (items.length...value.length).each do |index|
                 @budget&.checkpoint
                 valid = evaluate_child_at(additional, value[index], index, "additionalItems")
-                return Evaluation.invalid if !valid && !@errors
+                return Evaluation.invalid if !valid && !collecting_array_errors?
                 (evaluation ||= tracked_evaluation).record_item(index)
               end
             end
@@ -57,7 +57,7 @@ module Schemurai
             (start...value.length).each do |index|
               @budget&.checkpoint
               valid = evaluate_child_at(items, value[index], index, "items")
-              return Evaluation.invalid if !valid && !@errors
+              return Evaluation.invalid if !valid && !collecting_array_errors?
               (evaluation ||= tracked_evaluation).record_item(index)
             end
           end
@@ -72,7 +72,7 @@ module Schemurai
             end
             matched_count = matched ? matched.length : 0
             unless matched_count.between?(rules.min_contains, rules.max_contains)
-              return Evaluation.invalid unless @errors
+              return Evaluation.invalid unless collecting_array_errors?
 
               array_error("contains", rules, value, matched_count)
             end
@@ -91,7 +91,7 @@ module Schemurai
                 next
               end
               valid = evaluate_child_at(unevaluated, value[index], index, "unevaluatedItems")
-              return Evaluation.invalid if !valid && !@errors
+              return Evaluation.invalid if !valid && !collecting_array_errors?
               (evaluation ||= tracked_evaluation).record_item(index)
               index += 1
             end
@@ -100,6 +100,8 @@ module Schemurai
 
           evaluation
         end
+
+        private def collecting_array_errors? = @errors
 
         private def array_error(keyword, rules, value, actual = nil)
           add_error(keyword) do

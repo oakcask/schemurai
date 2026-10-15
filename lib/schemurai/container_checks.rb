@@ -299,10 +299,9 @@ module Schemurai
         include ChildCallback
 
         def collect
-          @errors = !@callback.silent?
           @failed = false
           unless container?
-            if @required && @errors
+            if @required && collecting_array_errors?
               @callback.error("type", self)
             end
             return @callback.finish(!@required)
@@ -316,6 +315,8 @@ module Schemurai
 
           super
         end
+
+        private def collecting_array_errors? = !@callback.silent?
 
         private def array_error(keyword, _rules, _value, actual = nil)
           @failed = true

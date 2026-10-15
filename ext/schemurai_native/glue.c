@@ -156,7 +156,7 @@ typedef struct {
     VALUE report_seed, report_results, error_frame, report_sink;
     VALUE report_state, active_report_state;
     VALUE ref_state, vm_active, active_ref_state, active_vm_state;
-    int continuation, scalar_mode;
+    int continuation, scalar_mode, report_sink_done;
     VALUE regexps, limited_regexps, pointers, messages, frames;
     VALUE number_state, limited_number_state, string_state, limited_string_state;
     void *caches;
@@ -329,7 +329,7 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->active_limits = (native_limits){0};
     r->busy = 0;
     r->callback_context = 0;
-    r->continuation = r->scalar_mode = 0;
+    r->continuation = r->scalar_mode = r->report_sink_done = 0;
     r->regexps = Qnil;
     r->limited_regexps = Qnil;
     r->pointers = Qnil;
@@ -902,22 +902,28 @@ static VALUE callback_scope(evaluation_call *call) {
     return runner->callback_scope;
 }
 extern void *sn_report_clone(const void *);
+extern void *sn_report_partial(const void *);
 extern void *sn_report_callback_seed(const void *);
 extern void *sn_report_live(const void *);
 extern void sn_report_effect(const void *, const void *);
 extern void *sn_callback_report_result(const void *, int);
+extern void *sn_report_interrupted(const void *);
 extern void *sn_array_report_child(const void *, size_t, const unsigned char *, size_t, size_t, int);
 extern void *sn_array_report_error(const void *, const void *, size_t, VALUE, int, VALUE);
 extern int sn_array_report_adopt(void *, const void *);
 extern void sn_array_report_record(void *, size_t);
 extern int sn_array_report_contains(const void *, size_t, int);
 extern int sn_report_silent(const void *);
+extern void sn_report_clear_collection(void *, int);
+extern void *sn_report_context(int, size_t, VALUE, VALUE);
+extern size_t sn_report_context_count(const void *, size_t);
+extern int sn_report_context_reset(const void *);
 extern int sn_report_verdict(const void *);
 extern void sn_array_report_finish(void *, int);
 /* Mutable accumulation never spans Ruby calls. While Rust mutates the report,
  * immutable seeds/results retain every Ruby handle for stopped-Ractor GC. */
 typedef struct {
-    VALUE owner, scope, seed, results, instance;
+    VALUE owner, scope, seed, results, instance, self;
     size_t node;
     void *report;
     int busy;
@@ -970,8 +976,13 @@ static VALUE collector_runner(array_collector *c, size_t node, VALUE seed, VALUE
     r->error_frame = error_frame;
     return callback;
 }
-static VALUE collector_run(array_collector *c, size_t node, VALUE instance, VALUE seed, VALUE error_frame, int mode) {
+static VALUE collector_run(array_collector *c, size_t node, VALUE instance, VALUE seed, VALUE error_frame, int mode, int adopt_on_interrupt) {
     VALUE callback = collector_runner(c, node, seed, error_frame);
+    if (adopt_on_interrupt) {
+        runner_holder *child;
+        TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+        child->report_sink = c->self;
+    }
     runner_holder *scope;
     TypedData_Get_Struct(c->scope, runner_holder, &runner_type, scope);
     VALUE result = evaluate_runner(callback, instance, scope->active_budget, mode);
@@ -996,15 +1007,23 @@ static int collector_adopt(array_collector *c, VALUE result) {
 static VALUE collector_evaluate(VALUE self, VALUE program, VALUE instance, VALUE index, VALUE keyword, VALUE child_segment) {
     array_collector *c = get_array_collector(self);
     size_t node = collector_node(c, program);
-    if (sn_report_silent(c->report)) return collector_run(c, node, instance, Qnil, Qnil, 0);
+    if (sn_report_silent(c->report)) return collector_run(c, node, instance, Qnil, Qnil, 0, 0);
     size_t at = NUM2SIZET(index), child = NIL_P(child_segment) ? SIZE_MAX : NUM2SIZET(child_segment);
     StringValue(keyword);
     VALUE seed_object = collector_report_object();
     report_holder *seed;
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
     seed->report = sn_array_report_child(c->report, at, (const unsigned char *)RSTRING_PTR(keyword), RSTRING_LEN(keyword), child, 0);
-    VALUE result = collector_run(c, node, instance, seed_object, Qnil, 2);
+    VALUE result = collector_run(c, node, instance, seed_object, Qnil, 2, 1);
     int verdict = collector_adopt(c, result);
+    report_holder *completed;
+    TypedData_Get_Struct(result, report_holder, &report_type, completed);
+    if (sn_report_context_reset(completed->report) == 1) {
+        /* This child seed owns the evaluate_at path scope. Public validity
+         * reentry cleared its buffers, so run the original Ruby ensure pops. */
+        int pops = NIL_P(child_segment) ? 2 : 3;
+        while (pops-- > 0) rb_funcall(Qnil, rb_intern_const("pop"), 0);
+    }
     RB_GC_GUARD(self); RB_GC_GUARD(seed_object); RB_GC_GUARD(keyword); RB_GC_GUARD(result);
     return verdict == SN_VERDICT_VALID ? Qtrue : Qfalse;
 }
@@ -1014,7 +1033,7 @@ static VALUE collector_trial(VALUE self, VALUE program, VALUE instance) {
     report_holder *seed;
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
     seed->report = sn_array_report_child(c->report, 0, NULL, 0, SIZE_MAX, 1);
-    VALUE result = collector_run(c, collector_node(c, program), instance, seed_object, Qnil, 2);
+    VALUE result = collector_run(c, collector_node(c, program), instance, seed_object, Qnil, 2, 0);
     report_holder *completed;
     TypedData_Get_Struct(result, report_holder, &report_type, completed);
     int verdict = sn_report_verdict(completed->report);
@@ -1036,7 +1055,7 @@ static VALUE collector_error(VALUE self, VALUE keyword, VALUE frame) {
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
     seed->report = sn_array_report_error(c->report, ready_program(c->owner)->engine,
         c->node, c->instance, kind, INT2FIX(0));
-    VALUE result = collector_run(c, c->node, c->instance, seed_object, frame, 2);
+    VALUE result = collector_run(c, c->node, c->instance, seed_object, frame, 2, 1);
     collector_adopt(c, result);
     RB_GC_GUARD(self); RB_GC_GUARD(seed_object); RB_GC_GUARD(result);
     return Qnil;
@@ -1068,27 +1087,37 @@ static VALUE collector_finish(VALUE self, VALUE valid) {
     RB_GC_GUARD(self);
     return result;
 }
-typedef struct { VALUE state, collector, previous, frame; } report_context_call;
+typedef struct { VALUE state, collector, previous, frame; int trial, completed; } report_context_call;
 static VALUE collect_array_frame(VALUE context) {
     report_context_call *call = (report_context_call *)context;
-    return rb_funcall(call->frame, rb_intern_const("collect"), 0);
+    VALUE result = rb_funcall(call->frame, rb_intern_const("collect"), 0);
+    call->completed = 1;
+    return result;
 }
 static VALUE restore_report_context(VALUE context) {
     report_context_call *call = (report_context_call *)context;
-    if (rb_ary_entry(call->state, 0) == call->collector)
+    if (!NIL_P(call->frame) && !call->completed && !NIL_P(call->previous)
+        && rb_typeddata_is_kind_of(call->previous, &array_collector_type)) {
+        VALUE interrupted = collector_report_object();
+        report_holder *partial;
+        TypedData_Get_Struct(interrupted, report_holder, &report_type, partial);
+        partial->report = sn_report_partial(get_array_collector(call->collector)->report);
+        collector_adopt(get_array_collector(call->previous), interrupted);
+        RB_GC_GUARD(interrupted);
+    }
+    if (call->trial || rb_ary_entry(call->state, 0) == call->collector)
         rb_ary_store(call->state, 0, call->previous);
     return Qnil;
 }
-static VALUE make_report_collector(evaluation_call *call, VALUE seed_object, VALUE instance, size_t node) {
-    runner_holder *r = call->runner;
+static VALUE make_report_collector(VALUE owner, VALUE scope, VALUE seed_object, VALUE instance, size_t node) {
     VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
     VALUE native = rb_const_get(schemurai, rb_intern_const("Native"));
     VALUE klass = rb_const_get(native, rb_intern_const("ArrayCollector"));
     array_collector *c;
     VALUE collector = TypedData_Make_Struct(klass, array_collector, &array_collector_type, c);
-    c->owner = r->owner; c->scope = Qnil; c->seed = seed_object; c->results = Qnil;
+    c->self = collector;
+    c->owner = owner; c->scope = scope; c->seed = seed_object; c->results = Qnil;
     c->instance = instance; c->node = node; c->report = NULL; c->busy = 0;
-    c->scope = callback_scope(call);
     c->results = rb_ary_new();
     report_holder *seed;
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
@@ -1104,13 +1133,13 @@ static VALUE array_report_runtime(evaluation_call *call) {
     report_holder *seed;
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
     seed->report = sn_report_seed(r->caches);
-    VALUE collector = make_report_collector(call, seed_object, arguments.instance, arguments.child);
+    VALUE collector = make_report_collector(r->owner, callback_scope(call), seed_object, arguments.instance, arguments.child);
     VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
     VALUE checks = rb_const_get(internal, rb_intern_const("ContainerChecks"));
     VALUE frame_class = rb_const_get(checks, rb_intern_const(NIL_P(call->budget) ? "ArrayReportFrame" : "LimitedArrayReportFrame"));
     VALUE args[] = {arguments.rules, arguments.instance, call->budget, INT2FIX(arguments.required), collector};
     VALUE frame = rb_class_new_instance(5, args, frame_class);
-    report_context_call context = {r->active_report_state, collector, rb_ary_entry(r->active_report_state, 0), frame};
+    report_context_call context = {r->active_report_state, collector, rb_ary_entry(r->active_report_state, 0), frame, sn_report_silent(seed->report), 0};
     rb_ary_store(context.state, 0, collector);
     VALUE result = rb_ensure(collect_array_frame, (VALUE)&context, restore_report_context, (VALUE)&context);
     if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
@@ -1276,8 +1305,12 @@ static VALUE call_runtime(VALUE context) {
         || operation->kind == SN_RUNTIME_SCALAR_CONTAINS
         || operation->kind == SN_RUNTIME_ARRAY_CHILDREN || operation->kind == SN_RUNTIME_OBJECT_CHILDREN
         || operation->kind == SN_RUNTIME_NATIVE_CHILD || operation->kind == SN_RUNTIME_NATIVE_REPORT
-        || operation->kind == SN_RUNTIME_ARRAY_REPORT;
+        || operation->kind == SN_RUNTIME_ARRAY_REPORT || operation->kind == SN_RUNTIME_PATH_POP;
     if (!NIL_P(call->budget) && !staged) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind == SN_RUNTIME_PATH_POP) {
+        rb_funcall(Qnil, rb_intern_const("pop"), 0);
+        return Qtrue;
+    }
     if (operation->kind == SN_RUNTIME_CALLBACK_CHECKPOINT) {
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("checkpoint"), 0);
         return Qtrue;
@@ -1297,6 +1330,7 @@ static VALUE call_runtime(VALUE context) {
         child->callback_context = child->continuation = 1;
         child->scalar_mode = sn_caches_is_scalar(r->caches);
         child->report_seed = seed_object;
+        child->report_sink = rb_ary_entry(r->active_report_state, 0);
         VALUE result = evaluate_runner(callback, instance, call->budget, 2);
         if (NIL_P(result)) rb_raise(rb_eRuntimeError, "native report continuation lost its coverage proof");
         if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
@@ -1430,9 +1464,10 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     report_holder *seed;
     TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
     seed->report = sn_report_live(runner->caches);
-    report_context_call report_context = {runner->active_report_state, Qnil, Qnil, Qnil};
+    report_context_call report_context = {runner->active_report_state, Qnil, Qnil, Qnil, 0, 0};
     if (seed->report) {
-        report_context.collector = make_report_collector(call, seed_object, instance, runner->root);
+        report_context.trial = sn_report_silent(seed->report);
+        report_context.collector = make_report_collector(runner->owner, callback_scope(call), seed_object, instance, runner->root);
         report_context.previous = rb_ary_entry(report_context.state, 0);
         rb_ary_store(report_context.state, 0, report_context.collector);
         if (NIL_P(runner->report_results)) runner->report_results = rb_ary_new();
@@ -1522,6 +1557,26 @@ static VALUE retry_runtime(VALUE context) {
     }
     return Qnil;
 }
+static VALUE report_rows(const void *report, VALUE budget) {
+    size_t count = sn_report_len(report);
+    VALUE output = rb_ary_new_capa(count);
+    for (size_t index = 0; index < count; index++) {
+        if (!NIL_P(budget) && index % 256 == 0) rb_funcall(budget, rb_intern("check_deadline!"), 0);
+        diagnostic_record r;
+        sn_report_record(report, index, &r);
+        VALUE row = rb_ary_new_capa(NIL_P(r.message) ? 7 : 8);
+        rb_ary_push(output, row);
+        rb_ary_push(row, rb_utf8_str_new((const char *)r.keyword, r.keyword_len));
+        rb_ary_push(row, NIL_P(r.instance_pointer) ? rb_utf8_str_new((const char *)r.instance_path, r.instance_len) : rb_str_dup(r.instance_pointer));
+        rb_ary_push(row, NIL_P(r.schema_pointer) ? rb_utf8_str_new((const char *)r.schema_path, r.schema_len) : rb_str_dup(r.schema_pointer));
+        rb_ary_push(row, INT2NUM(r.opcode));
+        rb_ary_push(row, r.operand);
+        rb_ary_push(row, r.instance);
+        rb_ary_push(row, SIZET2NUM(r.detail));
+        if (!NIL_P(r.message)) rb_ary_push(row, rb_str_dup(r.message));
+    }
+    return output;
+}
 static VALUE evaluate_runner_body(VALUE context) {
     evaluation_call call = *(evaluation_call *)context;
     VALUE self = call.self, instance = call.instance, budget = call.budget;
@@ -1536,6 +1591,7 @@ static VALUE evaluate_runner_body(VALUE context) {
     }
     clear_runtime((VALUE)&call);
     r->active_budget = budget;
+    r->report_sink_done = 0;
     if (!NIL_P(r->report_seed)) {
         report_holder *seed;
         TypedData_Get_Struct(r->report_seed, report_holder, &report_type, seed);
@@ -1569,6 +1625,17 @@ static VALUE evaluate_runner_body(VALUE context) {
     } else if (NIL_P(budget)) {
         if (NIL_P(r->report_state)) r->report_state = rb_ary_new();
         r->active_report_state = r->report_state;
+        VALUE current_report = rb_ary_entry(r->active_report_state, 0);
+        if (!NIL_P(current_report)) {
+            if (rb_typeddata_is_kind_of(current_report, &array_collector_type)) {
+                array_collector *collector = get_array_collector(current_report);
+                collector->busy = 1;
+                sn_report_clear_collection(collector->report, !diagnostics);
+                collector->busy = 0;
+            } else {
+                rb_funcall(current_report, rb_intern_const("native_clear_collection"), 1, diagnostics ? Qtrue : Qfalse);
+            }
+        }
         rb_ary_clear(r->active_report_state);
         if (scoped && NIL_P(r->scope_state)) r->scope_state = rb_ary_new();
         r->active_scope_state = r->scope_state;
@@ -1597,6 +1664,7 @@ static VALUE evaluate_runner_body(VALUE context) {
             TypedData_Get_Struct(completed, report_holder, &report_type, h);
             h->report = sn_callback_report_result(r->caches, call.status);
             collector_adopt(get_array_collector(r->report_sink), completed);
+            r->report_sink_done = 1;
             RB_GC_GUARD(completed);
         }
         VALUE result = call.status == SN_VERDICT_UNSUPPORTED ? Qnil : (call.status ? Qtrue : Qfalse);
@@ -1606,27 +1674,16 @@ static VALUE evaluate_runner_body(VALUE context) {
         return result;
     }
     if (diagnostics == 2) {
+        r->report_sink_done = 1;
         RB_GC_GUARD(instance);
         RB_GC_GUARD(self);
         return owner;
     }
-    size_t count = sn_report_len(h->report);
-    VALUE output = rb_ary_new_capa(count);
-    for (size_t index = 0; index < count; index++) {
-        if (!NIL_P(budget) && index % 256 == 0) rb_funcall(budget, rb_intern("check_deadline!"), 0);
-        diagnostic_record r;
-        sn_report_record(h->report, index, &r);
-        VALUE row = rb_ary_new_capa(NIL_P(r.message) ? 7 : 8);
-        rb_ary_push(output, row);
-        rb_ary_push(row, rb_utf8_str_new((const char *)r.keyword, r.keyword_len));
-        rb_ary_push(row, NIL_P(r.instance_pointer) ? rb_utf8_str_new((const char *)r.instance_path, r.instance_len) : rb_str_dup(r.instance_pointer));
-        rb_ary_push(row, NIL_P(r.schema_pointer) ? rb_utf8_str_new((const char *)r.schema_path, r.schema_len) : rb_str_dup(r.schema_pointer));
-        rb_ary_push(row, INT2NUM(r.opcode));
-        rb_ary_push(row, r.operand);
-        rb_ary_push(row, r.instance);
-        rb_ary_push(row, SIZET2NUM(r.detail));
-        if (!NIL_P(r.message)) rb_ary_push(row, rb_str_dup(r.message));
+    if (sn_report_silent(h->report)) {
+        RB_GC_GUARD(owner);
+        return Qfalse;
     }
+    VALUE output = report_rows(h->report, budget);
     RB_GC_GUARD(owner);
     RB_GC_GUARD(instance);
     RB_GC_GUARD(self);
@@ -1635,6 +1692,14 @@ static VALUE evaluate_runner_body(VALUE context) {
 static VALUE finish_evaluation(VALUE context) {
     evaluation_call *call = (evaluation_call *)context;
     runner_holder *runner = call->runner;
+    if (!NIL_P(runner->report_sink) && !runner->report_sink_done) {
+        VALUE interrupted = collector_report_object();
+        report_holder *partial;
+        TypedData_Get_Struct(interrupted, report_holder, &report_type, partial);
+        partial->report = sn_report_interrupted(runner->caches);
+        if (partial->report) collector_adopt(get_array_collector(runner->report_sink), interrupted);
+        RB_GC_GUARD(interrupted);
+    }
     publish_references(runner, 1);
     size_t unwind = sn_scopes_unwind(runner->caches);
     while (unwind-- > 0) rb_ary_pop(runner->active_scope_state);
@@ -1677,6 +1742,52 @@ static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagn
     RB_GC_GUARD(self);
     return result;
 }
+typedef struct {
+    VALUE target, state, collector, callback, instance, budget;
+    size_t baseline;
+} compatibility_report_call;
+static VALUE call_compatibility_report(VALUE context) {
+    compatibility_report_call *call = (compatibility_report_call *)context;
+    rb_ary_store(call->state, 0, call->collector);
+    return evaluate_runner(call->callback, call->instance, call->budget, 0);
+}
+static VALUE finish_compatibility_report(VALUE context) {
+    compatibility_report_call *call = (compatibility_report_call *)context;
+    array_collector *collector = get_array_collector(call->collector);
+    VALUE rows = report_rows(collector->report, Qnil);
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE native = rb_const_get(schemurai, rb_intern_const("Native"));
+    VALUE diagnostics = rb_const_get(native, rb_intern_const("Diagnostics"));
+    VALUE errors = rb_ary_new_capa(RARRAY_LEN(rows));
+    for (long i = 0; i < RARRAY_LEN(rows); i++)
+        rb_ary_push(errors, rb_funcall(diagnostics, rb_intern_const("error"), 1, rb_ary_entry(rows, i)));
+    size_t count = sn_report_context_count(collector->report, call->baseline);
+    rb_funcall(call->target, rb_intern_const("native_append_report"), 3, errors, SIZET2NUM(count),
+        INT2NUM(sn_report_context_reset(collector->report)));
+    RB_GC_GUARD(rows); RB_GC_GUARD(errors);
+    return Qnil;
+}
+static VALUE compatibility_report_callback(runner_holder *recipe, runner_holder *scope, VALUE target, VALUE instance) {
+    VALUE data = rb_funcall(target, rb_intern_const("native_report_context"), 0);
+    size_t baseline = NUM2SIZET(rb_ary_entry(data, 1));
+    VALUE seed_object = collector_report_object();
+    report_holder *seed;
+    TypedData_Get_Struct(seed_object, report_holder, &report_type, seed);
+    seed->report = sn_report_context(NIL_P(rb_ary_entry(data, 0)), baseline,
+        rb_ary_entry(data, 2), rb_ary_entry(data, 3));
+    VALUE collector = make_report_collector(recipe->owner, recipe->parent, seed_object, instance, recipe->root);
+    VALUE callback = build_runner(recipe->owner, recipe->root);
+    runner_holder *child;
+    TypedData_Get_Struct(callback, runner_holder, &runner_type, child);
+    child->parent = recipe->parent;
+    child->callback_context = 1;
+    child->report_seed = seed_object;
+    child->report_sink = collector;
+    compatibility_report_call call = {target, scope->report_state, collector, callback, instance, scope->active_budget, baseline};
+    VALUE result = rb_ensure(call_compatibility_report, (VALUE)&call, finish_compatibility_report, (VALUE)&call);
+    RB_GC_GUARD(data); RB_GC_GUARD(seed_object); RB_GC_GUARD(collector); RB_GC_GUARD(callback);
+    return result;
+}
 /* A recipe can outlive the method that received its block. Each invocation
  * owns observations, while its evaluator's budget/cache scope is shared. */
 static VALUE scalar_callback(VALUE self, VALUE instance) {
@@ -1699,7 +1810,10 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
     }
     VALUE result;
     VALUE current = NIL_P(parent->report_state) ? Qnil : rb_ary_entry(parent->report_state, 0);
-    if (!NIL_P(current) && recipe->callback_kind == SN_CALLBACK_RUNTIME) {
+    if (!NIL_P(current) && recipe->callback_kind == SN_CALLBACK_RUNTIME
+        && !rb_typeddata_is_kind_of(current, &array_collector_type)) {
+        result = compatibility_report_callback(recipe, parent, current, instance);
+    } else if (!NIL_P(current) && recipe->callback_kind == SN_CALLBACK_RUNTIME) {
         array_collector *collector = get_array_collector(current);
         VALUE seed_object = collector_report_object();
         report_holder *seed;

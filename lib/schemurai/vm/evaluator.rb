@@ -71,7 +71,7 @@ module Schemurai
 
       def backend = :vm
 
-      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil, dynamic_scope: nil, active_state: nil, native_references: nil)
+      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil, dynamic_scope: nil, active_state: nil, native_references: nil, native_reports: nil)
         @graph = graph
         @compiler = compiler
         @root = root
@@ -79,6 +79,7 @@ module Schemurai
         @validate_format = format
         @regexps = regexps
         @active = active_state
+        @native_reports = native_reports
         @native_references = native_references
         @resolved_references = nil
         @number_state = number_state
@@ -92,6 +93,7 @@ module Schemurai
       def validate(instance)
         @errors = []
         prepare_evaluation(paths: true)
+        @native_reports[0] = self if @native_reports
         evaluate(@root, instance)
         Result.new(@errors)
       ensure
@@ -105,7 +107,35 @@ module Schemurai
         @instance_path = nil
         @schema_path = nil
         reset_evaluation_pool
+        @native_reports[0] = self if @native_reports
         evaluate_valid(@root, instance)
+      end
+
+      # Data exchange for retained native blocks during a compatibility traversal.
+      # These methods expose collection state, never programs or instructions.
+      private def native_report_context
+        [@errors, @error_count || 0, @instance_path, @schema_path]
+      end
+
+      private def native_clear_collection(paths = false)
+        @errors = nil
+        @error_count = 0
+        if paths
+          (@instance_path_buffer ||= []).clear
+          (@schema_path_buffer ||= []).clear
+          @instance_path = @instance_path_buffer
+          @schema_path = @schema_path_buffer
+        else
+          @instance_path = nil
+          @schema_path = nil
+        end
+      end
+
+      private def native_append_report(errors, count, reset)
+        native_clear_collection(reset == 2) unless reset.zero?
+        @error_count += count
+        @errors.concat(errors) if @errors
+        @native_reports[0] = self
       end
 
       private def prepare_evaluation(paths:)
@@ -732,6 +762,7 @@ module Schemurai
       ensure
         @errors = saved_errors
         @error_count = saved_count
+        @native_reports[0] = self if @native_reports
         if saved_instance_path
           @instance_path = saved_instance_path
           @schema_path = saved_schema_path

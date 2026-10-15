@@ -345,6 +345,14 @@ impl Caches {
         self.call_cursor.set(ordinal + 1);
         Ok(unsafe { sn_runtime_ordinal(ordinal) })
     }
+    pub(super) fn path_pop(&self) -> Result<(), Verdict> {
+        let ordinal = self.next_call()?;
+        if self.observe(ordinal, unsafe { sn_nil() }, RUNTIME_PATH_POP) == Unsupported {
+            Err(Unsupported)
+        } else {
+            Ok(())
+        }
+    }
     pub(super) fn callback_checkpoint(&self, value: Value) -> Verdict {
         if !self.callback_checkpoints.get() {
             return Valid;
