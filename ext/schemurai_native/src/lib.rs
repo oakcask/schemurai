@@ -124,6 +124,12 @@ const MAX_EVALUATION_DEPTH: usize = 256;
 // No real classified Ruby value has this kind.
 const TYPE_UNCHECKED: i32 = 0;
 type InstanceKind = std::cell::Cell<i32>;
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum KindDemand {
+    None,
+    Predicate,
+    Data,
+}
 const MAX_UNIQUE_INDEX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 enum Op {
@@ -131,7 +137,7 @@ enum Op {
     UnresolvedRef(Value),
     Boolean(bool),
     Ref(scope::Reference),
-    Type(i32),
+    Type(i32, bool),
     Const(Value),
     Enum(Box<enumeration::Enumeration>),
     All(Vec<usize>),
@@ -663,7 +669,7 @@ pub struct Engine {
     pattern_cache_count: usize,
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
-    needs_kind: Vec<bool>,
+    kind_demand: Vec<KindDemand>,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -820,7 +826,7 @@ impl Engine {
                     // shape-independent leaves can ignore resource/path metadata.
                     ka == kb
                         && match (self.nodes[ca].as_slice(), self.nodes[cb].as_slice()) {
-                            ([Op::Type(a)], [Op::Type(b)]) => a == b,
+                            ([Op::Type(a, ua)], [Op::Type(b, ub)]) => a == b && ua == ub,
                             ([Op::Boolean(a)], [Op::Boolean(b)]) => a == b,
                             _ => false,
                         }
@@ -842,7 +848,7 @@ impl Engine {
         self.nodes.push(vec![]);
         self.error_operands.push(vec![]);
         self.tracks.push(false);
-        self.needs_kind.push(false);
+        self.kind_demand.push(KindDemand::None);
         self.metadata.push(scope::Metadata::default());
         let code = self.field(program, b"code\0")?;
         let flags = unsafe { sn_integer(sn_entry(code, 0)) };
@@ -856,16 +862,16 @@ impl Engine {
             error_operands.push((opcode, operand));
             let op = match opcode {
                 OP_BOOLEAN => Op::Boolean(unsafe { sn_true(operand) } != 0),
-                OP_TYPE_NULL => Op::Type(TYPE_NULL),
-                OP_TYPE_BOOLEAN => Op::Type(TYPE_BOOLEAN),
-                OP_TYPE_OBJECT => Op::Type(TYPE_OBJECT),
-                OP_TYPE_ARRAY => Op::Type(TYPE_ARRAY),
-                OP_TYPE_NUMBER => Op::Type(TYPE_NUMBER),
-                OP_TYPE_INTEGER => Op::Type(TYPE_INTEGER),
-                OP_TYPE_STRING => Op::Type(TYPE_STRING),
+                OP_TYPE_NULL => Op::Type(TYPE_NULL, false),
+                OP_TYPE_BOOLEAN => Op::Type(TYPE_BOOLEAN, false),
+                OP_TYPE_OBJECT => Op::Type(TYPE_OBJECT, false),
+                OP_TYPE_ARRAY => Op::Type(TYPE_ARRAY, false),
+                OP_TYPE_NUMBER => Op::Type(TYPE_NUMBER, false),
+                OP_TYPE_INTEGER => Op::Type(TYPE_INTEGER, false),
+                OP_TYPE_STRING => Op::Type(TYPE_STRING, false),
                 OP_TYPES => {
                     let mask = self.field(operand, b"mask\0")?;
-                    Op::Type(unsafe { sn_integer(mask) } as i32)
+                    Op::Type(unsafe { sn_integer(mask) } as i32, true)
                 }
                 OP_CONST => Op::Const(operand),
                 OP_ENUM => Op::Enum(Box::new(enumeration::Enumeration::compile(
@@ -1233,24 +1239,28 @@ impl Engine {
             };
             ops.push(op);
         }
-        self.needs_kind[index] = ops.iter().any(|op| match op {
-            Op::Type(_)
-            | Op::Const(_)
-            | Op::Enum(_)
-            | Op::Number(..)
-            | Op::String(..)
-            | Op::Array(..)
-            | Op::Object(..) => true,
-            Op::Unsupported
-            | Op::Boolean(_)
-            | Op::UnresolvedRef(_)
-            | Op::Ref(_)
-            | Op::All(_)
-            | Op::Any(_)
-            | Op::One(_)
-            | Op::Not(_)
-            | Op::Conditional(..) => false,
-        });
+        self.kind_demand[index] = ops
+            .iter()
+            .map(|op| match op {
+                Op::Type(..) => KindDemand::Predicate,
+                Op::Const(_)
+                | Op::Enum(_)
+                | Op::Number(..)
+                | Op::String(..)
+                | Op::Array(..)
+                | Op::Object(..) => KindDemand::Data,
+                Op::Unsupported
+                | Op::Boolean(_)
+                | Op::UnresolvedRef(_)
+                | Op::Ref(_)
+                | Op::All(_)
+                | Op::Any(_)
+                | Op::One(_)
+                | Op::Not(_)
+                | Op::Conditional(..) => KindDemand::None,
+            })
+            .max()
+            .unwrap_or(KindDemand::None);
         self.nodes[index] = ops;
         self.error_operands[index] = error_operands;
         Ok(index)
@@ -1350,7 +1360,7 @@ impl Execution<'_> {
             kind_state.set(kind);
             kind
         };
-        if kind == TYPE_UNSUPPORTED {
+        if self.unsupported_kind(node, kind) {
             return Unsupported;
         }
         for op in &self.nodes[node] {
@@ -1402,6 +1412,7 @@ impl Execution<'_> {
                     match evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Validity(branch_kind),
+                        self.caches.dynamic_types(),
                         |child| {
                             self.eval_with_kind(child, value, depth + 1, active, Some(kind_state))
                         },
@@ -1459,7 +1470,7 @@ impl Execution<'_> {
             Op::Unsupported => Unsupported,
             Op::UnresolvedRef(_) => Invalid,
             Op::Boolean(v) => verdict(*v),
-            Op::Type(mask) => verdict(kind & mask != 0),
+            Op::Type(mask, union) => self.type_verdict(*mask, *union, kind, value),
             Op::Const(v) => equal_budgeted(*v, value, depth, &self.budget),
             Op::Enum(values) => values.eval(value, kind, depth, self.fixnum_flag, &self.budget),
             Op::Number(required, rules) => {
@@ -1536,7 +1547,7 @@ impl Execution<'_> {
                 unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
             };
             let primitive = match self.nodes[child].as_slice() {
-                [Op::Type(mask)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
+                [Op::Type(mask, _)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
                     Some(&[][..])
                 }
                 [Op::Number(_, rules)] => rules.fast_limits.as_deref(),
@@ -1717,7 +1728,7 @@ impl Execution<'_> {
             return None;
         };
         let total = match op {
-            Op::Type(_) | Op::Boolean(_) => true,
+            Op::Type(..) | Op::Boolean(_) => true,
             Op::Const(expected) => expected & self.fixnum_flag != 0,
             Op::Number(_, rules) => rules.fast_limits.is_some(),
             _ => false,
@@ -1994,11 +2005,21 @@ impl Execution<'_> {
         };
         decode(unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) })
     }
+    fn unsupported_kind(&self, node: usize, kind: i32) -> bool {
+        kind == TYPE_UNSUPPORTED && self.kind_demand[node] == KindDemand::Data
+    }
+    fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
+        if kind == TYPE_UNSUPPORTED {
+            self.caches.type_predicate(value, mask, union)
+        } else {
+            verdict(kind & mask != 0)
+        }
+    }
     fn instance_kind(&self, node: usize, value: Value) -> i32 {
         if value & self.fixnum_flag != 0 {
             return TYPE_INTEGRAL_NUMBER;
         }
-        if !self.needs_kind[node] {
+        if self.kind_demand[node] == KindDemand::None {
             return TYPE_UNCHECKED;
         }
         if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)] if rules.record.is_some()) {
@@ -2015,7 +2036,7 @@ impl Execution<'_> {
         }
         let kind = if value & self.fixnum_flag != 0 {
             TYPE_INTEGRAL_NUMBER
-        } else if !self.needs_kind[node] {
+        } else if self.kind_demand[node] == KindDemand::None {
             TYPE_UNCHECKED
         } else {
             unsafe { sn_kind(value) }
@@ -2045,7 +2066,7 @@ impl Execution<'_> {
                 rules.eval_guarded(self.caches, *required, value)
             }
             [
-                op @ (Op::Type(_)
+                op @ (Op::Type(..)
                 | Op::Boolean(_)
                 | Op::Number(..)
                 | Op::String(..)
@@ -2053,7 +2074,7 @@ impl Execution<'_> {
                 | Op::Enum(_)),
             ] if depth <= MAX_EVALUATION_DEPTH => {
                 let kind = self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED));
-                if kind == TYPE_UNSUPPORTED {
+                if self.unsupported_kind(node, kind) {
                     Unsupported
                 } else {
                     self.leaf(op, kind, value, depth)
@@ -3364,7 +3385,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
-    let kinds = unsafe { &*std::ptr::addr_of!((*engine).needs_kind) };
+    let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3373,8 +3394,8 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let projection = unsafe { &*std::ptr::addr_of!((*engine).memo_scope_projection) };
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
-        + (kinds.capacity()
-            + contextual.capacity()
+        + kinds.capacity() * std::mem::size_of::<KindDemand>()
+        + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()
             + same.capacity()

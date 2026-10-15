@@ -14,6 +14,10 @@ static ID identity_methods[5];
  * lookup, which can create callable entries, runs after that evaluation exits. */
 static _Thread_local const void *active_caches;
 extern int sn_identity_kind(const void *, VALUE);
+/* Runtime cursors fit the positive Fixnum range, checked by Rust. */
+VALUE sn_runtime_ordinal(size_t ordinal) {
+    return ((VALUE)ordinal << 1) | RUBY_FIXNUM_FLAG;
+}
 
 /* The C layer adapts CRuby APIs to Rust's opaque VALUEs. */
 #ifdef HAVE_RB_HASH_STLIKE_FOREACH
@@ -698,6 +702,16 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind >= SN_RUNTIME_TYPE) {
+        int selector = operation->kind - SN_RUNTIME_TYPE;
+        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+        VALUE helper = rb_const_get(internal, rb_intern_const("TypeChecks"));
+        VALUE result = rb_funcall(helper, rb_intern_const("valid?"), 3, instance,
+            INT2FIX(selector >> 1), (selector & 1) ? Qtrue : Qfalse);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return result;
+    }
     if (operation->kind == SN_RUNTIME_DIAGNOSTIC_MESSAGE) {
         VALUE message = build_message(r);
         if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);

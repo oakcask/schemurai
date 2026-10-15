@@ -13,6 +13,8 @@ pub struct Caches {
     pending: std::cell::Cell<Option<(Value, Value, i32)>>,
     deadline: std::cell::Cell<Option<std::time::Instant>>,
     runtime_order: std::cell::Cell<bool>,
+    dynamic_types: std::cell::Cell<bool>,
+    type_cursor: std::cell::Cell<usize>,
     pointers: std::cell::RefCell<Pointers>,
     pending_pointer: std::cell::Cell<Option<usize>>,
     messages: std::cell::RefCell<HashMap<Message, Option<Value>>>,
@@ -20,6 +22,7 @@ pub struct Caches {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Message {
+    ordinal: usize,
     keyword: &'static str,
     opcode: i32,
     operand: Value,
@@ -45,6 +48,7 @@ struct PointerRequest {
     result: Option<Value>,
 }
 unsafe extern "C" {
+    fn sn_runtime_ordinal(ordinal: usize) -> Value;
     fn sn_cached_runtime(
         matches: *const c_void,
         operation: i32,
@@ -87,6 +91,22 @@ impl Caches {
         // Qundef cannot be a Ruby pattern operand, including malformed schemas.
         self.observe(unsafe { sn_undefined() }, value, RUNTIME_JSON)
     }
+    pub(super) fn dynamic_types(&self) -> bool {
+        self.dynamic_types.get()
+    }
+    pub(super) fn type_predicate(&self, value: Value, mask: i32, union: bool) -> Verdict {
+        self.dynamic_types.set(true);
+        let ordinal = self.type_cursor.get();
+        if ordinal > (isize::MAX >> 1) as usize {
+            return Unsupported;
+        }
+        self.type_cursor.set(ordinal + 1);
+        self.observe(
+            unsafe { sn_runtime_ordinal(ordinal) },
+            value,
+            RUNTIME_TYPE + mask * 2 + i32::from(union),
+        )
+    }
     pub(super) fn required_missing(&self, name: Value, value: Value) -> Verdict {
         self.observe(name, value, RUNTIME_REQUIRED_MISSING)
     }
@@ -96,8 +116,10 @@ impl Caches {
         source: (i32, Value),
         instance: Value,
         detail: usize,
+        ordinal: usize,
     ) -> Result<Value, Verdict> {
         let message = Message {
+            ordinal,
             keyword,
             opcode: source.0,
             operand: source.1,
@@ -236,6 +258,7 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
     let caches = unsafe { &*caches };
     caches.matches.set(matches);
     caches.pending.set(None);
+    caches.type_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.pending_message.set(None);
 }
@@ -245,9 +268,11 @@ pub unsafe extern "C" fn sn_caches_runtime(caches: *const Caches, matches: *cons
 pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
+    caches.type_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.deadline.set(None);
     caches.runtime_order.set(false);
+    caches.dynamic_types.set(false);
     *caches.pointers.borrow_mut() = Pointers::default();
     *caches.messages.borrow_mut() = HashMap::new();
     caches.pending_message.set(None);
@@ -258,6 +283,7 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
 pub unsafe extern "C" fn sn_caches_observe(caches: *const Caches) {
     let caches = unsafe { &*caches };
     caches.pending.set(None);
+    caches.type_cursor.set(0);
     caches.pending_pointer.set(None);
     caches.pending_message.set(None);
     caches.runtime_order.set(true);

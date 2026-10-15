@@ -64,6 +64,8 @@ SN_CONSTANT(RUNTIME_REQUIRED_MISSING, 5)
 SN_CONSTANT(RUNTIME_DIAGNOSTIC_MESSAGE, 6)
 /* Null numeric requests add twice the assertion bit and the decimal-mode bit. */
 SN_CONSTANT(RUNTIME_NULL_NUMBER, 8)
+/* Type requests add twice the type mask and the union-opcode bit. */
+SN_CONSTANT(RUNTIME_TYPE, 64)
 SN_CONSTANT(ADAPTER_UNSUPPORTED, 3)
 SN_CONSTANT(STATUS_PANIC, -1)
 SN_CONSTANT(STATUS_EXCEPTION, -2)

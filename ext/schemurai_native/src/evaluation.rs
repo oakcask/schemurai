@@ -72,24 +72,27 @@ pub(super) struct BranchMatches<R> {
 pub(super) fn scan_branches<R: BranchResult>(
     nodes: &[(usize, usize)],
     policy: BranchPolicy,
+    separate_calls: bool,
     mut evaluate: impl FnMut(usize) -> R,
 ) -> Result<BranchMatches<R>, Verdict> {
     let mut result = BranchMatches {
         matches: 0,
         coverage: R::valid(),
     };
-    for &(node, multiplicity) in nodes {
-        let branch = evaluate(node);
-        match branch.status() {
-            Unsupported => return Err(Unsupported),
-            Invalid => {}
-            Valid => {
-                result.matches += multiplicity;
-                result.coverage.merge(branch);
+    'groups: for &(node, multiplicity) in nodes {
+        for _ in 0..if separate_calls { multiplicity } else { 1 } {
+            let branch = evaluate(node);
+            match branch.status() {
+                Unsupported => return Err(Unsupported),
+                Invalid => {}
+                Valid => {
+                    result.matches += if separate_calls { 1 } else { multiplicity };
+                    result.coverage.merge(branch);
+                }
             }
-        }
-        if policy.finished(result.matches) {
-            break;
+            if policy.finished(result.matches) {
+                break 'groups;
+            }
         }
     }
     Ok(result)
@@ -194,7 +197,8 @@ mod tests {
         let nodes = [(0, 2), (1, 1)];
         let evaluate = |node| if node == 0 { Valid } else { Unsupported };
         for kind in [BranchKind::Any, BranchKind::One] {
-            let result = scan_branches(&nodes, BranchPolicy::Validity(kind), evaluate).unwrap();
+            let result =
+                scan_branches(&nodes, BranchPolicy::Validity(kind), false, evaluate).unwrap();
             assert_eq!(result.matches, 2);
             assert_eq!(
                 kind.accepts(result.matches),
@@ -202,7 +206,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            scan_branches(&nodes, BranchPolicy::Complete, evaluate),
+            scan_branches(&nodes, BranchPolicy::Complete, false, evaluate),
             Err(Unsupported)
         ));
     }
