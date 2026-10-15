@@ -12,10 +12,8 @@ module Schemurai
           value
         end
         case bit
-        when Protocol::MAXIMUM then !(actual > nil)
-        when Protocol::MINIMUM then !(actual < nil)
-        when Protocol::EXCLUSIVE_MAXIMUM then !(actual >= nil)
-        when Protocol::EXCLUSIVE_MINIMUM then !(actual <= nil)
+        when Protocol::MAXIMUM, Protocol::MINIMUM, Protocol::EXCLUSIVE_MAXIMUM, Protocol::EXCLUSIVE_MINIMUM
+          Internal::NumberChecks.bound?(actual, bit, nil)
         when Protocol::MULTIPLE_OF then nil.positive? && actual.remainder(nil).zero?
         else raise "unknown null numeric assertion"
         end

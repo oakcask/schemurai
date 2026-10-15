@@ -132,7 +132,7 @@ impl Memo {
     ) -> Option<Key> {
         // Dynamic Ruby predicates may be stateful. Replayed observations already
         // preserve reached calls; result memoization must not skip later calls.
-        if engine.caches.dynamic_types() || !engine.memoizable[node] {
+        if engine.caches.dynamic_calls() || !engine.memoizable[node] {
             return None;
         }
         let mut object = false;

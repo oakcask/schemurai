@@ -59,7 +59,7 @@ impl Report {
         ))
         .then_some(keyword);
         let schema_path = self.schema_path.render(caches, keyword_segment)?;
-        let message = if self.render_messages || caches.dynamic_types() {
+        let message = if self.render_messages || caches.dynamic_calls() {
             caches.error_message(keyword, source, instance, detail, self.errors.len())?
         } else {
             unsafe { sn_nil() }
@@ -148,7 +148,11 @@ impl Execution<'_> {
         kind: i32,
     ) -> Option<Verdict> {
         match self.nodes[node].as_slice() {
-            [Op::Number(required, rules)] if !rules.runtime_operands() => {
+            [Op::Number(required, rules)]
+                if kind != TYPE_UNSUPPORTED
+                    && !self.caches.dynamic_calls()
+                    && !rules.runtime_operands() =>
+            {
                 // A typed-integer failure still performs numeric conversion in
                 // a trial, so preserve nonfinite decimal exceptions as well.
                 let status = if kind & TYPE_NUMBER != 0 {
@@ -332,6 +336,12 @@ impl Execution<'_> {
                     Valid => {}
                 },
                 Op::Number(required, rules) => {
+                    if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
+                        rules.runtime_failures(self.caches, *required, value, |keyword| {
+                            report.add(self.caches, keyword, source, value, 0)
+                        })?;
+                        continue;
+                    }
                     if *required != 0 && kind & required == 0 {
                         report.add(self.caches, "type", source, value, 0)?;
                     }
@@ -503,6 +513,7 @@ impl Execution<'_> {
                             [Op::Number(_, rules)] => rules.fast_limits.as_deref(),
                             _ => None,
                         };
+                        let primitive = primitive.filter(|_| !self.caches.dynamic_calls());
                         let values = if len == 0 {
                             &[]
                         } else {
@@ -516,7 +527,9 @@ impl Execution<'_> {
                         };
                         let pattern = pattern.filter(|_| !self.budget.timed());
                         let number = match self.nodes[child].as_slice() {
-                            [Op::Number(required, number)] if depth < MAX_EVALUATION_DEPTH => {
+                            [Op::Number(required, number)]
+                                if depth < MAX_EVALUATION_DEPTH && !self.caches.dynamic_calls() =>
+                            {
                                 Some((*required, number))
                             }
                             _ => None,
@@ -608,7 +621,9 @@ impl Execution<'_> {
                                     ) {
                                         Valid => false,
                                         Invalid => true,
-                                        Unsupported => return Err(Unsupported),
+                                        Unsupported => {
+                                            self.needs_diagnostics(child, item, depth + 1)?
+                                        }
                                     }
                                 } else {
                                     self.needs_diagnostics(child, item, depth + 1)?
@@ -866,7 +881,7 @@ impl Execution<'_> {
                     let result = evaluation::scan_branches(
                         nodes,
                         evaluation::BranchPolicy::Complete,
-                        self.caches.dynamic_types(),
+                        self.caches.dynamic_calls(),
                         |child| self.eval_tracked_kind(child, value, depth + 1, active, kind_state),
                     )?;
                     if !branch_kind.accepts(result.matches) {
@@ -1017,6 +1032,12 @@ impl Execution<'_> {
         }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
+                if self.caches.dynamic_calls()
+                    || self.diagnostic_kind(node, value, &InstanceKind::new(TYPE_UNCHECKED))
+                        == TYPE_UNSUPPORTED
+                {
+                    return Ok(true);
+                }
                 rules.eval_guarded(self.caches, *required, value, &self.budget)
             }
             [

@@ -54,6 +54,8 @@ typedef struct {
 } message_arguments;
 extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
+typedef struct { VALUE ordinal, rules, instance; } number_arguments;
+extern void sn_number_arguments(const void *, number_arguments *);
 extern void sn_free(void *);
 extern const void *sn_roots(const void *);
 extern void sn_roots_mark(const void *);
@@ -126,7 +128,7 @@ static VALUE evaluate_runner(VALUE, VALUE, VALUE, int);
 static VALUE build_runner(VALUE, size_t);
 /* Search caches and root selection belong to the owning validator. The Ruby
  * owner keeps the shared engine and all its GC roots alive. */
-typedef struct { VALUE owner, regexps, pointers, messages; void *caches; size_t root; st_table *matches; } runner_holder;
+typedef struct { VALUE owner, regexps, pointers, messages, numbers, number_state, limited_number_state; void *caches; size_t root; st_table *matches, *number_frames; } runner_holder;
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -155,12 +157,16 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->regexps);
     rb_gc_mark(r->pointers);
     rb_gc_mark(r->messages);
+    rb_gc_mark(r->numbers);
+    rb_gc_mark(r->number_state);
+    rb_gc_mark(r->limited_number_state);
     if (r->caches) sn_caches_mark(r->caches);
     if (r->matches) st_foreach(r->matches, mark_operation, 0);
 }
 static void runner_release(void *ptr) {
     runner_holder *h = ptr;
     if (h->caches) sn_caches_free(h->caches);
+    if (h->number_frames) st_free_table(h->number_frames);
     if (h->matches) {
         st_foreach(h->matches, release_operation, 0);
         st_free_table(h->matches);
@@ -179,6 +185,7 @@ static int operation_size(st_data_t key, st_data_t value, st_data_t context) {
 static size_t runner_size(const void *ptr) {
     const runner_holder *h = ptr;
     size_t bytes = sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
+    if (h->number_frames) bytes += st_memsize(h->number_frames);
     if (h->matches) {
         bytes += st_memsize(h->matches);
         st_foreach(h->matches, operation_size, (st_data_t)&bytes);
@@ -231,9 +238,14 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->regexps = Qnil;
     r->pointers = Qnil;
     r->messages = Qnil;
+    r->numbers = Qnil;
+    r->number_state = Qnil;
+    r->limited_number_state = Qnil;
     r->root = index;
     r->caches = NULL;
     r->matches = NULL;
+    r->number_frames = NULL;
+    r->number_frames = st_init_numtable();
     r->matches = st_init_numtable();
     r->caches = sn_caches_new();
     sn_caches_runtime(r->caches, r->matches);
@@ -622,6 +634,9 @@ static VALUE clear_runtime(VALUE context) {
     st_clear(call->runner->matches);
     call->runner->pointers = Qnil;
     call->runner->messages = Qnil;
+    call->runner->numbers = Qnil;
+    call->runner->limited_number_state = Qnil;
+    st_clear(call->runner->number_frames);
     sn_caches_runtime(call->runner->caches, call->runner->matches);
     sn_caches_begin(call->runner->caches);
     return Qnil;
@@ -695,6 +710,45 @@ static VALUE build_message(runner_holder *runner) {
     RB_GC_GUARD(helper);
     return result;
 }
+static VALUE number_step(runner_holder *runner, int operation, VALUE budget) {
+    number_arguments arguments;
+    sn_number_arguments(runner->caches, &arguments);
+    st_data_t stored;
+    VALUE frame;
+    if (st_lookup(runner->number_frames, (st_data_t)arguments.ordinal, &stored)) {
+        frame = rb_ary_entry(runner->numbers, (long)stored);
+    } else {
+        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+        VALUE checks = rb_const_get(internal, rb_intern_const("NumberChecks"));
+        VALUE *number_state = NIL_P(budget) ? &runner->number_state : &runner->limited_number_state;
+        if (NIL_P(*number_state)) {
+            VALUE state = rb_const_get(checks, rb_intern_const("State"));
+            *number_state = rb_class_new_instance(0, NULL, state);
+            if (!NIL_P(budget)) rb_funcall(*number_state, rb_intern_const("budget="), 1, budget);
+        }
+        VALUE klass = rb_const_get(checks, rb_intern_const("Frame"));
+        VALUE args[] = {arguments.rules, arguments.instance, *number_state};
+        frame = rb_class_new_instance(3, args, klass);
+        if (NIL_P(runner->numbers)) runner->numbers = rb_ary_new();
+        size_t index = RARRAY_LEN(runner->numbers);
+        rb_ary_push(runner->numbers, frame);
+        /* Array indices remain valid if compaction moves a frame. */
+        st_insert(runner->number_frames, (st_data_t)arguments.ordinal, (st_data_t)index);
+    }
+    int selector = operation - SN_RUNTIME_NUMBER;
+    int step = selector >> 6;
+    VALUE result;
+    switch (step) {
+        case 0: result = rb_funcall(frame, rb_intern_const("valid?"), 1, INT2FIX(selector & 63)); break;
+        case 1: result = rb_funcall(frame, rb_intern_const("numeric?"), 0); break;
+        case 2: result = rb_funcall(frame, rb_intern_const("integral?"), 0); break;
+        case 3: result = rb_funcall(frame, rb_intern_const("prepare"), 0); break;
+        default: result = rb_funcall(frame, rb_intern_const("check"), 1, INT2FIX(1 << (step - 4))); break;
+    }
+    RB_GC_GUARD(frame);
+    return result;
+}
 typedef struct { evaluation_call *call; VALUE source, instance; int kind; } runtime_call;
 static VALUE call_runtime(VALUE context) {
     runtime_call *operation = (runtime_call *)context;
@@ -702,6 +756,11 @@ static VALUE call_runtime(VALUE context) {
     VALUE source = operation->source, instance = operation->instance;
     runner_holder *r = call->runner;
     if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+    if (operation->kind >= SN_RUNTIME_NUMBER) {
+        VALUE result = number_step(r, operation->kind, operation->call->budget);
+        if (!NIL_P(call->budget)) rb_funcall(call->budget, rb_intern_const("check_deadline!"), 0);
+        return result;
+    }
     if (operation->kind >= SN_RUNTIME_TYPE) {
         int selector = operation->kind - SN_RUNTIME_TYPE;
         VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);

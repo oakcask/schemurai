@@ -793,9 +793,9 @@ schema graph grows, including growth during lazy external-resource indexing.
 Resolved validators keep their existing program. Shareable registries continue
 to require successful reference resolution before sharing.
 
-Unsupported instructions or numeric representations return an internal
-unsupported result and delegate to the existing Ruby VM. This still includes
-unusual Numeric objects. Null numeric operands execute the original Ruby
+Unsupported instructions or storage representations return an internal
+unsupported result and delegate to the existing Ruby VM. Numeric assertions on
+unusual Numeric objects use staged libruby calls instead. Null numeric operands execute the original Ruby
 comparisons or divisibility methods through libruby after Rust has returned,
 preserving Ruby exceptions and operator visibility. Native traversal interleaves
 those observations with ordered failures so earlier error limits and diagnostic
@@ -845,6 +845,20 @@ one, an ordered retry also renders earlier messages at their evaluation position
 preserving message exceptions and side effects before later predicates. Message
 observations distinguish output occurrences. Ordinary supported values retain
 the native bit-mask and scan paths.
+Numeric assertions preserve Ruby applicability, integral checks, decimal conversion
+and comparison methods for special instances. Validity uses one Ruby numeric
+frame; diagnostic and trial traversal yields between individual assertions so
+error limits and message exceptions keep their original priority. VM execution
+and native runtime frames share numeric rules and bounded decimal/multiple
+caches. Unbounded calls retain their runner's cache; bounded calls use a fresh
+cache, matching the VM's invocation-local limited evaluator. Ordinary JSON
+numbers keep native arithmetic until a dynamic call requires ordered replay;
+that replay also routes earlier numeric assertions through Ruby to preserve
+current-invocation cache observations. Pure native calls do not populate Ruby
+caches. Successful runtime predicates never authorize native storage access;
+mixed schemas can still encounter another unsupported storage assertion and
+transfer to the VM. Numeric runtime frames and results are rooted outside Rust,
+and separate Ractors own separate frames and caches.
 Successful detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required

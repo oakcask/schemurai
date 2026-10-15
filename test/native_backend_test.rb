@@ -3080,7 +3080,7 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "rejects coercible numeric objects before entering the Integer scalar adapter" do
+  it "dispatches special numeric values without entering the Integer scalar adapter" do # rubocop:disable RSpec/ExampleLength
     numeric = Class.new(Numeric) do
       def to_int = raise("numeric coercion")
       def to_f = raise("numeric coercion")
@@ -3088,13 +3088,217 @@ RSpec.describe "native VALUE execution" do
     end.new
     rule = {"type" => "number", "minimum" => 0, "maximum" => 2**100}
     schemas = [rule, {"items" => rule}, {"properties" => {"value" => rule}}]
-    [numeric, Rational(3, 2), Complex(1, 2)].each do |value|
-      schemas.each_with_index do |schema, index|
-        native = Schemurai.compile(schema, backend: :native)
-        program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    cases = [numeric, Rational(3, 2), Complex(1, 2)].flat_map do |value|
+      schemas.each_with_index.map do |schema, index|
         instance = [value, [value], {"value" => value}].fetch(index)
-        expect(program.valid?(instance)).to be_nil
-        expect(program.diagnostics(instance)).to be_nil
+        vm = Schemurai.compile(schema, backend: :vm)
+        [Schemurai.compile(schema, backend: :native), instance,
+          [:valid?, :validate].map { |method| capture_validation(vm, method, instance) }]
+      end
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, instance, expected|
+      [:valid?, :validate].zip(expected).each do |method, result|
+        expect(capture_validation(native, method, instance)).to eq(result)
+      end
+    end
+  end
+
+  it "evaluates special numeric bounds and multiples through native traversal" do # rubocop:disable RSpec/ExampleLength
+    rules = [{"maximum" => 1}, {"minimum" => 1}, {"exclusiveMaximum" => 1},
+      {"exclusiveMinimum" => 1}, {"multipleOf" => 0.3},
+      {"maximum" => 1, "minimum" => 2, "exclusiveMaximum" => 1, "exclusiveMinimum" => 2, "multipleOf" => 0.5}]
+    rules = rules.flat_map do |rule|
+      [rule, rule.merge("type" => "number"), rule.merge("type" => "integer"), rule.merge("type" => ["integer", "string"])]
+    end
+    fake = Object.new
+    fake.define_singleton_method(:is_a?) { |klass| klass == Numeric }
+    fake.define_singleton_method(:finite?) { true }
+    fake.define_singleton_method(:to_i) { 1 }
+    fake.define_singleton_method(:to_s) { "1.5" }
+    [:>, :<, :>=, :<=].each { |operator| fake.define_singleton_method(operator) { |limit| 1.5.public_send(operator, limit) } }
+    values = [fake, BasicObject.new, Class.new(String).new("x"), Class.new(Array).new, Class.new(Hash).new,
+      Rational(3, 2), Rational(1, 1), Rational(-1, 3), Rational(2**4096, 3), Complex(1, 2)]
+    cases = rules.flat_map do |rule|
+      wrappers = [->(value) { [rule, value] }, ->(value) { [{"items" => rule}, [1, value, value]] },
+        ->(value) { [{"properties" => {"a~/b" => rule}}, {"a~/b" => value}] },
+        ->(value) { [{"contains" => rule}, [value]] },
+        ->(value) { [{"$defs" => {"n" => rule}, "allOf" => [{"$ref" => "#/$defs/n"}, {"$ref" => "#/$defs/n"}]}, value] }]
+      wrappers.map do |wrap|
+        schema = wrap.call(nil).first
+        vm = Schemurai.compile(schema, backend: :vm)
+        expected = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).map do |value, method, options|
+          input = wrap.call(value).last
+          [input, method, options, capture_validation(vm, method, input, **options)]
+        end
+        [Schemurai.compile(schema, backend: :native), expected]
+      end
+    end
+    GC.verify_compaction_references(double_heap: true, toward: :empty)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, expected|
+      expected.each do |input, method, options, result|
+        expect(capture_validation(native, method, input, **options)).to eq(result)
+      end
+    end
+  end
+
+  it "preserves numeric method order, cache observations and staged diagnostic failures" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Numeric) do
+      attr_reader :calls
+      def initialize
+        @calls = []
+      end
+
+      def is_a?(klass)
+        @calls << [:is_a?, klass]
+        super
+      end
+
+      def finite?
+        @calls << :finite?
+        true
+      end
+
+      def to_i
+        @calls << :to_i
+        1
+      end
+
+      def to_s
+        @calls << :to_s
+        "1.5"
+      end
+
+      def inspect = "special number"
+
+      def hash
+        @calls << :hash
+        15
+      end
+
+      def ==(other)
+        @calls << [:==, other]
+        false
+      end
+
+      [:>, :<, :>=, :<=].each do |operator|
+        define_method(operator) do |other|
+          @calls << [operator, other]
+          1.5.public_send(operator, other)
+        end
+      end
+    end
+    rules = [{"maximum" => 1, "minimum" => 2, "exclusiveMaximum" => 1, "exclusiveMinimum" => 2},
+      {"type" => "integer", "maximum" => 1, "multipleOf" => 0.3},
+      {"type" => "integer", "maximum" => nil}, {"maximum" => 1, "minimum" => nil}]
+    schemas = rules.flat_map do |rule|
+      [rule, {"items" => rule}, {"anyOf" => [rule, rule]}, {"oneOf" => [rule, rule]},
+        {"$defs" => {"n" => rule}, "allOf" => [{"$ref" => "#/$defs/n"}, {"$ref" => "#/$defs/n"}]}]
+    end
+    schemas.each do |schema|
+      [:valid?, :validate].product([{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]).each do |method, options|
+        vm = Schemurai.compile(schema, backend: :vm)
+        native = Schemurai.compile(schema, backend: :native)
+        evaluator = native.instance_variable_get(:@evaluator)
+        allow(evaluator).to receive(:limited_vm).and_raise("VM execution")
+        fallback = evaluator.instance_variable_get(:@vm)
+        allow(fallback).to receive(:valid?).and_raise("VM execution")
+        allow(fallback).to receive(:validate).and_raise("VM execution")
+        values = [klass.new, klass.new]
+        inputs = values.map { |value| schema.key?("items") ? [0.5, value, value] : value }
+        2.times do
+          values.each { |value| value.calls.clear }
+          expected = capture_validation(vm, method, inputs.first, **options)
+          expect(capture_validation(native, method, inputs.last, **options)).to eq(expected)
+          expect([schema, method, options, values.last.calls]).to eq([schema, method, options, values.first.calls])
+        end
+      end
+    end
+  end
+
+  it "retains Ruby truthiness and GC roots between numeric runtime stages" do
+    truthy = Object.new
+    truthy.define_singleton_method(:!) { raise "truthiness dispatched !" }
+    klass = Class.new(Numeric)
+    [:>, :<, :>=, :<=].each do |operator|
+      klass.define_method(operator) do |_other|
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        truthy
+      end
+    end
+    numeric = klass.new
+    rule = {"maximum" => 1, "minimum" => 2, "exclusiveMaximum" => 1, "exclusiveMinimum" => 2}
+    expect_native_policy_results([rule, {"allOf" => [rule, rule]}], [numeric])
+    expect(Schemurai.compile(rule, backend: :native).validate(numeric).errors.map(&:keyword)).to eq(rule.keys)
+  end
+
+  it "keeps numeric runtime frames and decimal caches private to each Ractor" do
+    schema = {"items" => {"minimum" => 1, "multipleOf" => 0.5}}
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:numeric" => schema}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        validator = shared.validator_for("urn:numeric")
+        runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        value = [Rational(3, 2), Rational(1, 3)]
+        GC.start
+        [runner.valid?(value), runner.diagnostics(value).map(&:first)]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[minimum multipleOf]]) }
+  end
+
+  it "uses truthiness for integer predicates without calling the result's negation" do
+    truthy = Object.new
+    truthy.define_singleton_method(:!) { raise "predicate negation" }
+    integer = Object.new
+    integer.define_singleton_method(:==) { |_value| truthy }
+    klass = Class.new(Numeric) do
+      attr_accessor :integer
+      def finite? = true
+      def to_i = integer
+      def <(_other) = false
+    end
+    value = klass.new
+    value.integer = integer
+    expect_native_policy_results([{"type" => "integer", "minimum" => 0}], [value])
+  end
+
+  it "roots converted numbers when a cache key triggers compaction" do
+    klass = Class.new(Numeric) do
+      def to_s = "1.5"
+
+      def hash
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        15
+      end
+    end
+    rule = {"maximum" => 1, "multipleOf" => 1}
+    expect_native_policy_results([rule, {"allOf" => [rule, rule]}], [klass.new])
+  end
+
+  it "checks the numeric conversion deadline before a later comparison exception" do
+    klass = Class.new(Numeric) do
+      attr_accessor :converted
+      def to_s
+        converted.call
+        "1.5"
+      end
+    end
+    rule = {"maximum" => nil, "multipleOf" => 0.5}
+    allow(Process).to receive(:clock_gettime).and_call_original
+    [:vm, :native].each do |backend|
+      value = klass.new
+      value.converted = -> { allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2) }
+      validator = Schemurai.compile(rule, backend: backend)
+      [:valid?, :validate].each do |method|
+        allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+        expect { validator.public_send(method, value, timeout: 0.1) }.to raise_error(Schemurai::LimitExceeded) { |error|
+          expect(error.limit).to eq(:timeout)
+        }
       end
     end
   end
