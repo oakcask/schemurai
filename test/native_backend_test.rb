@@ -2760,6 +2760,7 @@ RSpec.describe "native VALUE execution" do
       [{"items" => {"anyOf" => [true, numeric]}, "maxItems" => 1}, [1, 5]],
       [{"properties" => {"x" => {"anyOf" => [true, numeric]}}}, {"x" => 5}],
       [{"items" => {"items" => {"anyOf" => [true, numeric]}}}, [[5]]],
+      [{"$defs" => {"n" => {"anyOf" => [true, numeric]}}, "items" => {"$ref" => "#/$defs/n"}}, [5]],
       [{"anyOf" => [true, {"maxItems" => 0, "contains" => numeric}]}, [5]],
       [{"$defs" => {"s" => string}, "anyOf" => [true, {"$ref" => "#/$defs/s"}]}, incompatible],
       [dialect.merge(string, "unevaluatedItems" => false), incompatible],

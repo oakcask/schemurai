@@ -939,9 +939,27 @@ impl Execution<'_> {
         Ok(if failed { Tracked::new(Invalid) } else { prior })
     }
 
-    fn needs_diagnostics(&self, node: usize, value: Value, depth: usize) -> Result<bool, Verdict> {
-        if !self.budget.checkpoint() {
-            return Err(Unsupported);
+    fn needs_diagnostics(
+        &self,
+        mut node: usize,
+        value: Value,
+        mut depth: usize,
+    ) -> Result<bool, Verdict> {
+        loop {
+            if !self.budget.checkpoint() {
+                return Err(Unsupported);
+            }
+            if depth > MAX_EVALUATION_DEPTH {
+                return Ok(true);
+            }
+            let [Op::Ref(reference)] = self.nodes[node].as_slice() else {
+                break;
+            };
+            let Some(target) = reference.static_target() else {
+                break;
+            };
+            node = target;
+            depth += 1;
         }
         let status = match self.nodes[node].as_slice() {
             [Op::Number(required, rules)] if depth <= MAX_EVALUATION_DEPTH => {
