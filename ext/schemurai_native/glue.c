@@ -60,7 +60,7 @@ extern void sn_message_arguments(const void *, message_arguments *);
 extern void sn_message_result(const void *, VALUE);
 typedef struct { VALUE rules, instance; size_t child, depth; int required, scalar_kind, scalar_flags; } contains_arguments;
 extern void sn_contains_arguments(const void *, contains_arguments *);
-extern void sn_caches_scalar_callback(const void *, const void *);
+extern void sn_caches_scalar_callback(const void *, const void *, int);
 extern int sn_caches_deadline_expired(const void *);
 typedef struct { VALUE ordinal, rules, instance; } scalar_arguments;
 extern void sn_scalar_arguments(const void *, scalar_arguments *);
@@ -776,7 +776,7 @@ static VALUE callback_scope(evaluation_call *call) {
         scope->active_budget = call->budget;
         scope->active_limits = call->limits;
         copy_states(scope, runner, 1, 0);
-        sn_caches_scalar_callback(scope->caches, runner->caches);
+        sn_caches_scalar_callback(scope->caches, runner->caches, !NIL_P(call->budget));
         runner->callback_scope = object;
     }
     return runner->callback_scope;
@@ -1132,7 +1132,7 @@ static VALUE evaluate_runner_body(VALUE context) {
         if (r->callback_context) {
             call.limits = parent->active_limits;
             call.limits_read = 1;
-            sn_caches_scalar_callback(r->caches, parent->caches);
+            sn_caches_scalar_callback(r->caches, parent->caches, !NIL_P(budget));
         }
     }
     evaluate_native(&call);
@@ -1217,8 +1217,8 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
         copy_states(parent, owner, !NIL_P(parent->active_budget), 0);
     }
     VALUE budget = parent->active_budget;
-    if (!NIL_P(budget)) {
-        /* LimitedEvaluator entry, then its single scalar instruction. */
+    if (!NIL_P(budget) && recipe->callback_kind != SN_CALLBACK_RUNTIME) {
+        /* Direct Boolean/type dispatch has one entry and one instruction. */
         rb_funcall(budget, rb_intern_const("checkpoint"), 0);
         rb_funcall(budget, rb_intern_const("checkpoint"), 0);
     }
