@@ -60,6 +60,7 @@ module Schemurai
       include Internal::UniqueItems
       include Internal::ValueEquality
       include Internal::ContainerChecks::Bounds
+      include Internal::ContainerChecks::Required
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
@@ -659,12 +660,7 @@ module Schemurai
       private def valid_object?(rules, value)
         length = value.length
         return false unless valid_container_bounds?(length, rules.max_properties, rules.min_properties)
-        if rules.required && !rules.required.all? do |name|
-          @budget&.checkpoint
-          value.key?(name)
-        end
-          return false
-        end
+        return false unless valid_required_keys?(rules.required, value)
 
         properties = rules.properties
         patterns = rules.patterns

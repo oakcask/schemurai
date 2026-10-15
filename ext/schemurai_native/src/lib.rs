@@ -736,6 +736,11 @@ impl Engine {
         Ok(self.retain(result))
     }
     fn required_keys(&mut self, value: Value) -> Vec<RequiredKey> {
+        // Non-array operands retain their Ruby iteration/error behavior in a
+        // runtime frame; they cannot authorize borrowed Array storage.
+        if unsafe { sn_kind(value) } != TYPE_ARRAY {
+            return vec![];
+        }
         self.values(value)
             .into_iter()
             .map(|name| {
@@ -1515,7 +1520,7 @@ impl Execution<'_> {
                     } else if kind != TYPE_OBJECT {
                         Valid
                     } else if rules.header_only() {
-                        bounds(unsafe { sn_len(value) }, rules.min, rules.max)
+                        rules.valid_header(self.caches, value, self.undefined, &self.budget)
                     } else {
                         self.object(rules, value, depth + 1, active)
                     }
@@ -2150,7 +2155,9 @@ impl Execution<'_> {
         if self.kind_demand[node] == KindDemand::None {
             return TYPE_UNCHECKED;
         }
-        if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)] if rules.record.is_some()) {
+        if matches!(self.nodes[node].as_slice(), [Op::Object(_, rules)]
+            if rules.record.is_some() && (!rules.header_only() || !rules.inspect_required))
+        {
             unsafe { sn_shallow_kind(value) }
         } else {
             unsafe { sn_kind(value) }

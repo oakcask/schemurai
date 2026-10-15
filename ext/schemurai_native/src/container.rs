@@ -7,10 +7,15 @@ pub(super) struct Header {
     checks: u8,
     object: bool,
     native_bounds: bool,
+    native_required: bool,
+    required_count: usize,
 }
 impl Header {
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
-        !self.native_bounds || kind == TYPE_UNSUPPORTED || caches.dynamic_calls()
+        !self.native_bounds
+            || !self.native_required
+            || kind == TYPE_UNSUPPORTED
+            || caches.dynamic_calls()
     }
     pub(super) fn valid(&self, caches: &runtime::Caches, required: i32, value: Value) -> Verdict {
         caches
@@ -60,6 +65,21 @@ impl Header {
                 }
             }
         }
+        if self.checks & 32 != 0 {
+            frame.predicate(7)?;
+            for index in 0..self.required_count {
+                let step = i32::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(8))
+                    .ok_or(Unsupported)?;
+                if !frame.predicate(step)? {
+                    visit("required", frame.ordinal())?;
+                    if silent {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
         if self.checks & 8 != 0 {
             frame.predicate(5)?;
         }
@@ -81,12 +101,26 @@ impl Engine {
         let maximum = self.field(source, maximum)?;
         let minimum = self.field(source, minimum)?;
         let native_bounds = self.native_count(maximum)? && self.native_count(minimum)?;
+        let required = if object {
+            self.field(source, b"required\0")?
+        } else {
+            unsafe { sn_nil() }
+        };
+        let inspect_required = unsafe { sn_truthy(required) } != 0;
+        let required_kind = unsafe { sn_kind(required) };
         Ok(Header {
             source,
             native_bounds,
+            native_required: !inspect_required || required_kind == TYPE_ARRAY,
+            required_count: if matches!(required_kind, TYPE_ARRAY | TYPE_OBJECT) {
+                unsafe { sn_len(required) }
+            } else {
+                0
+            },
             checks: unsafe { sn_truthy(maximum) } as u8
                 | ((unsafe { sn_truthy(minimum) } as u8) << 1)
                 | tail
+                | if inspect_required { 32 } else { 0 }
                 | if object { 16 } else { 0 },
             object,
         })
@@ -118,9 +152,21 @@ impl Array {
     }
 }
 impl Object {
+    pub(super) fn valid_header(
+        &self,
+        caches: &runtime::Caches,
+        value: Value,
+        undefined: Value,
+        budget: &budget::Budget,
+    ) -> Verdict {
+        let status = bounds(unsafe { sn_len(value) }, self.min, self.max);
+        if status != Valid {
+            return status;
+        }
+        Self::check_keys(&self.required_order, caches, value, undefined, budget)
+    }
     pub(super) fn header_only(&self) -> bool {
-        !self.inspect_required
-            && self.properties.is_empty()
+        self.properties.is_empty()
             && self.patterns.is_empty()
             && self.additional.is_none()
             && self.names.is_none()
