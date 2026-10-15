@@ -156,7 +156,8 @@ impl Engine {
     }
     // Admit callbacks only when every reachable assertion has a runtime path.
     // Otherwise a later unsupported container could replay an already invoked
-    // user block through the VM. Postorder leaves cycles unproven.
+    // user block through the VM. Pure static-alias cycles have a finite guard
+    // bound; other cycles remain unproven by postorder.
     pub(super) fn compile_scalar_callback_depths(&mut self) {
         let count = self.nodes.len();
         self.has_references = self
@@ -233,10 +234,31 @@ impl Engine {
             }
         }
         let order = graph::postorder(&edges, &mut vec![false; edges.len()]);
-        let mut depths: Vec<Option<usize>> = vec![None; edges.len()];
+        // A static-alias cycle preserves the instance on every edge. Returning
+        // to its first source therefore hits the active-reference guard after
+        // exactly one circuit. Seed that finite depth before the ordinary DAG
+        // proof; cycles containing other instructions need a separate proof.
+        let aliases: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(node, ops)| {
+                if !self.tracks[node]
+                    && let [Op::Ref(reference)] = ops.as_slice()
+                {
+                    reference
+                        .static_target()
+                        .filter(|_| reference.callback_dynamic_target().is_none())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut depths = graph::functional_cycle_lengths(&aliases);
+        depths.resize(edges.len(), None);
         for node in order {
             callbacks[node] |= edges[node].iter().any(|&child| callbacks[child]);
-            if admitted[node] {
+            if admitted[node] && depths[node].is_none() {
                 depths[node] = edges[node].iter().try_fold(0, |depth, &child| {
                     Some(depth.max(depths[child]?.checked_add(usize::from(node < count))?))
                 });

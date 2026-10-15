@@ -1820,6 +1820,59 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "executes static alias cycles in special container children without VM execution" do # rubocop:disable RSpec/ExampleLength
+    dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
+    definitions = {"self" => {"$ref" => "#/$defs/self"}, "a" => {"$ref" => "#/$defs/b"}, "b" => {"$ref" => "#/$defs/a"}}
+    leaf = {"$ref" => "#/$defs/a"}
+    schemas = [{"contains" => {"$ref" => "#/$defs/self"}}, {"items" => leaf},
+      {"prefixItems" => [leaf]}, {"properties" => {"v" => leaf}}, {"additionalProperties" => leaf},
+      {"contains" => {"allOf" => [leaf, {"type" => "integer"}]}},
+      {"allOf" => [{"contains" => {"type" => "integer"}}, leaf]}]
+    values = [Class.new(Array).new([1, "a"]), Class.new(Array).new([]), Class.new(Hash)["v", 1],
+      Class.new(Hash)["other", "a"]]
+    cases = schemas.map do |rules|
+      schema = dialect.merge("$defs" => definitions).merge(rules)
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([{}, {timeout: 10}, {max_errors: 0}]).map do |value, options|
+        [value, options, capture_validation(vm, :valid?, value, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each do |value, options, result|
+        expect(capture_validation(native, :valid?, value, **options)).to eq(result), [schema, options].inspect
+      end
+    end
+  end
+
+  it "keeps static alias cycle callbacks within the native depth bound" do # rubocop:disable RSpec/ExampleLength
+    array = Class.new(Array) do
+      attr_reader :calls
+
+      def count(&block)
+        @calls = (@calls || 0) + 1
+        super
+      end
+    end
+    [254, 255].each do |length|
+      definitions = length.times.to_h { |index| ["n#{index}", {"$ref" => "#/$defs/n#{(index + 1) % length}"}] }
+      schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => definitions,
+                "contains" => {"$ref" => "#/$defs/n0"}}
+      validator = Schemurai.compile(schema, backend: :native)
+      program = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      input = array.new([nil])
+      if length == 254
+        expect(program.valid?(input)).to be(true)
+        expect(input.calls).to eq(1)
+      else
+        expect(program.valid?(input)).to be_nil
+        expect(input.calls).to be_nil
+      end
+    end
+  end
+
   it "declines contains callbacks before a later unsupported traversal can replay them" do # rubocop:disable RSpec/ExampleLength
     klass = Class.new(Array) do
       attr_reader :calls
@@ -1844,10 +1897,10 @@ RSpec.describe "native VALUE execution" do
       [{"allOf" => [rule, {"items" => {"unevaluatedProperties" => true}}]}, ->(value) { value }],
       [{"items" => {"allOf" => [rule, {"unevaluatedProperties" => true}]}}, ->(value) { [value] }],
       [{"properties" => {"v" => rule}, "unevaluatedProperties" => true}, ->(value) { {"v" => value} }],
-      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }],
+      [{"$defs" => {"loop" => {"allOf" => [{"$ref" => "#/$defs/loop"}]}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }],
       [{"contains" => {"anyOf" => [true, {"unevaluatedProperties" => true}]}}, ->(value) { value }],
       [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => {"unevaluatedProperties" => true}}, ->(value) { value }],
-      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "contains" => {"$ref" => "#/$defs/loop"}}, ->(value) { value }],
+      [{"$defs" => {"loop" => {"allOf" => [{"$ref" => "#/$defs/loop"}]}}, "contains" => {"$ref" => "#/$defs/loop"}}, ->(value) { value }],
       [{"$schema" => "https://json-schema.org/draft/2020-12/schema", "$defs" => {"x" => {"$dynamicAnchor" => "x", "$dynamicRef" => "#x"}},
         "contains" => {"$dynamicRef" => "#x"}}, ->(value) { value }]
     ]
