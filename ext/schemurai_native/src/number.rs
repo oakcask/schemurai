@@ -2,7 +2,9 @@
 //! multipleOf semantics. All evaluation helpers operate under the GVL and
 //! allocate no Ruby objects; unsupported magnitudes retain VM compatibility.
 use super::*;
+use num_rational::BigRational;
 use std::cmp::Ordering;
+mod arbitrary;
 
 // Strictly ordered integers are unique without fingerprinting their digits.
 // Each comparison checks both original handles; mixed or unordered inputs
@@ -241,7 +243,12 @@ impl Fraction {
     }
 }
 
-fn decimal_float(value: f64) -> Option<Fraction> {
+struct Decimal {
+    coefficient: i128,
+    power: i32,
+}
+
+fn decimal_parts(value: f64) -> Option<Decimal> {
     if !value.is_finite() {
         return None;
     }
@@ -286,12 +293,21 @@ fn decimal_float(value: f64) -> Option<Fraction> {
             .checked_add(i128::from(byte.checked_sub(b'0')?))?;
     }
     if numerator == 0 {
-        return Some(Fraction {
-            numerator: 0,
-            denominator: 1,
+        return Some(Decimal {
+            coefficient: 0,
+            power: 0,
         });
     }
     let power = exponent + trailing - fractional as i32;
+    Some(Decimal {
+        coefficient: if negative { -numerator } else { numerator },
+        power,
+    })
+}
+
+fn decimal_float(value: f64) -> Option<Fraction> {
+    let Decimal { coefficient, power } = decimal_parts(value)?;
+    let mut numerator = coefficient.abs();
     let mut denominator = 1;
     if power >= 0 {
         numerator = numerator.checked_mul(10_i128.checked_pow(power as u32)?)?;
@@ -303,7 +319,7 @@ fn decimal_float(value: f64) -> Option<Fraction> {
         (a, b) = (b, a % b);
     }
     Some(Fraction {
-        numerator: if negative {
+        numerator: if coefficient < 0 {
             -numerator / a
         } else {
             numerator / a
@@ -314,6 +330,7 @@ fn decimal_float(value: f64) -> Option<Fraction> {
 #[derive(Debug)]
 struct Limit {
     exact: Option<Fraction>,
+    arbitrary: Option<Box<BigRational>>,
     wide_integer: Option<Value>,
     wide_rounded_order: Option<Ordering>,
     rounded: f64,
@@ -486,21 +503,22 @@ impl Engine {
         if !integer && unsafe { sn_is_rational(value) } == 0 {
             return Ok(None);
         }
-        let exact = if integer {
-            read_integer(value).map(|numerator| Fraction {
-                numerator,
-                denominator: 1,
-            })
+        let (numerator, denominator) = if integer {
+            (value, None)
         } else {
             let numerator = self.field(value, b"numerator\0")?;
             let denominator = self.field(value, b"denominator\0")?;
-            read_integer(numerator).zip(read_integer(denominator)).map(
-                |(numerator, denominator)| Fraction {
-                    numerator,
-                    denominator,
-                },
-            )
+            (numerator, Some(denominator))
         };
+        let exact = read_integer(numerator)
+            .zip(denominator.map_or(Some(1), read_integer))
+            .map(|(numerator, denominator)| Fraction {
+                numerator,
+                denominator,
+            });
+        let arbitrary = exact
+            .is_none()
+            .then(|| Box::new(arbitrary::fraction(numerator, denominator)));
         let rounded = self.field(value, b"to_f\0")?;
         let rounded = unsafe { sn_float(rounded) };
         let wide_rounded_order = if integer && exact.is_none() {
@@ -513,6 +531,7 @@ impl Engine {
         });
         Ok(Some(Limit {
             exact,
+            arbitrary,
             wide_integer: (integer && exact.is_none()).then(|| self.retain(value)),
             wide_rounded_order,
             rounded,
@@ -592,10 +611,15 @@ fn wide_integer_multiple(value: Value, divisor: Fraction, sum_words: bool) -> Ve
 }
 
 fn unbounded_integer_multiple(value: Value, divisor: Fraction, sum_words: bool) -> Verdict {
+    let (words, _) = unbounded_integer_words(value);
+    wide_multiple_words(&words, divisor, sum_words)
+}
+
+fn unbounded_integer_words(value: Value) -> (Vec<u64>, i32) {
     let count = unsafe { sn_integer_word_count(value) };
     let mut words = vec![0_u64; count];
-    unsafe { sn_integer_words(value, words.as_mut_ptr(), count) };
-    wide_multiple_words(&words, divisor, sum_words)
+    let sign = unsafe { sn_integer_words(value, words.as_mut_ptr(), count) };
+    (words, sign)
 }
 
 fn wide_multiple_words(words: &[u64], divisor: Fraction, sum_words: bool) -> Verdict {
@@ -635,6 +659,15 @@ fn wide_multiple_words(words: &[u64], divisor: Fraction, sum_words: bool) -> Ver
     // The instance denominator is one, which divides the reduced divisor's
     // denominator. Sign does not affect divisibility by its positive numerator.
     verdict(remainder == 0)
+}
+
+fn violates(bit: i32, order: Option<Ordering>) -> bool {
+    match bit {
+        MAXIMUM => order == Some(Ordering::Greater),
+        MINIMUM => order == Some(Ordering::Less),
+        EXCLUSIVE_MAXIMUM => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
+        _ => matches!(order, Some(Ordering::Less | Ordering::Equal)),
+    }
 }
 
 fn fixnum_bounds(n: i64, limits: &[(i32, i64)]) -> Verdict {
@@ -790,12 +823,7 @@ impl Rules {
                     Ok(order) => order,
                     Err(status) => return status,
                 };
-                if match bit {
-                    MAXIMUM => order == Some(Ordering::Greater),
-                    MINIMUM => order == Some(Ordering::Less),
-                    EXCLUSIVE_MAXIMUM => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
-                    _ => matches!(order, Some(Ordering::Less | Ordering::Equal)),
-                } {
+                if violates(bit, order) {
                     return Invalid;
                 }
             }
@@ -817,12 +845,7 @@ impl Rules {
             let Some(order) = limit.integer_order(value, integer, sign) else {
                 return Unsupported;
             };
-            if match bit {
-                MAXIMUM => order == Ordering::Greater,
-                MINIMUM => order == Ordering::Less,
-                EXCLUSIVE_MAXIMUM => order != Ordering::Less,
-                _ => order != Ordering::Greater,
-            } {
+            if violates(bit, Some(order)) {
                 return Invalid;
             }
         }
@@ -840,7 +863,13 @@ impl Rules {
         {
             return fixnum_bounds(immediate_integer(value), limits);
         }
-        self.check(value, |_| true)
+        let result = self.check(value, |_| true);
+        if result == Unsupported {
+            self.arbitrary_failures(value)
+                .map_or(Unsupported, |bits| verdict(bits == 0))
+        } else {
+            result
+        }
     }
 
     pub(super) fn failures(&self, value: Value) -> Result<i32, Verdict> {
@@ -872,10 +901,30 @@ impl Rules {
             false
         });
         if status == Unsupported {
-            Err(status)
+            self.arbitrary_failures(value)
         } else {
             Ok(bits)
         }
+    }
+
+    pub(super) fn memory_usage(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.limits.capacity() * std::mem::size_of::<(i32, Limit)>()
+            + self
+                .limits
+                .iter()
+                .map(|(_, limit)| limit.arbitrary_memory_usage())
+                .sum::<usize>()
+            + self
+                .multiple
+                .as_ref()
+                .map_or(0, Limit::arbitrary_memory_usage)
+            + self.fast_limits.as_ref().map_or(0, |limits| {
+                limits.capacity() * std::mem::size_of::<(i32, i64)>()
+            })
+            + self.fast_multiple.as_ref().map_or(0, |multiple| {
+                multiple.limits.capacity() * std::mem::size_of::<(i32, i64)>()
+            })
     }
 
     fn check_wide_multiple(
@@ -893,12 +942,7 @@ impl Rules {
             let Some(order) = limit.integer_order(value, integer, sign) else {
                 return Unsupported;
             };
-            if match bit {
-                MAXIMUM => order == Ordering::Greater,
-                MINIMUM => order == Ordering::Less,
-                EXCLUSIVE_MAXIMUM => order != Ordering::Less,
-                _ => order != Ordering::Greater,
-            } {
+            if violates(bit, Some(order)) {
                 invalid = true;
                 if failure(bit) {
                     return Invalid;
@@ -959,12 +1003,7 @@ impl Rules {
                 let Some(order) = limit.integer_order(value, None, large_sign) else {
                     return Unsupported;
                 };
-                let violates = match *bit {
-                    MAXIMUM => order == Ordering::Greater,
-                    MINIMUM => order == Ordering::Less,
-                    EXCLUSIVE_MAXIMUM => order != Ordering::Less,
-                    _ => order != Ordering::Greater,
-                };
+                let violates = violates(*bit, Some(order));
                 if violates {
                     invalid = true;
                     if failure(*bit) {
@@ -1034,12 +1073,7 @@ impl Rules {
                     n.partial_cmp(&limit.rounded)
                 }
             };
-            let violates = match *bit {
-                MAXIMUM => order == Some(Ordering::Greater),
-                MINIMUM => order == Some(Ordering::Less),
-                EXCLUSIVE_MAXIMUM => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
-                _ => matches!(order, Some(Ordering::Less | Ordering::Equal)),
-            };
+            let violates = violates(*bit, order);
             if violates {
                 invalid = true;
                 if failure(*bit) {

@@ -349,11 +349,19 @@ nonpositive numerators require no full magnitude read, even for larger instances
 Float inputs represented by bounded decimal fractions can also combine
 multipleOf with wide Integer schema limits: the fraction's numerator fits i128
 and its positive denominator bounds its magnitude, so a wider Integer limit's
-sign determines the comparison. Unbounded multipleOf divisors,
-rational schema limits, and unsupported decimal exponents
-delegate to the VM. Schema rational
+sign determines the comparison. Beyond fixed-width arithmetic, native
+evaluation uses `num-bigint`/`num-rational` for arbitrary Integer divisors,
+compiler-produced Rational limits, and every finite Float decimal exponent.
+The fixed and arbitrary paths share decimal-spelling parsing and bound-failure
+predicates. Arbitrary schema fractions are retained only when their components
+do not fit i128; runtime temporaries contain numeric scalars rather than a
+converted instance tree. They allocate no Ruby objects and invoke no Ruby
+methods. Non-finite decimal conversions and invalid numeric operands still
+delegate for their Ruby exceptions. Schema rational
 operands and rounded bounds are captured at compilation, never recomputed by
 Ruby callbacks during evaluation. The integer-array fast scan remains available.
+Native memory reporting includes numeric metadata and retained fraction digits;
+the arbitrary-precision crate exposes used digits rather than spare capacity.
 Runtime numeric instructions reuse the caller's ordinary-number classification:
 after excluding Float, the Integer scalar adapter does not classify that value
 again. Schema numeric metadata retains its full Integer/Float checks. Unusual
@@ -743,8 +751,8 @@ to require successful reference resolution before sharing.
 
 Unsupported instructions or numeric representations return an internal
 unsupported result and delegate to the existing Ruby VM. This still includes
-Ruby-specific patterns, content transcoding for other encodings, and numeric operands beyond
-the native bounded arithmetic range. Successful
+Ruby-specific patterns, content transcoding for other encodings, and exceptional
+numeric conversions or invalid numeric operands. Successful
 detailed validation builds its public Result in Ruby. Rust now collects ordered
 diagnostics for supported scalar rules, arrays, ordinary objects, combiners,
 conditionals, and references. Object errors follow input Hash order; required
@@ -802,7 +810,7 @@ converted into a Rust representation. Distinct schema lookup keys are retained
 at compilation to distinguish identity-key Hashes; ambiguous matching keys
 delegate to the VM. Larger records and annotation
 rules use the general native path. Schema lookup keys are checked at compilation
-as well. Unsupported leaves, unresolved references, and unsupported path encodings still
+as well. Unsupported leaves and unsupported path encodings still
 delegate to the VM. Arrays scan supported scalar items first and
 only construct diagnostic paths for failing items.
 Detailed validation uses the native diagnostic traversal directly instead of a

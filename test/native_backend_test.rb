@@ -2399,15 +2399,47 @@ RSpec.describe "native VALUE execution" do
     values = [723340043767187.2, 0.8455124082255701, 1e23, -1e23, 1e-20, 0.1, 0.3, -0.0]
     2000.times do
       value = [random.rand(2**64)].pack("Q").unpack1("d")
-      values << value if value.finite? && value.abs.between?(1e-20, 1e20)
+      values << value if value.finite?
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     values.each do |value|
       next if value.zero?
 
       validator = Schemurai.compile({"minimum" => value, "maximum" => value, "multipleOf" => value.abs}, backend: :native)
       expect(validator.valid?(value)).to be(true), value.inspect
+      expect(validator.validate(value).errors).to be_empty, value.inspect
     end
+  end
+
+  it "evaluates arbitrary decimal exponents and divisors without VM execution" do # rubocop:disable RSpec/ExampleLength
+    bounds = [5e-324, -5e-324, 1e-300, -1e-300, Float::MIN, Float::MAX, 1e300, -1e300,
+      2**200 + 1, -(2**200) + 1, 2**4096 + 1, 0, -3]
+    values = [0, -0.0, 1, -1, 5e-324, -5e-324, 1e-300, -1e-300, 1e-200, 1e200, -1e200,
+      Float::MIN, Float::MAX, -Float::MAX, 2**200, 2**4096, -(2**4096), nil, "text"]
+    schemas = bounds.flat_map do |bound|
+      %w[minimum maximum exclusiveMinimum exclusiveMaximum multipleOf].map { |keyword| {keyword => bound} }
+    end
+    schemas.concat([5e-324, 1e-300, 1e300, 2**200 + 1].flat_map do |divisor|
+      bounds.map do |bound|
+        {"minimum" => bound, "maximum" => bound, "exclusiveMinimum" => bound,
+         "exclusiveMaximum" => bound, "multipleOf" => divisor}
+      end
+    end)
+    schemas = schemas.flat_map { |schema| [schema, schema.merge("type" => "integer"), {"items" => schema}] }
+    expect_native_policy_results(schemas, values + [values])
+  end
+
+  it "enforces native budgets while collecting arbitrary decimal failures" do
+    schema = {"items" => {"minimum" => 1e-200, "multipleOf" => 1e-300}}
+    values = [1e-300, -1e300, 1e300]
+    expected = Schemurai.compile(schema, backend: :vm).validate(values).errors
+    native = Schemurai.compile(schema, backend: :native)
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    expect(native.valid?(values, timeout: 10)).to be(false)
+    expect(native.validate(values, timeout: 10, max_errors: expected.length).errors).to eq(expected)
+    expect { native.validate(values, max_errors: 1) }.to raise_error(Schemurai::LimitExceeded)
+    expect(native.validate([1e300], max_errors: 0).valid?).to be(true)
   end
 
   it "preserves VM behavior beyond bounded numeric operands and for non-finite instances" do # rubocop:disable RSpec/ExampleLength
