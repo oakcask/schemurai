@@ -937,19 +937,27 @@ Malformed required operands retain their Ruby iteration or method errors,
 without borrowing Array storage from non-array values. Generated Hash iteration
 pairs remain rooted through message rendering, and ordinary supported Hashes
 keep native required-key lookup, including identity Hashes.
+Property-list dependencies without child schemas follow the same split:
+ordinary Hashes use native lookup, while special inputs use libruby for
+dependency triggers and required keys. Validity shares the VM's key-loop
+primitives. Diagnostics preserve each trigger call, skip absent triggers,
+render duplicate failures separately and yield before later key checks.
+Malformed dependentRequired values retain Ruby iteration/method errors when
+their trigger is present. Generated diagnostic keys remain rooted through
+compaction and frames remain isolated between Ractor runners.
 Bounds validity shares its comparison rules with the VM; diagnostics retain
 fresh length reads for each assertion and message. Object diagnostics also
 retain the original Hash iteration and property lookup, even without child
 schemas. Frames preserve exception ordering, trial short circuits and error
 limits, and remain rooted during GC and private to each Ractor runner.
 Ordinary supported containers retain native size and uniqueness algorithms.
-Header-only object validity needs no key scan because only its size is read.
+Object validity with only count assertions needs no key scan because only its size is read.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
 Array/Hash subclasses, singleton-method containers, and Hashes with nonstandard keys
 can still delegate to the VM when reached container assertions require child
-traversal or dependencies. Schema evaluation beyond the native
+traversal, including schema dependencies. Schema evaluation beyond the native
 depth limit and defensive unsupported instructions also retain that path.
 Lookup-based paths check
 every key without invoking Ruby methods, keeping Ruby's hash/equality callbacks

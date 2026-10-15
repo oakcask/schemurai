@@ -1169,6 +1169,102 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "checks dependency keys on special objects without VM execution" do # rubocop:disable RSpec/ExampleLength
+    custom = Class.new(Hash) do
+      def key?(name)
+        return false if name == "end"
+
+        super
+      end
+    end
+    exploding = Class.new(Hash) do
+      def key?(_name) = raise(RegexpError, "dependency key callback")
+    end
+    values = [{}, {"start" => 1}, {"start" => 1, "end" => 2}, custom["start", 1, "end", 2], exploding["start", 1],
+      {"start" => 1}.compare_by_identity, {1 => 1}, Class.new(Hash)["start", 1], BasicObject.new, [1], nil]
+    rules = [["end", "end", nil], [], [1, false, ["nested"]]].map { |names| {"dependencies" => {"start" => names, "absent" => ["other"]}} }
+    rules.concat([["end", "end", nil], [], [1, false, ["nested"]], nil, false, true, "bad", 3, {"x" => 1}].map do |names|
+      {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentRequired" => {"start" => names, "absent" => ["other"]}}
+    end)
+    rules = rules.flat_map { |rule| [rule, rule.merge("type" => "object"), rule.merge("maxProperties" => 0, "required" => ["start", "start"])] }
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value, value]] },
+      ->(rule, value) { [{"properties" => {"v~/s" => rule}}, {"v~/s" => value}] },
+      ->(rule, value) { [{"contains" => rule}, [value]] }, ->(rule, value) { [{"anyOf" => [rule, false]}, value] },
+      ->(rule, value) { [{"$defs" => {"v" => rule}, "allOf" => [{"$ref" => "#/$defs/v"}, {"$ref" => "#/$defs/v"}]}, value] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm)
+      expected = values.product([:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}]).map do |value, method, options|
+        input = wrap.call(rule, value).last
+        [input, method, options, capture_validation(vm, method, input, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each_with_index do |(input, method, options, result), index|
+        expect(capture_validation(native, method, input, **options)).to eq(result), [schema, method, options, index].inspect
+      end
+    end
+  end
+
+  it "preserves dependency triggers, key occurrences and message exceptions" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Hash) do
+      def initialize(calls)
+        super()
+        @calls = calls
+        @triggers = 0
+      end
+
+      def length
+        @calls << :length
+        0
+      end
+
+      def key?(name)
+        @calls << [:key?, name]
+        return false unless name == "start"
+
+        @triggers += 1
+        @triggers.odd?
+      end
+
+      def each(&block)
+        @calls << :each
+        super
+      end
+    end
+    calls = nil
+    allow(Schemurai.const_get(:Internal)::ErrorMessage).to receive(:dependent_required).and_wrap_original do |original, name, required_name|
+      calls << [:message, name, required_name]
+      raise RegexpError, "dependency message callback" if required_name == "boom"
+
+      original.call(name, required_name)
+    end
+    names = {"start" => ["missing", "missing", "boom"], "absent" => ["other"]}
+    rules = [{"dependencies" => names}, {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentRequired" => names}]
+    wrappers = [->(rule, value) { [rule, value] }, ->(rule, value) { [{"items" => rule}, [value, value]] },
+      ->(rule, value) { [{"anyOf" => [rule, false]}, value] },
+      ->(rule, value) { [{"$defs" => {"v" => rule}, "allOf" => [{"$ref" => "#/$defs/v"}, {"$ref" => "#/$defs/v"}]}, value] }]
+    cases = rules.product(wrappers, [:valid?, :validate], [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}, {max_errors: 2}]).map do |rule, wrap, method, options|
+      calls = []
+      schema, input = wrap.call(rule, klass.new(calls))
+      outcome = capture_validation(Schemurai.compile(schema, backend: :vm), method, input, **options)
+      [Schemurai.compile(schema, backend: :native), wrap, rule, method, options, outcome, calls]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, wrap, rule, method, options, outcome, expected_calls|
+      calls = []
+      input = wrap.call(rule, klass.new(calls)).last
+      expect(capture_validation(native, method, input, **options)).to eq(outcome)
+      expect(calls).to eq(expected_calls)
+    end
+  end
+
   it "preserves required key occurrences, messages and short circuits" do # rubocop:disable RSpec/ExampleLength
     klass = Class.new(Hash) do
       def initialize(calls)
@@ -1222,10 +1318,12 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
-  it "roots generated required keys and retains message exceptions" do # rubocop:disable RSpec/ExampleLength
-    cases = [false, true].map do |explode|
+  it "roots generated required and dependency keys and retains message exceptions" do # rubocop:disable RSpec/ExampleLength
+    cases = [false, true].flat_map do |explode|
       klass = Class.new(Hash)
       klass.define_method(:key?) do |name|
+        return true if name == "start"
+
         name.define_singleton_method(:inspect) do
           GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
           raise RegexpError, "required message callback" if explode
@@ -1234,12 +1332,14 @@ RSpec.describe "native VALUE execution" do
         end
         false
       end
-      schema = {"required" => {"x" => 1, "y" => 2}}
-      vm = Schemurai.compile(schema, backend: :vm)
-      native = Schemurai.compile(schema, backend: :native)
-      options = [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]
-      expected = options.map { |limits| capture_validation(vm, :validate, klass.new, **limits) }
-      [native, klass, options, expected]
+      [{"required" => {"x" => 1, "y" => 2}},
+        {"$schema" => "https://json-schema.org/draft/2020-12/schema", "dependentRequired" => {"start" => {"x" => 1, "y" => 2}}}].map do |schema|
+        vm = Schemurai.compile(schema, backend: :vm)
+        native = Schemurai.compile(schema, backend: :native)
+        options = [{}, {timeout: 10}, {max_errors: 0}, {max_errors: 1}]
+        expected = options.map { |limits| capture_validation(vm, :validate, klass.new, **limits) }
+        [native, klass, options, expected]
+      end
     end
     allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
@@ -1392,7 +1492,8 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "keeps container header frames private to independent Ractor runners" do
-    schemas = {"urn:array-header" => {"maxItems" => 0, "uniqueItems" => true}, "urn:object-header" => {"minProperties" => 2, "required" => ["y", "y"]}}
+    schemas = {"urn:array-header" => {"maxItems" => 0, "uniqueItems" => true},
+               "urn:object-header" => {"minProperties" => 2, "required" => ["y", "y"], "dependencies" => {"x" => ["z", "z"]}}}
     registry = Schemurai::SchemaRegistry.new(schemas: schemas, backend: :native).make_shareable
     workers = Array.new(2) do
       Ractor.new(registry) do |shared|
@@ -1404,7 +1505,7 @@ RSpec.describe "native VALUE execution" do
           object.valid?(values.last), object.diagnostics(values.last).map(&:first)]
       end
     end
-    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[maxItems uniqueItems], false, %w[minProperties required required]]) }
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([false, %w[maxItems uniqueItems], false, %w[minProperties required required dependencies dependencies]]) }
   end
 
   it "compares special values for const and enum without VM execution" do # rubocop:disable RSpec/ExampleLength
