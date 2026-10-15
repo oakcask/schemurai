@@ -339,12 +339,17 @@ words once: the same fixed buffer determines whether native i128 arithmetic is
 available, supplies exact bounds comparisons, and feeds the wider remainder
 calculation when needed. Numeric rules retain the Fixnum tag flag obtained from
 CRuby at initialization to avoid repeating its C query during evaluation.
+Larger Integer instances use a Rust-owned scalar word buffer sized through
+CRuby's public integer metadata and packing APIs, then reuse the same remainder
+calculation. These APIs invoke no Ruby methods and allocate no Ruby objects;
+borrowed instance storage remains valid. The temporary buffer grows with the
+Integer's magnitude and is released after the assertion.
 Numerator one and
 nonpositive numerators require no full magnitude read, even for larger instances.
 Float inputs represented by bounded decimal fractions can also combine
 multipleOf with wide Integer schema limits: the fraction's numerator fits i128
 and its positive denominator bounds its magnitude, so a wider Integer limit's
-sign determines the comparison. Other larger multipleOf inputs, unbounded
+sign determines the comparison. Unbounded multipleOf divisors,
 rational schema limits, and unsupported decimal exponents
 delegate to the VM. Schema rational
 operands and rounded bounds are captured at compilation, never recomputed by
