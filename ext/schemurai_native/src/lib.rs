@@ -695,6 +695,7 @@ pub struct Engine {
     error_operands: Vec<Vec<(i32, Value)>>,
     tracks: Vec<bool>,
     kind_demand: Vec<KindDemand>,
+    scalar_callback_depths: Vec<Option<usize>>,
     memoizable: Vec<bool>,
     memo_contextual: Vec<bool>,
     memo_guarded: Vec<bool>,
@@ -1308,7 +1309,9 @@ impl Engine {
                 Op::Type(..) | Op::Number(..) | Op::String(..) | Op::Const(_) | Op::Enum(_) => {
                     KindDemand::Predicate
                 }
-                Op::Array(_, rules) if rules.header_only() => KindDemand::Predicate,
+                Op::Array(_, rules) if rules.header_only() || self.scalar_contains(rules) => {
+                    KindDemand::Predicate
+                }
                 Op::Object(_, rules) if rules.header_only() => KindDemand::Predicate,
                 Op::Array(..) | Op::Object(..) => KindDemand::Data,
                 Op::Unsupported
@@ -1504,6 +1507,20 @@ impl Execution<'_> {
                 Op::Array(required, rules) => {
                     if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
                         rules.header.valid(self.caches, *required, value)
+                    } else if self.caches.callbacks_allowed()
+                        && self.scalar_contains(rules)
+                        && rules.header.runtime_required(self.caches, kind)
+                    {
+                        if depth >= MAX_EVALUATION_DEPTH {
+                            return Unsupported;
+                        }
+                        rules.header.contains(
+                            self.caches,
+                            *required,
+                            value,
+                            rules.contains.expect("scalar contains child"),
+                            depth + 1,
+                        )
                     } else if *required != 0 && kind != TYPE_ARRAY {
                         Invalid
                     } else if kind != TYPE_ARRAY {
@@ -2150,16 +2167,23 @@ impl Execution<'_> {
         decode(unsafe { sn_object_each(value, (&mut context as *mut ObjectContext).cast()) })
     }
     fn unsupported_kind(&self, node: usize, kind: i32) -> bool {
-        kind == TYPE_UNSUPPORTED && self.kind_demand[node] == KindDemand::Data
+        kind == TYPE_UNSUPPORTED
+            && (self.kind_demand[node] == KindDemand::Data
+                || (!self.caches.callbacks_allowed() && self.scalar_contains_node(node)))
     }
     fn type_verdict(&self, mask: i32, union: bool, kind: i32, value: Value) -> Verdict {
-        if kind == TYPE_UNSUPPORTED {
+        if kind == TYPE_UNSUPPORTED
+            || (self.caches.callbacks_allowed() && self.caches.dynamic_calls())
+        {
             self.caches.type_predicate(value, mask, union)
         } else {
             verdict(kind & mask != 0)
         }
     }
     fn instance_kind(&self, node: usize, value: Value) -> i32 {
+        if self.caches.scalar_callback() && self.kind_demand[node] == KindDemand::Predicate {
+            return TYPE_UNSUPPORTED;
+        }
         if value & self.fixnum_flag != 0 {
             return TYPE_INTEGRAL_NUMBER;
         }
@@ -3382,6 +3406,7 @@ pub unsafe extern "C" fn sn_compile(
         e.bind_dynamic_anchors()?;
         e.simplify_dynamic_references();
         e.compile_memoization();
+        e.compile_scalar_callback_depths();
         Ok::<_, Value>(())
     })) {
         Ok(Ok(())) => VERDICT_VALID,
@@ -3441,18 +3466,20 @@ pub unsafe extern "C" fn sn_valid(
     caches: *const runtime::Caches,
     root: usize,
     value: Value,
+    depth: usize,
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &*engine };
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        caches.allow_callbacks(e.scalar_callbacks_safe(root, depth));
         let execution = Execution {
             engine: e,
             caches,
             memo: memo::Memo::default(),
             budget: budget::Budget::default(),
         };
-        let result = execution.eval(root, value, 0, scope::Context::default());
+        let result = execution.eval(root, value, depth, scope::Context::default());
         execution.budget.status(result)
     }))
     .unwrap_or(STATUS_PANIC)
@@ -3465,12 +3492,15 @@ pub unsafe extern "C" fn sn_valid_with_limits(
     caches: *const runtime::Caches,
     root: usize,
     value: Value,
+    depth: usize,
     limits: *const budget::Limits,
     outcome: *mut budget::Outcome,
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let local = runtime::Caches::default();
         let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let e = unsafe { &*engine };
+        caches.allow_callbacks(e.scalar_callbacks_safe(root, depth));
         let execution = Execution {
             engine: unsafe { &*engine },
             caches,
@@ -3478,7 +3508,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
             budget: caches.budget(unsafe { *limits }),
         };
         let result = if execution.budget.check_deadline() {
-            execution.eval(root, value, 0, scope::Context::default())
+            execution.eval(root, value, depth, scope::Context::default())
         } else {
             Unsupported
         };
@@ -3541,6 +3571,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
     let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
+    let callback_depths = unsafe { &*std::ptr::addr_of!((*engine).scalar_callback_depths) };
     let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
     let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
     let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
@@ -3550,6 +3581,7 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     std::mem::size_of::<Engine>()
         + projection.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
+        + callback_depths.capacity() * std::mem::size_of::<Option<usize>>()
         + (contextual.capacity()
             + guarded.capacity()
             + sources.capacity()

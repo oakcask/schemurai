@@ -25,6 +25,18 @@ pub struct Caches {
     pending_message: std::cell::Cell<Option<Message>>,
     pending_scalar: std::cell::Cell<Option<ScalarArguments>>,
     frame_error: std::cell::Cell<bool>,
+    scalar_callback: std::cell::Cell<bool>,
+    callbacks_allowed: std::cell::Cell<bool>,
+    pending_contains: std::cell::Cell<Option<ContainsArguments>>,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ContainsArguments {
+    rules: Value,
+    instance: Value,
+    child: usize,
+    depth: usize,
+    required: i32,
 }
 type StringError = (Value, usize, &'static str);
 #[repr(C)]
@@ -79,6 +91,7 @@ impl Caches {
         self.pending_pointer.set(None);
         self.pending_message.set(None);
         self.pending_scalar.set(None);
+        self.pending_contains.set(None);
         self.frame_error.set(false);
         self.pending_rescue.set(None);
     }
@@ -86,10 +99,52 @@ impl Caches {
     pub(super) fn frame_error(&self, active: bool) {
         self.frame_error.set(active);
     }
+    pub(super) fn scalar_callback(&self) -> bool {
+        self.scalar_callback.get()
+    }
+    pub(super) fn callbacks_allowed(&self) -> bool {
+        self.callbacks_allowed.get()
+    }
+    pub(super) fn allow_callbacks(&self, allowed: bool) {
+        self.callbacks_allowed.set(allowed);
+    }
+    pub(super) fn contains(
+        &self,
+        rules: Value,
+        instance: Value,
+        child: usize,
+        depth: usize,
+        required: i32,
+    ) -> Verdict {
+        let Ok(ordinal) = self.next_call() else {
+            return Unsupported;
+        };
+        let result = self.observe(ordinal, instance, RUNTIME_SCALAR_CONTAINS);
+        if result == Unsupported {
+            self.pending_contains.set(Some(ContainsArguments {
+                rules,
+                instance,
+                child,
+                depth,
+                required,
+            }));
+        }
+        result
+    }
     pub(super) fn runtime_order(&self) -> bool {
         self.runtime_order.get()
     }
     pub(super) fn budget(&self, limits: budget::Limits) -> budget::Budget {
+        if self.scalar_callback() {
+            // These children execute shared Ruby scalar primitives. Their VM
+            // checkpoints own the method boundaries; an entry/exit native
+            // deadline check could preempt an exception caught by the caller's
+            // Ruby block. The parent retains its native invocation deadline.
+            return budget::Budget::new(budget::Limits {
+                enabled: limits.enabled & !2,
+                ..limits
+            });
+        }
         budget::Budget::resume(limits, &self.deadline)
     }
     pub(super) fn is_match(&self, index: usize, regex: &Regex, bytes: &[u8]) -> bool {
@@ -475,6 +530,8 @@ pub unsafe extern "C" fn sn_caches_begin(caches: *const Caches) {
     caches.deadline.set(None);
     caches.runtime_order.set(false);
     caches.dynamic_calls.set(false);
+    caches.scalar_callback.set(false);
+    caches.callbacks_allowed.set(false);
     caches.reorder.set(false);
     caches.rescued_strings.borrow_mut().clear();
     *caches.pointers.borrow_mut() = Pointers::default();
@@ -509,9 +566,39 @@ pub unsafe extern "C" fn sn_caches_pending(
     }
 }
 /// # Safety
+/// Both caches must be live and idle under the GVL. The parent has unwound.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_scalar_callback(caches: *const Caches, parent: *const Caches) {
+    let caches = unsafe { &*caches };
+    caches.deadline.set(unsafe { &*parent }.deadline.get());
+    caches.scalar_callback.set(true);
+    caches.dynamic_calls.set(true);
+    caches.runtime_order.set(true);
+}
+/// # Safety
+/// Caches must hold a pending contains request and output must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_contains_arguments(
+    caches: *const Caches,
+    output: *mut ContainsArguments,
+) {
+    unsafe {
+        *output = (&*caches)
+            .pending_contains
+            .get()
+            .expect("pending contains callback")
+    };
+}
+/// # Safety
 /// Call from the owning runner's GC mark callback while caches are live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
+    if let Some(arguments) = unsafe { &*caches }.pending_contains.get() {
+        unsafe {
+            sn_pin(arguments.rules);
+            sn_pin(arguments.instance);
+        }
+    }
     // All keys also belong to the live original instance/schema. C roots every
     // completed result before recording it, including during stopped-Ractor GC.
     if let Ok(pointers) = unsafe { &*caches }.pointers.try_borrow() {

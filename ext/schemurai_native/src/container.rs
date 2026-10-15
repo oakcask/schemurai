@@ -18,6 +18,16 @@ struct Dependency {
     keyword: &'static str,
 }
 impl Header {
+    pub(super) fn contains(
+        &self,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+        child: usize,
+        depth: usize,
+    ) -> Verdict {
+        caches.contains(self.source, value, child, depth, required)
+    }
     pub(super) fn runtime_required(&self, caches: &runtime::Caches, kind: i32) -> bool {
         !self.native_bounds
             || !self.native_required
@@ -122,6 +132,100 @@ impl Header {
     }
 }
 impl Engine {
+    pub(super) fn scalar_callbacks_safe(&self, root: usize, depth: usize) -> bool {
+        self.scalar_callback_depths
+            .get(root)
+            .copied()
+            .flatten()
+            .is_some_and(|extra| {
+                depth
+                    .checked_add(extra)
+                    .is_some_and(|total| total <= MAX_EVALUATION_DEPTH)
+            })
+    }
+    // Admit callbacks only when every reachable assertion has a runtime path.
+    // Otherwise a later unsupported container could replay an already invoked
+    // user block through the VM. Postorder leaves cycles unproven.
+    pub(super) fn compile_scalar_callback_depths(&mut self) {
+        if !(0..self.nodes.len()).any(|node| self.scalar_contains_node(node)) {
+            self.scalar_callback_depths.clear();
+            return;
+        }
+        let mut edges = vec![vec![]; self.nodes.len()];
+        let mut admitted = vec![true; self.nodes.len()];
+        for (node, ops) in self.nodes.iter().enumerate() {
+            admitted[node] = !self.tracks[node];
+            for op in ops {
+                match op {
+                    Op::Boolean(_)
+                    | Op::Type(..)
+                    | Op::Number(..)
+                    | Op::String(..)
+                    | Op::Const(_)
+                    | Op::Enum(_) => {}
+                    Op::Array(_, rules) if rules.header_only() => {}
+                    Op::Array(_, rules) if self.scalar_contains(rules) => {
+                        edges[node].push(rules.contains.expect("scalar child"))
+                    }
+                    Op::Object(_, rules) if rules.header_only() => {}
+                    Op::Ref(reference) => match reference.static_target() {
+                        Some(child) => edges[node].push(child),
+                        None => admitted[node] = false,
+                    },
+                    Op::All(children) => edges[node].extend(children),
+                    Op::Any(children) | Op::One(children) => {
+                        edges[node].extend(children.iter().map(|&(child, _)| child))
+                    }
+                    Op::Not(child) => edges[node].push(*child),
+                    Op::Conditional(condition, yes, no) => {
+                        edges[node].push(*condition);
+                        edges[node].extend(yes.iter().chain(no));
+                    }
+                    Op::Array(..) | Op::Object(..) | Op::Unsupported | Op::UnresolvedRef(_) => {
+                        admitted[node] = false
+                    }
+                }
+            }
+        }
+        let order = graph::postorder(&edges, &mut vec![false; edges.len()]);
+        let mut depths: Vec<Option<usize>> = vec![None; edges.len()];
+        let mut contains = vec![false; edges.len()];
+        for node in order {
+            contains[node] =
+                self.scalar_contains_node(node) || edges[node].iter().any(|&child| contains[child]);
+            if admitted[node] {
+                depths[node] = edges[node].iter().try_fold(0, |depth, &child| {
+                    Some(depth.max(depths[child]?.checked_add(1)?))
+                });
+            }
+        }
+        self.scalar_callback_depths = depths
+            .into_iter()
+            .enumerate()
+            .map(|(node, depth)| if contains[node] { depth } else { None })
+            .collect();
+    }
+    pub(super) fn scalar_contains_node(&self, node: usize) -> bool {
+        self.nodes[node]
+            .iter()
+            .any(|op| matches!(op, Op::Array(_, rules) if self.scalar_contains(rules)))
+    }
+    // Scalar children need neither inherited reference bindings nor exported
+    // annotations. This proof keeps the first callback protocol self-contained.
+    pub(super) fn scalar_contains(&self, rules: &Array) -> bool {
+        rules.has_no_item_schemas()
+            && rules.contains.is_some_and(|child| {
+                matches!(
+                    self.nodes[child].as_slice(),
+                    [Op::Boolean(_)
+                        | Op::Type(..)
+                        | Op::Number(..)
+                        | Op::String(..)
+                        | Op::Const(_)
+                        | Op::Enum(_)]
+                )
+            })
+    }
     pub(super) fn container_header(
         &mut self,
         source: Value,
@@ -200,12 +304,14 @@ impl Engine {
     }
 }
 impl Array {
-    pub(super) fn header_only(&self) -> bool {
+    fn has_no_item_schemas(&self) -> bool {
         self.prefix.is_empty()
             && self.items.is_empty()
             && (!self.list || self.additional.is_none())
-            && self.contains.is_none()
             && self.unevaluated.is_none()
+    }
+    pub(super) fn header_only(&self) -> bool {
+        self.has_no_item_schemas() && self.contains.is_none()
     }
 }
 impl Object {

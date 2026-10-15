@@ -1210,6 +1210,384 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "runs scalar contains validity through native callbacks without VM execution" do # rubocop:disable RSpec/ExampleLength
+    fake = Object.new
+    fake.define_singleton_method(:is_a?) { |type| type == Array }
+    fake.define_singleton_method(:length) { 1 }
+    fake.define_singleton_method(:any?) { |&block| [1, "a"].any?(&block) }
+    fake.define_singleton_method(:count) { |&block| [1, "a"].count(&block) }
+    rescuing = Class.new(Array) do
+      def any?(&block)
+        super
+      rescue ArgumentError, NoMethodError
+        true
+      end
+
+      def count(&block)
+        super
+      rescue ArgumentError, NoMethodError
+        Rational(3, 2)
+      end
+    end
+    values = [Class.new(Array).new([1, "a", [1]]), Class.new(Array).new, rescuing.new([BasicObject.new, 1]),
+      fake, BasicObject.new, [1, "a"], nil, {Object.new => 1}]
+    children = [true, false, {"type" => "integer"}, {"type" => %w[number string]}, {"type" => "array"},
+      {"maximum" => 0}, {"type" => "number", "multipleOf" => 0.1},
+      {"minLength" => 2, "pattern" => "^a", "format" => "ipv4"},
+      {"contentEncoding" => "base64", "contentMediaType" => "application/json"}, {"const" => [1]}, {"enum" => [1, "a"]}]
+    rules = children.flat_map do |child|
+      [{"contains" => child}, {"type" => "array", "contains" => child},
+        {"maxItems" => 0, "contains" => child}, {"uniqueItems" => true, "contains" => child},
+        {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => child, "minContains" => 0, "maxContains" => 1}]
+    end
+    wrappers = [->(rule, value) { [rule, value] },
+      ->(rule, value) { [{"anyOf" => [rule, false]}, value] },
+      ->(rule, value) { [{"oneOf" => [rule, false]}, value] },
+      ->(rule, value) { [{"not" => rule}, value] },
+      ->(rule, value) { [{"if" => rule, "then" => false, "else" => true}, value] },
+      ->(rule, value) { [{"$defs" => {"v" => rule}, "allOf" => [{"$ref" => "#/$defs/v"}, {"$ref" => "#/$defs/v"}]}, value] }]
+    cases = rules.product(wrappers).map do |rule, wrap|
+      schema = wrap.call(rule, nil).first
+      vm = Schemurai.compile(schema, backend: :vm, format: true, content: true)
+      expected = values.product([{}, {timeout: 10}, {max_errors: 0}]).map do |value, options|
+        input = wrap.call(rule, value).last
+        [input, options, capture_validation(vm, :valid?, input, **options)]
+      end
+      [Schemurai.compile(schema, backend: :native, format: true, content: true), schema, expected]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, schema, expected|
+      expected.each_with_index do |(input, options, outcome), index|
+        expect(capture_validation(native, :valid?, input, **options)).to eq(outcome), [schema, options, index].inspect
+      end
+    end
+  end
+
+  it "declines contains callbacks before a later unsupported traversal can replay them" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Array) do
+      attr_reader :calls
+
+      def initialize
+        super([1])
+        @calls = []
+      end
+
+      def any?(&block)
+        @calls << :any?
+        super
+      end
+    end
+    rule = {"contains" => {"type" => "integer"}}
+    cases = [
+      [{"allOf" => [rule, {"items" => true}]}, ->(value) { value }],
+      [{"items" => rule}, ->(value) { [value] }],
+      [{"properties" => {"v" => rule}}, ->(value) { {"v" => value} }],
+      [{"$defs" => {"loop" => {"$ref" => "#/$defs/loop"}}, "allOf" => [rule, {"$ref" => "#/$defs/loop"}]}, ->(value) { value }]
+    ]
+    cases.each do |schema, wrap|
+      native = Schemurai.compile(schema, backend: :native)
+      value = klass.new
+      program = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+      expect(program.valid?(wrap.call(value))).to be_nil
+      expect(value.calls).to be_empty
+      expected_value = klass.new
+      expected = capture_validation(Schemurai.compile(schema, backend: :vm), :valid?, wrap.call(expected_value))
+      expect(capture_validation(native, :valid?, wrap.call(value))).to eq(expected)
+      expect(value.calls).to eq(expected_value.calls)
+    end
+  end
+
+  it "does not replay earlier type predicates after a contains callback changes its parent" do # rubocop:disable RSpec/ExampleLength
+    schema = {"allOf" => [{"type" => "array"}, {"contains" => {"type" => "string"}}]}
+    results = [:vm, :native].map do |backend|
+      calls = []
+      parent = []
+      value = Object.new
+      value.define_singleton_method(:is_a?) do |type|
+        calls << type
+        parent.define_singleton_method(:is_a?) { |_type| false }
+        type == String
+      end
+      parent << value
+      validator = Schemurai.compile(schema, backend: backend)
+      outcomes = Array.new(2) { capture_validation(validator, :valid?, parent) }
+      [outcomes, calls]
+    end
+    expect(results.last).to eq(results.first)
+  end
+
+  it "preserves contains block exceptions, ensure clauses and scalar call order" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Array) do
+      def initialize(calls, value)
+        super([value, value])
+        @calls = calls
+      end
+
+      def length
+        @calls << :length
+        super
+      end
+
+      def any?(&block)
+        @calls << :any?
+        super
+      rescue ArgumentError, NoMethodError => error
+        @calls << [:rescue, error.class]
+        true
+      ensure
+        @calls << :ensure
+      end
+
+      def count(&block)
+        @calls << :count
+        super
+      rescue ArgumentError, NoMethodError => error
+        @calls << [:rescue, error.class]
+        Rational(3, 2)
+      ensure
+        @calls << :ensure
+      end
+    end
+    value_class = Class.new do
+      def initialize(calls)
+        @calls = calls
+      end
+
+      def is_a?(type)
+        @calls << [:is_a?, type]
+        raise ArgumentError, "numeric predicate callback" if type == Numeric
+
+        super
+      end
+    end
+    rules = [true, {"type" => "integer"}, {"maximum" => 0}, {"minLength" => 2}, {"const" => nil}].flat_map do |child|
+      [{"contains" => child}, {"$schema" => "https://json-schema.org/draft/2020-12/schema", "contains" => child, "minContains" => 0, "maxContains" => 1}]
+    end
+    cases = rules.product([{}, {timeout: 10}, {max_errors: 0}]).map do |schema, options|
+      calls = []
+      input = klass.new(calls, value_class.new(calls))
+      outcome = capture_validation(Schemurai.compile(schema, backend: :vm), :valid?, input, **options)
+      [Schemurai.compile(schema, backend: :native), options, outcome, calls]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, options, outcome, expected_calls|
+      calls = []
+      expect(capture_validation(native, :valid?, klass.new(calls, value_class.new(calls)), **options)).to eq(outcome)
+      expect(calls).to eq(expected_calls)
+    end
+  end
+
+  it "keeps contains callbacks alive after their original validation and compaction" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Array) do
+      attr_reader :saved
+
+      def any?(&block)
+        @saved = block
+        super
+      end
+    end
+    schema = {"contains" => {"type" => "number", "multipleOf" => 0.1}}
+    cases = [{}, {timeout: 10}].map do |options|
+      vm = Schemurai.compile(schema, backend: :vm)
+      input = klass.new([0.2])
+      expected = capture_validation(vm, :valid?, input, **options)
+      expected_later = [0.3, "bad", 0.25].map { |value| capture_validation(input.saved, :call, value) }
+      [Schemurai.compile(schema, backend: :native), options, expected, expected_later]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, options, expected, expected_later|
+      input = klass.new([0.2])
+      expect(capture_validation(native, :valid?, input, **options)).to eq(expected)
+      GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+      expect([0.3, "bad", 0.25].map { |value| capture_validation(input.saved, :call, value) }).to eq(expected_later)
+      expect(native.valid?(klass.new([0.2]), **options)).to be(true)
+      expect(capture_validation(input.saved, :call, 0.3)).to eq(expected_later.first)
+    end
+  end
+
+  it "shares contains scalar caches with the owning evaluator across invocations" do # rubocop:disable RSpec/ExampleLength
+    numeric = Class.new(Numeric) do
+      def initialize(calls)
+        @calls = calls
+      end
+
+      def to_s
+        @calls << :decimal
+        GC.verify_compaction_references(double_heap: true, toward: :empty) if GC.respond_to?(:verify_compaction_references)
+        "0.2"
+      end
+    end
+    array = Class.new(Array)
+    schema = {"$schema" => "https://json-schema.org/draft/2020-12/schema",
+              "contains" => {"type" => "number", "multipleOf" => 0.1}, "minContains" => 0, "maxContains" => 2}
+    cases = [{}, {timeout: 10}].map do |options|
+      calls = []
+      vm = Schemurai.compile(schema, backend: :vm)
+      input = array.new([numeric.new(calls)] * 2)
+      outcomes = Array.new(3) { capture_validation(vm, :valid?, input, **options) }
+      [Schemurai.compile(schema, backend: :native), options, outcomes, calls]
+    end
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    cases.each do |native, options, outcomes, expected_calls|
+      calls = []
+      input = array.new([numeric.new(calls)] * 2)
+      expect(Array.new(3) { capture_validation(native, :valid?, input, **options) }).to eq(outcomes)
+      expect(calls).to eq(expected_calls)
+    end
+  end
+
+  it "shares contains scalar caches between validity and remaining diagnostic execution" do # rubocop:disable RSpec/ExampleLength
+    numeric = Class.new(Numeric) do
+      def initialize(calls)
+        @calls = calls
+      end
+
+      def to_s
+        @calls << :decimal
+        "0.2"
+      end
+    end
+    schema = {"contains" => {"type" => "number", "multipleOf" => 0.1}}
+    results = [:vm, :native].map do |backend|
+      calls = []
+      validator = Schemurai.compile(schema, backend: backend)
+      value = Class.new(Array).new([numeric.new(calls)])
+      outcomes = [:valid?, :validate, :valid?, :validate].map { |method| capture_validation(validator, method, value) }
+      [outcomes, calls]
+    end
+    expect(results.last).to eq(results.first)
+  end
+
+  it "retains contains scalar caches when late registration rebuilds the native runner" do # rubocop:disable RSpec/ExampleLength
+    numeric = Class.new(Numeric) do
+      def initialize(calls)
+        @calls = calls
+      end
+
+      def to_s
+        @calls << :decimal
+        "0.2"
+      end
+    end
+    schema = {"allOf" => [{"contains" => {"type" => "number", "multipleOf" => 0.1}},
+      {"anyOf" => [true, {"$ref" => "urn:later-callback"}]}]}
+    results = [:vm, :native].map do |backend|
+      calls = []
+      registry = Schemurai::SchemaRegistry.new(backend: backend)
+      validator = registry.compile(schema)
+      value = Class.new(Array).new([numeric.new(calls)])
+      outcomes = [:valid?, :validate].map { |method| capture_validation(validator, method, value) }
+      registry.compile({"$id" => "urn:later-callback", "type" => "array"})
+      outcomes.concat([:valid?, :validate].map { |method| capture_validation(validator, method, value) })
+      [outcomes, calls]
+    end
+    expect(results.last).to eq(results.first)
+  end
+
+  it "keeps contains child exceptions at the VM deadline boundaries" do # rubocop:disable RSpec/ExampleLength
+    allow(Process).to receive(:clock_gettime).and_call_original
+    advance = -> { allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.2) }
+    klass = Class.new(Array) do
+      def initialize(advance, calls, value)
+        super([value])
+        @advance, @calls = advance, calls
+      end
+
+      def any?
+        @advance.call
+        yield first
+      rescue ArgumentError, Schemurai::LimitExceeded => error
+        @calls << error.class
+        true
+      ensure
+        @calls << :ensure
+      end
+    end
+    special = Object.new
+    special.define_singleton_method(:is_a?) { |_type| raise ArgumentError, "predicate after clock advance" }
+    delayed_advance = -> do
+      sleep(0.2)
+      advance.call
+    end
+    advances = [advance, delayed_advance]
+    [{"type" => "number"}, {"minimum" => 0}, {"minLength" => 0}].product(advances).each do |child, advance_clock|
+      [:vm, :native].map do |backend|
+        validator = Schemurai.compile({"contains" => child}, backend: backend)
+        calls = []
+        allow(Process).to receive(:clock_gettime).with(Process::CLOCK_MONOTONIC).and_return(0.0)
+        [capture_validation(validator, :valid?, klass.new(advance_clock, calls, special), timeout: 0.1), calls]
+      end.then { |expected, actual| expect(actual).to eq(expected) }
+    end
+  end
+
+  it "isolates a reentrant native validation from its contains callback" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Array) do
+      def initialize(validator)
+        super([1])
+        @validator = validator
+      end
+
+      def any?
+        raise "nested validation failed" unless @validator.valid?([1])
+
+        yield first
+      end
+    end
+    schema = {"contains" => {"type" => "integer"}}
+    vm = Schemurai.compile(schema, backend: :vm)
+    expected = [{}, {timeout: 10}].map { |options| capture_validation(vm, :valid?, klass.new(vm), **options) }
+    native = Schemurai.compile(schema, backend: :native)
+    allow_any_instance_of(vm_class).to receive(:valid?).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    allow(Schemurai.const_get(:VM)::LimitedEvaluator).to receive(:new).and_raise("VM execution")
+    [{}, {timeout: 10}].zip(expected).each do |options, outcome|
+      expect(capture_validation(native, :valid?, klass.new(native), **options)).to eq(outcome)
+    end
+  end
+
+  it "guards unsupported contains diagnostics and depth before scalar methods" do # rubocop:disable RSpec/ExampleLength
+    klass = Class.new(Array) do
+      attr_reader :calls
+
+      def initialize
+        super([1])
+        @calls = []
+      end
+
+      def is_a?(type)
+        @calls << type
+        super
+      end
+    end
+    leaf = {"minimum" => 0, "contains" => {"type" => "integer"}}
+    definitions = 256.times.to_h { |index| ["n#{index}", (index == 255) ? leaf : {"$ref" => "#/$defs/n#{index + 1}"}] }
+    schemas = [leaf, {"$defs" => definitions, "$ref" => "#/$defs/n0"}]
+    schemas.product([:valid?, :validate]).each do |schema, method|
+      outcomes = [:vm, :native].map do |backend|
+        value = klass.new
+        outcome = capture_validation(Schemurai.compile(schema, backend: backend), method, value)
+        [outcome, value.calls]
+      end
+      expect(outcomes.last).to eq(outcomes.first)
+    end
+  end
+
+  it "keeps native contains callbacks private to independent Ractor runners" do
+    registry = Schemurai::SchemaRegistry.new(schemas: {"urn:contains" => {"contains" => {"type" => "integer"}}}, backend: :native).make_shareable
+    workers = Array.new(2) do
+      Ractor.new(registry) do |shared|
+        runner = shared.validator_for("urn:contains").instance_variable_get(:@evaluator).instance_variable_get(:@program)
+        klass = Class.new(Array)
+        GC.start
+        [runner.valid?(klass.new([1])), runner.valid?(klass.new(["bad"])), runner.valid?(klass.new([2]))]
+      end
+    end
+    workers.each { |worker| expect(worker.respond_to?(:value) ? worker.value : worker.take).to eq([true, false, true]) }
+  end
+
   it "preserves dependency triggers, key occurrences and message exceptions" do # rubocop:disable RSpec/ExampleLength
     klass = Class.new(Hash) do
       def initialize(calls)

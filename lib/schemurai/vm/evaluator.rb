@@ -61,6 +61,7 @@ module Schemurai
       include Internal::ValueEquality
       include Internal::ContainerChecks::Bounds
       include Internal::ContainerChecks::Required
+      include Internal::ContainerChecks::Contains
       include Internal::NumberChecks::Evaluation
       include Internal::StringChecks::Evaluation
       include Internal::StringChecks::Regexps
@@ -69,16 +70,16 @@ module Schemurai
 
       def backend = :vm
 
-      def initialize(graph, compiler, root, content: false, format: false)
+      def initialize(graph, compiler, root, content: false, format: false, number_state: nil, regexps: nil)
         @graph = graph
         @compiler = compiler
         @root = root
         @validate_content = content
         @validate_format = format
-        @regexps = nil
+        @regexps = regexps
         @active = nil
         @resolved_references = nil
-        @number_state = nil
+        @number_state = number_state
         @dynamic_scope = nil
         @instance_path_buffer = nil
         @schema_path_buffer = nil
@@ -551,12 +552,7 @@ module Schemurai
         end
 
         if (contains = rules.contains)
-          if rules.count_contains
-            matches = value.count { |item| evaluate_valid(contains, item) }
-            return false if matches < rules.min_contains || matches > rules.max_contains
-          else
-            return false unless value.any? { |item| evaluate_valid(contains, item) }
-          end
+          return false unless valid_contains?(rules, value) { |item| evaluate_valid(contains, item) }
         end
         true
       end

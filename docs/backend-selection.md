@@ -89,7 +89,7 @@ input-order property routing and the separate property-name phase so a
 reordered fast scan cannot expose an exception from an unvisited operation.
 The runner marks pending and completed observation
 handles for GC. An ensure handler clears results on success and exceptions;
-only compiled Ruby regexps persist on that validator. Ractors own separate
+the runner's unbounded scalar and regexp caches persist on that validator. Ractors own separate
 tables and Ruby regexps. Both Ruby and native duration deadlines remain fixed
 across retries, and native error limits are checked before another runtime call.
 The existing Validator Rust matcher path needs no Ruby call or extra Ruby allocation.
@@ -517,9 +517,9 @@ scope, and disappear on return from branches and references. Dynamic references
 without a matching dynamic anchor retain ordinary static-reference behavior.
 A single-anchor scope carries its effective binding in the stack frame, avoiding
 repeated table scans. General multi-anchor schemas use compiled native tables.
-The same scope frames are used during evaluated-location tracking. Ruby calls
-are limited to protected compilation callbacks; reference evaluation allocates
-no Ruby tracking objects and performs no instance conversion.
+The same scope frames are used during evaluated-location tracking. Reference
+routing uses native tables; reached assertions can yield runtime requests.
+It allocates no Ruby tracking objects and performs no instance conversion.
 
 JSON equality compares objects independently of key order and compares integral
 Float/Integer values without rounding the Integer to a Float. Large uniqueness
@@ -952,6 +952,33 @@ schemas. Frames preserve exception ordering, trial short circuits and error
 limits, and remain rooted during GC and private to each Ractor runner.
 Ordinary supported containers retain native size and uniqueness algorithms.
 Object validity with only count assertions needs no key scan because only its size is read.
+Contains validity can call a native scalar child from Ruby any?/count methods
+when no item-schema or unevaluated-item traversal is required. The compiler
+proof admits only one Boolean/type/number/string/const/enum instruction, with
+no inherited reference bindings or exported annotations. An iterative
+whole-program proof also requires reachable
+instructions to have complete runtime paths, static acyclic references and
+a depth within the native bound. Other roots retain the earlier guard before
+any new callback can run, preventing a later compatibility transfer from
+replaying an already invoked block. Earlier type predicates join ordered
+runtime observations before the first callback can mutate their instance.
+After Rust unwinds, C creates the callback. Each yield owns separate
+observations, with a fresh runner on reentry. Shared Ruby scalar primitives
+preserve method dispatch even for ordinary yielded values.
+The original Ruby method can rescue child exceptions and run ensure clauses.
+Children use the VM's scalar checkpoints, while the parent retains its native
+invocation deadline. A callback scope shares the owning evaluator's caches;
+bounded calls own private caches. Retained blocks keep their original scope
+and limited-evaluator budget-clearing behavior through GC compaction.
+Reentrant calls use independent observations and cleanup. Invocation observations
+are cleared through one ensure boundary, with persistent scalar caches retained.
+Diagnostics/trials still require indexed errors and annotation export and
+retain their existing compatibility path for these special containers. Their
+guard and the depth guard run before other scalar methods in the same node.
+The native evaluator owns unbounded number/regexp state and shares it with
+the remaining VM compatibility evaluator. Alternating validity and detailed
+validation, or recompiling after reference registration, therefore retains
+the same Ruby conversion/cache observations.
 The default Ruby evaluator keeps its own traversal policy. Native arithmetic
 and Ruby diagnostic callbacks remain separate because their observable reads
 and iteration requirements differ.
