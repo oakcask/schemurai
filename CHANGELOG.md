@@ -1,5 +1,43 @@
 # Changelog
 
+## [3.0.2](https://github.com/oakcask/schemurai/compare/v3.0.1...v3.0.2) (2026-10-16)
+
+
+### Bug Fixes
+
+* build encoded diagnostic pointers through libruby ([#217](https://github.com/oakcask/schemurai/issues/217)) ([0a200c5](https://github.com/oakcask/schemurai/commit/0a200c5df72ba5bf8112ee902b6a9df9a20050ee))
+* check special object required keys through libruby ([#227](https://github.com/oakcask/schemurai/issues/227)) ([07e3228](https://github.com/oakcask/schemurai/commit/07e3228ef4a29b6faedbb9fd96600210b22576fa))
+* collect native array callback diagnostics ([#238](https://github.com/oakcask/schemurai/issues/238)) ([580d3cc](https://github.com/oakcask/schemurai/commit/580d3ccb7d876488b0a3c6f5931f48182309133c))
+* collect native object callback diagnostics ([#239](https://github.com/oakcask/schemurai/issues/239)) ([0bb9c6a](https://github.com/oakcask/schemurai/commit/0bb9c6a5a849094b4ff4d86c0bb8c9a30d202145))
+* compare deep JSON structures without VM execution ([#210](https://github.com/oakcask/schemurai/issues/210)) ([a48efda](https://github.com/oakcask/schemurai/commit/a48efda39d9cf5a632b213a602d478395d65fc03))
+* continue owned native diagnostic results across stacks ([#237](https://github.com/oakcask/schemurai/issues/237)) ([2800e8f](https://github.com/oakcask/schemurai/commit/2800e8ff7a0853854f125523a57a6de00fb9c233))
+* continue recursive native validity across stack boundaries ([#236](https://github.com/oakcask/schemurai/issues/236)) ([d4ed97b](https://github.com/oakcask/schemurai/commit/d4ed97bf389dcddcc666c7e04f0021e3f4c97cf3))
+* evaluate arbitrary decimal arithmetic natively ([#212](https://github.com/oakcask/schemurai/issues/212)) ([f761dc2](https://github.com/oakcask/schemurai/commit/f761dc278e70347bd2a2ae34aee211b25807136a))
+* evaluate composite contains children natively ([#231](https://github.com/oakcask/schemurai/issues/231)) ([472b2a7](https://github.com/oakcask/schemurai/commit/472b2a7420dea4b9b2d00f4d24dbede0aab6852b))
+* evaluate container bounds through libruby ([#226](https://github.com/oakcask/schemurai/issues/226)) ([15a41f4](https://github.com/oakcask/schemurai/commit/15a41f4fafa90007dfb9e66f695b92e21aaaf99a))
+* evaluate non-string required keys through libruby ([#220](https://github.com/oakcask/schemurai/issues/220)) ([500d748](https://github.com/oakcask/schemurai/commit/500d748d7cdd109bf802dd90d3e38288b12a973d))
+* evaluate null numeric operands through libruby ([#219](https://github.com/oakcask/schemurai/issues/219)) ([f70323b](https://github.com/oakcask/schemurai/commit/f70323b665fec140096b2606d07993a2fe00fa3e))
+* evaluate Ruby regexps through libruby ([#215](https://github.com/oakcask/schemurai/issues/215)) ([cff5e9b](https://github.com/oakcask/schemurai/commit/cff5e9b6d3b49504edfe19d116b452e28597121c))
+* evaluate scalar contains children through native callbacks ([#229](https://github.com/oakcask/schemurai/issues/229)) ([9f055a1](https://github.com/oakcask/schemurai/commit/9f055a1e6286f21bd0aedece10c3796155b41a20))
+* evaluate scalar contains instruction sequences natively ([#230](https://github.com/oakcask/schemurai/issues/230)) ([0805826](https://github.com/oakcask/schemurai/commit/0805826eb935d6b213b2cb2ea16af2ab7d9a0385))
+* evaluate special array children through native callbacks ([#232](https://github.com/oakcask/schemurai/issues/232)) ([54b9e83](https://github.com/oakcask/schemurai/commit/54b9e83df3066719efe1e6f32951d7352f5f2f70))
+* evaluate special numeric assertions through libruby ([#223](https://github.com/oakcask/schemurai/issues/223)) ([1b1bf76](https://github.com/oakcask/schemurai/commit/1b1bf765d9fe1e1904e4d4bb3c11c8cf58dbaa4d))
+* evaluate special object children through native callbacks ([#233](https://github.com/oakcask/schemurai/issues/233)) ([1802357](https://github.com/oakcask/schemurai/commit/18023577c0f6d943c8b8ab0112d6f143944b87e9))
+* evaluate special object dependency keys through libruby ([#228](https://github.com/oakcask/schemurai/issues/228)) ([58f5f17](https://github.com/oakcask/schemurai/commit/58f5f172c289c29734c6bac88e9b8fa91ba66291))
+* evaluate special Ruby type predicates through libruby ([#222](https://github.com/oakcask/schemurai/issues/222)) ([62239c0](https://github.com/oakcask/schemurai/commit/62239c0ad4f5c094b677e3748b13f6626019c8f5))
+* evaluate special string assertions through libruby ([#224](https://github.com/oakcask/schemurai/issues/224)) ([0580e33](https://github.com/oakcask/schemurai/commit/0580e335bfa22ee8a061f604d79dff76a773b3c6))
+* evaluate special value comparisons through libruby ([#225](https://github.com/oakcask/schemurai/issues/225)) ([6e1122e](https://github.com/oakcask/schemurai/commit/6e1122ea61ef82d765610ebfb74752469f8099a2))
+* evaluate unbounded integer multiples natively ([#207](https://github.com/oakcask/schemurai/issues/207)) ([bb77b79](https://github.com/oakcask/schemurai/commit/bb77b795f4e75254aca30fd4ccbfc8e88c6db8d6))
+* execute static alias cycles in native callbacks ([#235](https://github.com/oakcask/schemurai/issues/235)) ([b20490b](https://github.com/oakcask/schemurai/commit/b20490babaee3963688b4c9b15f9a0548415c71a))
+* execute unresolved container children natively ([#240](https://github.com/oakcask/schemurai/issues/240)) ([5aee021](https://github.com/oakcask/schemurai/commit/5aee021ed4c318d240abb8d397177714901d1f77))
+* inherit reference context in native callbacks ([#234](https://github.com/oakcask/schemurai/issues/234)) ([39c98f2](https://github.com/oakcask/schemurai/commit/39c98f2655b9308914ff378f3af254e151df36b8))
+* raise cyclic comparison errors without VM execution ([#211](https://github.com/oakcask/schemurai/issues/211)) ([aa7b9d0](https://github.com/oakcask/schemurai/commit/aa7b9d0c143f74d5423543b2041914733c808421))
+* raise nonfinite decimal errors without VM execution ([#214](https://github.com/oakcask/schemurai/issues/214)) ([1d595c9](https://github.com/oakcask/schemurai/commit/1d595c92403494b08a5c6883b54e7789dfad8673))
+* report unresolved references without VM execution ([#209](https://github.com/oakcask/schemurai/issues/209)) ([643db74](https://github.com/oakcask/schemurai/commit/643db7428428c78f8c000b518318a2cbe31ba0ef))
+* validate input-independent schemas without VM fallback ([#221](https://github.com/oakcask/schemurai/issues/221)) ([a61a2a1](https://github.com/oakcask/schemurai/commit/a61a2a1f561ccf8332dc902aafa92607a5018930))
+* validate standard identity scalars natively ([#218](https://github.com/oakcask/schemurai/issues/218)) ([5042310](https://github.com/oakcask/schemurai/commit/50423103ca5d6ee8ce111d4f2cb8724e3792894f))
+* validate transcoded JSON content through libruby ([#216](https://github.com/oakcask/schemurai/issues/216)) ([bd4a59a](https://github.com/oakcask/schemurai/commit/bd4a59a4f9bea268c68ca4a96f4999ae1708230a))
+
 ## [3.0.1](https://github.com/oakcask/schemurai/compare/v3.0.0...v3.0.1) (2026-10-12)
 
 
