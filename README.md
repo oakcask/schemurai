@@ -189,9 +189,8 @@ must not be shared between threads or Ractors. With the VM and native backends,
 the registry compiles and shares its bytecode before this transition. The native
 backend also prepares shared native instruction tables for all four combinations
 of `content` and `format`; `validator_for` does not recompile them in each Ractor.
-Native regex search caches, Ruby regexp runtime state and VM fallback evaluation
-state belong to each validator. Preparing these tables adds time and memory to
-`make_shareable`.
+Native regex search caches and Ruby runtime helper state belong to each
+validator. Preparing these tables adds time and memory to `make_shareable`.
 
 ### Meta-schema validation
 
@@ -256,13 +255,15 @@ applicator trials do not consume the cap. Boolean checks ignore the error cap
 and use the ordinary evaluator when no timeout is set.
 
 The timeout uses a monotonic elapsed-time deadline, including diagnostic
-rendering and native-to-VM fallback. It checks at entry, before returning and
-every 256 checkpoints in evaluation, container scans and structural traversal.
+rendering and native runtime helper calls and retries. It checks at entry,
+before returning and every 256 checkpoints in evaluation, container scans and
+structural traversal.
 Ruby string/content operations also check before and after expensive calls.
 Zero seconds stops even a trivial call. Expiry raises `LimitExceeded` with
 `limit == :timeout`; `maximum` and `attempted` are configured and elapsed seconds.
 Native returns an exhaustion status and releases Rust resources before Ruby
-raises. A limit hit is terminal and does not trigger fallback.
+raises. A limit hit is terminal. Native validation does not fall back to VM
+execution, with or without invocation limits.
 
 This implementation never uses Ruby `Timeout`, timer threads, signals or
 asynchronous exception injection. It is cooperative: one regexp search, scalar
