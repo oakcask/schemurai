@@ -1,0 +1,5 @@
+# frozen_string_literal: true
+
+gems = Dir["pkg/*.gem"].sort
+abort "expected the source gem and six native platform gems" unless gems.length == 7
+gems.each { |gem| system("gem", "push", gem, exception: true) }

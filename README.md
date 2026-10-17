@@ -288,9 +288,28 @@ scans use per-item evaluation so successful scans can poll.
 `Schemurai.backend`, `SchemaRegistry#backend`, and `Validator#backend` expose
 the selected backend. Pass `backend: :ruby` to force the Ruby oracle or
 `backend: :vm` to ahead-of-time compile schemas for the validator virtual machine.
-Pass `backend: :native` to use the experimental Rust VM extension. Building the
-native extension requires a C toolchain, Ruby development headers, and Rust
-1.93 or newer. If cargo is absent, gem installation skips the optional native
+Pass `backend: :native` to use the experimental Rust VM extension. Releases
+include precompiled gems on RubyGems.org for CRuby 4.0 on these platforms:
+
+| OS | CPU | libc | Gem platform |
+| --- | --- | --- | --- |
+| Linux | x64 | glibc 2.36+ | `x86_64-linux-gnu` |
+| Linux | arm64 | glibc 2.36+ | `aarch64-linux-gnu` |
+| Linux | x64 | musl (Alpine 3.23+) | `x86_64-linux-musl` |
+| Linux | arm64 | musl (Alpine 3.23+) | `aarch64-linux-musl` |
+| macOS 14+ | x64 | — | `x86_64-darwin` |
+| macOS 14+ | arm64 | — | `arm64-darwin` |
+
+RubyGems/Bundler selects the matching platform gem during normal installation;
+these gems need no C compiler, Rust, or Ruby development headers. Each platform
+gem bundles its supported Ruby minor ABIs and restricts `required_ruby_version`
+to that range. Ruby patch releases share the same binary. To build from source,
+use `gem install schemurai --platform ruby` or Bundler's `force_ruby_platform`.
+See [native gem releases](docs/native-gem-releases.md) for the build matrix.
+
+Building the native extension from source requires a C toolchain, Ruby
+development headers, and Rust 1.93 or newer. If cargo is absent, installation of
+the source gem skips the optional native
 extension and Ruby/VM remain available; explicitly selecting `:native` then
 raises `LoadError`. Native execution borrows Ruby values directly; its current coverage and
 remaining VM delegation are documented below.

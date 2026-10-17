@@ -1,0 +1,62 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rubygems/package"
+require "tmpdir"
+
+platform = ARGV.fetch(0)
+abort "unsupported native gem platform: #{platform}" unless %w[
+  x86_64-linux-gnu aarch64-linux-gnu x86_64-linux-musl aarch64-linux-musl
+  x86_64-darwin arm64-darwin
+].include?(platform)
+
+binaries = File.expand_path(ARGV.fetch(1))
+destination = File.expand_path(ARGV.fetch(2))
+extension = platform.end_with?("darwin") ? "bundle" : "so"
+abis = Dir.children(binaries)
+abort "no Ruby ABIs supplied" if abis.empty?
+abis.each do |abi|
+  abort "invalid Ruby ABI: #{abi}" unless /\A\d+\.\d+\z/.match?(abi)
+  abort "missing extension for Ruby #{abi}" unless File.file?(File.join(binaries, abi, "schemurai_native.#{extension}"))
+end
+abis.sort_by! { |abi| Gem::Version.new(abi) }
+
+spec = Gem::Specification.load("schemurai.gemspec")
+abis.each do |abi|
+  abort "unsupported Ruby ABI: #{abi}" unless spec.required_ruby_version.satisfied_by?(Gem::Version.new("#{abi}.0"))
+end
+# RubyGems has no Ruby ABI in its platform key. Bundle all supported minors
+# into a single gem per platform, and exclude unbuilt minors from resolution.
+major, minor = abis.last.split(".").map(&:to_i)
+requirements = spec.required_ruby_version.requirements.map { |operator, version| "#{operator} #{version}" }
+requirements += [">= #{abis.first}.0", "< #{major}.#{minor + 1}.0"]
+abis.each_cons(2) do |previous, current|
+  previous_major, previous_minor = previous.split(".").map(&:to_i)
+  current_major, current_minor = current.split(".").map(&:to_i)
+  consecutive = current_major == previous_major && current_minor == previous_minor + 1
+  next_major = current_major == previous_major + 1 && current_minor.zero?
+  abort "Ruby ABI range contains gaps" unless consecutive || next_major
+end
+
+Dir.mktmpdir("schemurai-native-gem") do |directory|
+  spec.files.select { |file| !file.start_with?("ext/") && File.file?(file) }.each do |source|
+    target = File.join(directory, source)
+    FileUtils.mkdir_p(File.dirname(target))
+    FileUtils.cp(source, target)
+  end
+  FileUtils.cp("script/native-gem-loader.rb", File.join(directory, "lib/schemurai_native.rb"))
+  abis.each do |abi|
+    target = File.join(directory, "lib/schemurai/native", abi)
+    FileUtils.mkdir_p(target)
+    FileUtils.cp(File.join(binaries, abi, "schemurai_native.#{extension}"), target)
+  end
+  spec.platform = Gem::Platform.new(platform)
+  spec.required_ruby_version = Gem::Requirement.new(*requirements)
+  spec.extensions = []
+  Dir.chdir(directory) do
+    spec.files = Dir["lib/**/*", "sig/**/*", "README.md", "LICENSE"].select { |file| File.file?(file) }
+    gem = Gem::Package.build(spec)
+    FileUtils.mkdir_p(destination)
+    FileUtils.cp(gem, destination)
+  end
+end

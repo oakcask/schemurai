@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+case "$1" in
+  gnu) ;; # The Debian Ruby image already includes the C build tools and curl.
+  musl)
+    apk add --no-cache build-base curl linux-headers
+    # Match the Ruby process's dynamic libc when linking Rust into its extension.
+    export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=-crt-static"
+    ;;
+  *) echo "unsupported libc: $1" >&2; exit 1 ;;
+esac
+
+installer=$(mktemp)
+curl --fail --silent --show-error --location https://sh.rustup.rs --output "$installer"
+sh "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
+# shellcheck disable=SC1091
+. "$HOME/.cargo/env"
+ruby script/build-native-extension native

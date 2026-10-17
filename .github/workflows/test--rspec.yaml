@@ -11,6 +11,8 @@ on:
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
+      - script/build-native-gem
+      - script/native-gem-loader.rb
       - spec/**/*
   pull_request:
     paths:
@@ -20,6 +22,8 @@ on:
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
+      - script/build-native-gem
+      - script/native-gem-loader.rb
       - spec/**/*
 
 permissions:

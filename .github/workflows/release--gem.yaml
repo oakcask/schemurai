@@ -49,33 +49,47 @@ jobs:
       - name: Upload gem
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: schemurai-${{ needs.release.outputs.version }}
+          name: gem-ruby
           path: schemurai-${{ needs.release.outputs.version }}.gem
           compression-level: 0
           if-no-files-found: error
+
+  native-gems:
+    needs: release
+    if: ${{ needs.release.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/shared--native-gems.yaml
+    with:
+      ref: ${{ needs.release.outputs.tag_name }}
 
   publish:
     needs:
       - release
       - build
+      - native-gems
     permissions:
       contents: write
       id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
       - name: Set up Ruby
         uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
         with:
           ruby-version: ruby
-      - name: Download gem
+      - name: Download source and native gems
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: schemurai-${{ needs.release.outputs.version }}
+          pattern: gem-*
+          path: pkg
+          merge-multiple: true
       - name: Configure RubyGems credentials
         uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
-      - name: Push gem to RubyGems.org
-        run: gem push schemurai-${{ needs.release.outputs.version }}.gem
+      - name: Push source and native gems to RubyGems.org
+        run: ruby script/push-gems
       - name: Publish GitHub release
         env:
           GH_REPO: ${{ github.repository }}

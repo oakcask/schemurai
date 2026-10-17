@@ -2,6 +2,10 @@
 
 require "mkmf"
 
+# Platform gems resolve Ruby symbols from the running interpreter so the same
+# binary also works with Rubies built without a shared libruby.
+$LIBRUBYARG = "" unless enable_config("link-ruby", true) # rubocop:disable Style/GlobalVars -- mkmf build configuration.
+
 unless find_executable("cargo")
   warn "cargo was not found; skipping the optional native backend (Ruby and VM remain available)"
   File.write("Makefile", dummy_makefile(".").join)

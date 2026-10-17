@@ -1,0 +1,24 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rbconfig"
+require "rubygems/package"
+require "tmpdir"
+
+gem_path = File.expand_path(ARGV.fetch(0))
+spec = Gem::Package.new(gem_path).spec
+abort "expected a binary gem without build steps" unless spec.extensions.empty? && spec.platform != Gem::Platform::RUBY
+abort "unexpected native gem platform" unless spec.platform.to_s == ENV.fetch("SCHEMURAI_NATIVE_PLATFORM")
+abort "unexpected native source files" if spec.files.any? { |file| file.start_with?("ext/") }
+
+# Isolate installation and execution from checkout extensions and installed
+# schemurai gems. With only Ruby on PATH, no compiler or cargo can be used.
+Dir.mktmpdir("schemurai-native-install") do |directory|
+  bin = File.join(directory, "bin")
+  FileUtils.mkdir_p(bin)
+  FileUtils.ln_s(RbConfig.ruby, File.join(bin, "ruby"))
+  environment = {"PATH" => bin, "GEM_HOME" => directory, "GEM_PATH" => directory, "RUBYLIB" => nil, "RUBYOPT" => nil}
+  gem_command = File.join(RbConfig::CONFIG.fetch("bindir"), "gem")
+  system(environment, RbConfig.ruby, gem_command, "install", gem_path, "--no-document", exception: true)
+  system(environment, RbConfig.ruby, "test/package_smoke_test.rb", exception: true)
+end
