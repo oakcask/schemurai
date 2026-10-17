@@ -713,6 +713,75 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Err(Unsupported);
             }
+            // Container entry policy is shared; child traversal stays specific
+            // to each container's paths, assertions and annotation coverage.
+            let container = match op {
+                Op::Array(required, rules) => {
+                    Some((*required, &rules.header, rules.header_only(), TYPE_ARRAY))
+                }
+                Op::Object(required, rules) => {
+                    Some((*required, &rules.header, rules.header_only(), TYPE_OBJECT))
+                }
+                _ => None,
+            };
+            if let Some((required, header, header_only, expected_kind)) = container {
+                if self.caches.report_continuations_allowed()
+                    && !header_only
+                    && (kind == TYPE_UNSUPPORTED
+                        || self.caches.dynamic_calls()
+                        || prior.has_runtime_properties())
+                {
+                    let result = self.caches.container_report(
+                        node,
+                        value,
+                        (source.1, required, expected_kind == TYPE_OBJECT),
+                        report,
+                        &prior,
+                        tracked,
+                    )?;
+                    if tracked {
+                        prior.merge_diagnostics(self, result)?;
+                    }
+                    if report.silent && report.failed {
+                        break;
+                    }
+                    continue;
+                }
+                if header_only && header.runtime_required(self.caches, kind) {
+                    if report.collect_header(self.caches, header, required, value, source)? {
+                        break;
+                    }
+                    continue;
+                }
+                if kind == expected_kind && !self.budget.checkpoint() {
+                    return Err(Unsupported);
+                }
+                if required != 0 && kind != expected_kind {
+                    report.add(self.caches, "type", source, value, 0)?;
+                }
+                if kind != expected_kind {
+                    continue;
+                }
+                if report.silent {
+                    let status = match op {
+                        Op::Array(_, rules) => {
+                            self.array_tracked(rules, value, depth + 1, active, &mut prior)
+                        }
+                        Op::Object(_, rules) => {
+                            self.object_tracked(rules, value, depth + 1, active, &mut prior)
+                        }
+                        _ => unreachable!("container entry"),
+                    };
+                    if status == Unsupported {
+                        return Err(Unsupported);
+                    }
+                    report.failed |= status == Invalid;
+                    if report.failed {
+                        break;
+                    }
+                    continue;
+                }
+            }
             match op {
                 Op::Unsupported => return Err(Unsupported),
                 Op::UnresolvedRef(message) => {
@@ -842,62 +911,7 @@ impl Execution<'_> {
                         }
                     }
                 }
-                Op::Array(required, rules) => {
-                    if self.caches.report_continuations_allowed()
-                        && !rules.header_only()
-                        && (kind == TYPE_UNSUPPORTED
-                            || self.caches.dynamic_calls()
-                            || prior.has_runtime_properties())
-                    {
-                        let result = self.caches.container_report(
-                            node,
-                            value,
-                            (source.1, *required, false),
-                            report,
-                            &prior,
-                            tracked,
-                        )?;
-                        if tracked {
-                            prior.merge_diagnostics(self, result)?;
-                        }
-                        if report.silent && report.failed {
-                            break;
-                        }
-                        continue;
-                    }
-                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
-                        if report.collect_header(
-                            self.caches,
-                            &rules.header,
-                            *required,
-                            value,
-                            source,
-                        )? {
-                            break;
-                        }
-                        continue;
-                    }
-                    if kind == TYPE_ARRAY && !self.budget.checkpoint() {
-                        return Err(Unsupported);
-                    }
-                    if *required != 0 && kind != TYPE_ARRAY {
-                        report.add(self.caches, "type", source, value, 0)?;
-                    }
-                    if kind != TYPE_ARRAY {
-                        continue;
-                    }
-                    if report.silent {
-                        let status =
-                            self.array_tracked(rules, value, depth + 1, active, &mut prior);
-                        if status == Unsupported {
-                            return Err(Unsupported);
-                        }
-                        report.failed |= status == Invalid;
-                        if report.failed {
-                            break;
-                        }
-                        continue;
-                    }
+                Op::Array(_, rules) => {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
@@ -1168,62 +1182,7 @@ impl Execution<'_> {
                         prior.merge_diagnostics(self, coverage)?;
                     }
                 }
-                Op::Object(required, rules) => {
-                    if self.caches.report_continuations_allowed()
-                        && !rules.header_only()
-                        && (kind == TYPE_UNSUPPORTED
-                            || self.caches.dynamic_calls()
-                            || prior.has_runtime_properties())
-                    {
-                        let result = self.caches.container_report(
-                            node,
-                            value,
-                            (source.1, *required, true),
-                            report,
-                            &prior,
-                            tracked,
-                        )?;
-                        if tracked {
-                            prior.merge_diagnostics(self, result)?;
-                        }
-                        if report.silent && report.failed {
-                            break;
-                        }
-                        continue;
-                    }
-                    if rules.header_only() && rules.header.runtime_required(self.caches, kind) {
-                        if report.collect_header(
-                            self.caches,
-                            &rules.header,
-                            *required,
-                            value,
-                            source,
-                        )? {
-                            break;
-                        }
-                        continue;
-                    }
-                    if kind == TYPE_OBJECT && !self.budget.checkpoint() {
-                        return Err(Unsupported);
-                    }
-                    if *required != 0 && kind != TYPE_OBJECT {
-                        report.add(self.caches, "type", source, value, 0)?;
-                    }
-                    if kind != TYPE_OBJECT {
-                        continue;
-                    }
-                    if report.silent {
-                        let status =
-                            self.object_tracked(rules, value, depth + 1, active, &mut prior);
-                        if status == Unsupported {
-                            return Err(Unsupported);
-                        }
-                        report.failed |= status == Invalid;
-                        if report.failed {
-                            break;
-                        }
-                        continue;
-                    }
+                Op::Object(_, rules) => {
                     let mut coverage = Tracked::new(Valid);
                     let len = unsafe { sn_len(value) };
                     if rules.max.is_some_and(|max| len > max) {
