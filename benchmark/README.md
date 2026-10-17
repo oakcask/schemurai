@@ -600,6 +600,9 @@ bundle exec ruby benchmark/draft7.rb
 ```
 
 Set `BENCHMARK_ONLY` to `build`, `suite`, or `validate` to isolate one workload.
+All three Draft scripts use the same suite runner and measurement settings.
+Set `BENCHMARK_TIME` and `BENCHMARK_WARMUP` to control measurement duration;
+set `BENCHMARK_JSON` with one workload selected to save its results as JSON.
 
 Use the validation-only workload and allocation runner to measure the VM
 backend against another checkout:
