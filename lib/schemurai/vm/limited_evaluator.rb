@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../limit_exceeded"
-require_relative "../limit_budget"
+require_relative "../evaluation_limits"
 require_relative "evaluator"
 
 module Schemurai
@@ -10,72 +10,17 @@ module Schemurai
     class LimitedEvaluator < Evaluator
       include Internal::ValueEquality::Checkpoints
       include Internal::StringChecks::TimedRegexps
-
-      def validate(instance, max_errors: nil, timeout: nil, budget: nil)
-        @budget = budget || Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
-        result = super(instance)
-        @budget.check_deadline!
-        result
-      ensure
-        @budget = nil
-      end
-
-      def valid?(instance, max_errors: nil, timeout: nil, budget: nil)
-        @budget = budget || Internal::LimitBudget.new(max_errors: max_errors, timeout: timeout)
-        result = super(instance)
-        @budget.check_deadline!
-        result
-      ensure
-        @budget = nil
-      end
-
-      private def evaluate(node, instance)
-        @budget.checkpoint
-        super
-      end
-
-      private def evaluate_valid(node, instance)
-        @budget.checkpoint
-        super
-      end
+      include Internal::EvaluationLimits
 
       private def add_error(keyword, message = nil, append_keyword: true, &block)
         @budget.reserve_error if @errors
         super
       end
 
-      private def valid_string?(node, value)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
-      end
-
-      private def check_string(node, value)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
-      end
-
       private def number_state
         state = super
         state.budget = @budget
         state
-      end
-
-      private def valid_content?(schema, value)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
-      end
-
-      private def check_content(schema, value)
-        @budget.check_deadline!
-        result = super
-        @budget.check_deadline!
-        result
       end
     end
   end
