@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - .github/workflows/test--package.yaml
+      - .github/workflows/shared--native-gems.yaml
+      - .github/workflows/release--gem.yaml
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
@@ -14,9 +16,17 @@ on:
       - README.md
       - test/package_smoke_test.rb
       - script/install-without-cargo
+      - script/build-native-extension
+      - script/build-native-gem
+      - script/build-native-linux
+      - script/native-gem-loader.rb
+      - script/test-native-gem
+      - script/push-gems
   pull_request:
     paths:
       - .github/workflows/test--package.yaml
+      - .github/workflows/shared--native-gems.yaml
+      - .github/workflows/release--gem.yaml
       - .ruby-version
       - schemurai.gemspec
       - lib/**/*
@@ -25,11 +35,22 @@ on:
       - README.md
       - test/package_smoke_test.rb
       - script/install-without-cargo
+      - script/build-native-extension
+      - script/build-native-gem
+      - script/build-native-linux
+      - script/native-gem-loader.rb
+      - script/test-native-gem
+      - script/push-gems
 
 permissions:
   contents: read
 
 jobs:
+  native-gems:
+    uses: ./.github/workflows/shared--native-gems.yaml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 5

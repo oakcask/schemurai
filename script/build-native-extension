@@ -1,0 +1,28 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rbconfig"
+require "tmpdir"
+
+destination = File.expand_path(ARGV.fetch(0))
+abi = RUBY_VERSION.split(".").first(2).join(".")
+extension = "schemurai_native.#{RbConfig::CONFIG.fetch("DLEXT")}"
+spec = Gem::Specification.load("schemurai.gemspec")
+
+# Build from packaged sources, never from a developer's generated Makefile,
+# object files, or Cargo target directory.
+Dir.mktmpdir("schemurai-native-build") do |directory|
+  spec.files.grep(%r{\Aext/}).each do |source|
+    target = File.join(directory, source)
+    FileUtils.mkdir_p(File.dirname(target))
+    FileUtils.cp(source, target)
+  end
+  Dir.chdir(File.join(directory, "ext/schemurai_native")) do
+    # Distributed binaries must work across Ruby patch releases without
+    # relying on private Hash storage flags or private libruby symbols.
+    system(RbConfig.ruby, "extconf.rb", "--enable-portable-hash-walk", "--disable-link-ruby", exception: true)
+    system("make", "-j2", exception: true)
+    FileUtils.mkdir_p(File.join(destination, abi))
+    FileUtils.cp(extension, File.join(destination, abi, extension))
+  end
+end
