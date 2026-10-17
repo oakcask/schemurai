@@ -144,6 +144,7 @@ dependencies = [
  "memchr",
  "num-bigint 0.5.1",
  "num-rational",
+ "num-traits",
  "regex-automata",
  "regex-syntax",
  "ryu",
