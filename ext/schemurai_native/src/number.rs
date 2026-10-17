@@ -2,7 +2,7 @@
 //! multipleOf semantics. All evaluation helpers operate under the GVL and
 //! allocate no Ruby objects; unsupported magnitudes retain VM compatibility.
 use super::*;
-use num_rational::BigRational;
+use arbitrary::BigRational;
 use std::cmp::Ordering;
 mod arbitrary;
 

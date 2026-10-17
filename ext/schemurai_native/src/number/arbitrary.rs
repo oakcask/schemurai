@@ -3,7 +3,27 @@
 //! method dispatch can invalidate the evaluator's borrowed instance storage.
 use super::*;
 use num_bigint::{BigInt, Sign};
+use num_traits::float::FloatCore;
 use std::borrow::Cow;
+
+// Use the application's BigInt version rather than num-rational's optional one.
+pub(super) type BigRational = num_rational::Ratio<BigInt>;
+
+fn binary_float(value: f64) -> Option<BigRational> {
+    if !value.is_finite() {
+        return None;
+    }
+    let (mantissa, exponent, sign) = value.integer_decode();
+    let numerator = BigInt::from(mantissa) * BigInt::from(sign);
+    Some(if exponent < 0 {
+        BigRational::new(
+            numerator,
+            BigInt::from(1) << exponent.unsigned_abs() as usize,
+        )
+    } else {
+        BigRational::from_integer(numerator << exponent as usize)
+    })
+}
 
 fn integer(value: Value) -> BigInt {
     if unsafe { sn_fixnum(value) } != 0 {
@@ -98,7 +118,7 @@ impl Rules {
         // in binary, but rounds Rational bounds to Float. With multipleOf,
         // Ruby first converts the instance's decimal spelling to a Rational.
         let binary = if actual.is_none() && self.limits.iter().any(|(_, limit)| limit.integer) {
-            BigRational::from_float(n)
+            binary_float(n)
         } else {
             None
         };
@@ -150,5 +170,41 @@ impl Rules {
             }
         }
         Ok(bits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_float_preserves_exact_values() {
+        let cases = [
+            (0.0, BigRational::from_integer(BigInt::from(0))),
+            (-0.0, BigRational::from_integer(BigInt::from(0))),
+            (
+                0.1,
+                BigRational::new(BigInt::from(3602879701896397_u64), BigInt::from(1) << 55),
+            ),
+            (
+                f64::from_bits(1),
+                BigRational::new(BigInt::from(1), BigInt::from(1) << 1074),
+            ),
+            (
+                f64::MIN_POSITIVE,
+                BigRational::new(BigInt::from(1), BigInt::from(1) << 1022),
+            ),
+            (
+                f64::MAX,
+                BigRational::from_integer(BigInt::from((1_u64 << 53) - 1) << 971),
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(binary_float(value), Some(expected.clone()), "{value}");
+            assert_eq!(binary_float(-value), Some(-expected), "{}", -value);
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(binary_float(value), None);
+        }
     }
 }
