@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.1.0](https://github.com/oakcask/schemurai/compare/v3.0.2...v3.1.0) (2026-10-20)
+
+
+### Features
+
+* publish precompiled native gems to RubyGems ([#243](https://github.com/oakcask/schemurai/issues/243)) ([5e2e303](https://github.com/oakcask/schemurai/commit/5e2e3039392cc9a53948ade157d9a90b462a1c95))
+
+
+### Bug Fixes
+
+* **deps:** update rust crate num-bigint to 0.5.1 ([#213](https://github.com/oakcask/schemurai/issues/213)) ([13102d3](https://github.com/oakcask/schemurai/commit/13102d3ad6d54a9d3193110bc67ff56bdc71050a))
+
 ## [3.0.2](https://github.com/oakcask/schemurai/compare/v3.0.1...v3.0.2) (2026-10-16)
 
 
