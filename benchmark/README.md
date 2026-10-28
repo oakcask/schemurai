@@ -3,6 +3,9 @@
 The benchmark suite measures Schemurai performance for regression detection and
 performance development. Each runner verifies correctness before measuring.
 
+For pinned real-world schemas, reproducible nested mutation fuzzing, size sweeps
+and shared/copy controls, see [`real_world/README.md`](real_world/README.md).
+
 The `benchmark / pull request` and `benchmark / native backends` workflows run
 only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark

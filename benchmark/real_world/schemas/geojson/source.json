@@ -1,0 +1,17 @@
+{
+  "id": "geojson",
+  "schema": {
+    "repository": "geojson/schema",
+    "branch": "gh-pages",
+    "revision": "f2bc6e8f1e8e1ba376d901914ecf8d0fed947d6e",
+    "path": "GeoJSON.json"
+  },
+  "license": {
+    "repository": "geojson/schema",
+    "branch": "main",
+    "revision": "268ba0af5f8f2c455dd0032caca10403b8bf74cc",
+    "path": "license.md",
+    "spdx": "MIT",
+    "sha256": "1cde2b2cc000fdc8edaeb8811ddf43f6a4470e0ab55abf27a8f4ed1d399ae018"
+  }
+}

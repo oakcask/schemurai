@@ -1,0 +1,31 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "tmpdir"
+require_relative "../benchmark/real_world/campaign"
+
+backends = ENV.fetch("FUZZ_BACKENDS", "ruby,vm").split(",").map(&:to_sym)
+abort "FUZZ_BACKENDS must include ruby and at least one comparison backend" unless backends.include?(:ruby) && backends.uniq.length >= 2
+checker = SchemuraiBenchmark::RealWorld::Checker.new(backends: backends)
+
+if ARGV.length == 2 && ARGV.first == "--replay"
+  record = JSON.parse(File.read(ARGV.last))
+  test_case = SchemuraiBenchmark::RealWorld::Campaign.replay(record)
+  checker.check(test_case)
+  puts "Replay passed: #{test_case.id}"
+elsif ARGV.empty?
+  seed = Integer(ENV.fetch("FUZZ_SEED", "9571"))
+  size = Integer(ENV.fetch("FUZZ_SIZE", "8"))
+  mutations = Integer(ENV.fetch("FUZZ_MUTATIONS", "100"))
+  artifact = ENV.fetch("FUZZ_ARTIFACT", File.join(Dir.tmpdir, "schemurai-real-world-failure.json"))
+  campaign = SchemuraiBenchmark::RealWorld::Campaign.new(seed: seed, size: size, mutations: mutations)
+  begin
+    count = campaign.check(checker, artifact: artifact)
+  rescue
+    warn "Failure input saved to #{artifact}"
+    raise
+  end
+  puts "Passed #{count} cases: seed=#{seed}, size=#{size}, mutation_pairs=#{mutations}, backends=#{backends.join(",")}"
+else
+  abort "Usage: ruby script/real-world-fuzz [--replay ARTIFACT]"
+end
