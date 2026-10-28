@@ -1,0 +1,79 @@
+name: test / real-world schemas
+
+on:
+  push:
+    branches: [main]
+    paths: &corpus_paths
+      - .github/workflows/test--real-world-schemas.yaml
+      - .ruby-version
+      - Gemfile
+      - Gemfile.lock
+      - rust-toolchain.toml
+      - lib/**/*
+      - ext/**/*
+      - benchmark/real_world.rb
+      - benchmark/real_world/**/*
+      - script/fetch-real-world-schemas
+      - script/real-world-fuzz
+      - test/real_world_schema_test.rb
+      - spec/spec_helper.rb
+      - renovate.json
+  pull_request:
+    paths: *corpus_paths
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 2"
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_ONLY: default lint test
+
+jobs:
+  differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          bundler-cache: true
+      - name: Fetch schemas and verify upstream licenses at pinned revisions
+        run: ruby script/fetch-real-world-schemas
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Build native backend
+        working-directory: ext/schemurai_native
+        run: |
+          ruby extconf.rb
+          make
+      - name: Check generator, replay and corpus contracts
+        run: bundle exec rspec -Iext/schemurai_native test/real_world_schema_test.rb
+        env:
+          SCHEMURAI_DIFFERENTIAL_BACKEND: native
+      - name: Compare fixed-seed mutations on all backends
+        run: ruby -Iext/schemurai_native script/real-world-fuzz
+        env:
+          FUZZ_BACKENDS: ruby,vm,native
+          FUZZ_ARTIFACT: real-world-failure.json
+      - name: Explore another reproducible seed
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          FUZZ_SEED="$GITHUB_RUN_NUMBER" FUZZ_SIZE=32 FUZZ_MUTATIONS=1000 ruby -Iext/schemurai_native script/real-world-fuzz
+        env:
+          FUZZ_BACKENDS: ruby,vm,native
+          FUZZ_ARTIFACT: real-world-failure.json
+      - name: Exercise size and representation benchmarks
+        run: ruby -Iext/schemurai_native benchmark/real_world.rb
+        env:
+          BENCHMARK_BACKENDS: ruby,vm,native
+          BENCHMARK_JSON: real-world-benchmark.jsonl
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: real-world-schemas
+          path: |
+            real-world-failure.json
+            real-world-benchmark.jsonl
+            benchmark/real_world/schemas/

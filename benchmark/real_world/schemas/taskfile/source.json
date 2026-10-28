@@ -1,0 +1,17 @@
+{
+  "id": "taskfile",
+  "schema": {
+    "repository": "go-task/task",
+    "branch": "main",
+    "revision": "ad2782e1709f0bcf8fbbe0d8e00c2d239141e099",
+    "path": "website/src/public/schema.json"
+  },
+  "license": {
+    "repository": "go-task/task",
+    "branch": "main",
+    "revision": "ad2782e1709f0bcf8fbbe0d8e00c2d239141e099",
+    "path": "LICENSE",
+    "spdx": "MIT",
+    "sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b"
+  }
+}

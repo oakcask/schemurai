@@ -26,7 +26,26 @@
       "matchUpdateTypes": ["patch", "minor"],
       "matchCurrentAge": "> 5 days",
       "automerge": true
+    },
+    {
+      "matchFileNames": ["benchmark/real_world/schemas/**/source.json"],
+      "groupName": "real-world schemas",
+      "semanticCommitType": "test",
+      "automerge": false,
+      "schedule": ["* * * * 1"]
     }
   ],
-  "rangeStrategy": "bump"
+  "rangeStrategy": "bump",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^benchmark/real_world/schemas/[^/]+/source\\.json$/"],
+      "matchStrings": [
+        "\"repository\":\\s*\"(?<depName>[^\"\\s]+)\",\\s*\"branch\":\\s*\"(?<currentValue>[^\"\\s]+)\",\\s*\"revision\":\\s*\"(?<currentDigest>[a-f0-9]{40})\""
+      ],
+      "datasourceTemplate": "git-refs",
+      "packageNameTemplate": "https://github.com/{{{depName}}}",
+      "versioningTemplate": "exact"
+    }
+  ]
 }
