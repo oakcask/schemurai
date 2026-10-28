@@ -103,4 +103,65 @@ RSpec.describe "real-world schema corpus" do
       expect(File.read(source).scan(pattern)).to eq(expected)
     end
   end
+
+  it "pairs each guaranteed destruction with independently expected errors" do
+    cases = SchemuraiBenchmark::RealWorld::Campaign.new(seed: 123, size: 8, mutations: 20).each_case.to_a
+    destructive = cases.select(&:mutation)
+    expect(destructive.length).to eq(69)
+    destructive.each do |test_case|
+      expect(test_case.expected).to be(false)
+      expect(test_case.expected_errors).not_to be_empty
+      mutation = test_case.mutation
+      value = mutation.fetch("path").reduce(test_case.instance) { |node, key| node.fetch(key) }
+      expect(value).to eq(mutation.fetch("after"))
+    end
+    expect(destructive.map { |test_case| test_case.mutation.fetch("after") }.uniq).to contain_exactly(nil, false, true)
+  end
+
+  it "rejects agreed invalid verdicts when an error field points elsewhere" do
+    test_case = corpus.cases(seed: 42, size: 1).find(&:mutation)
+    %w[instance_path schema_path keyword].each do |field|
+      checker = SchemuraiBenchmark::RealWorld::Checker.new(backends: backends)
+      checker.validators(test_case.schema).each_value do |validator|
+        original = validator.validate(test_case.instance).errors.first
+        wrong = original.with(**{field.to_sym => "/unrelated"})
+        allow(validator).to receive(:validate).and_return(Schemurai::Result.new([wrong]))
+      end
+      expect { checker.check(test_case) }.to raise_error(/unexpected errors/)
+    end
+  end
+
+  it "rejects a destruction when repairing the edited field remains invalid" do
+    test_case = corpus.cases(seed: 42, size: 1).find(&:mutation)
+    checker = SchemuraiBenchmark::RealWorld::Checker.new(backends: backends)
+    checker.validators(test_case.schema).each_value do |validator|
+      allow(validator).to receive(:valid?).and_return(false)
+    end
+    expect { checker.check(test_case) }.to raise_error(/repair did not restore validity/)
+  end
+
+  it "preserves the mutation and expected error contract in replay artifacts" do
+    checker = instance_double(SchemuraiBenchmark::RealWorld::Checker)
+    allow(checker).to receive(:check) { |test_case| raise "injected mismatch" if test_case.mutation }
+    campaign = SchemuraiBenchmark::RealWorld::Campaign.new(seed: 42, size: 1, mutations: 1)
+    Dir.mktmpdir("schemurai-real-world") do |directory|
+      artifact = File.join(directory, "failure.json")
+      expect { campaign.check(checker, artifact: artifact) }.to raise_error("injected mismatch")
+      record = JSON.parse(File.read(artifact))
+      replay = SchemuraiBenchmark::RealWorld::Campaign.replay(record)
+      expect(replay.mutation).to eq(record.fetch("mutation"))
+      expect(replay.expected_errors).to eq(record.fetch("expected_errors"))
+      expect(SchemuraiBenchmark::RealWorld::Checker.new(backends: backends).check(replay).first).to be(false)
+    end
+  end
+
+  it "escapes mutation and diagnostic pointers for generated task names" do
+    source = corpus.cases(seed: 42, size: 1).find { |test_case| test_case.id.start_with?("taskfile/") && test_case.expected }
+    instance = corpus.copy(source.instance)
+    instance.fetch("tasks")["task/~0"] = instance.fetch("tasks").delete("task_0")
+    source = source.with(instance: instance, faults: [["tasks", "task/~0", "cmds", 0]])
+    test_case = SchemuraiBenchmark::RealWorld::DestructiveMutator.new(source, seed: 42).mutate(0)
+    expect(test_case.mutation.fetch("instance_path")).to eq("/tasks/task~1~00/cmds/0")
+    expect(SchemuraiBenchmark::RealWorld::Checker.new(backends: backends).check(test_case).first).to be(false)
+  end
 end

@@ -56,6 +56,7 @@ sizes.each do |size|
         result = measure.call { validator.public_send(operation, test_case.instance) }
         output.puts JSON.generate(kind: "validation", id: test_case.id, size: size, backend: backend,
           operation: operation, expected: test_case.expected, errors: errors, native_support: support,
+          mutation: test_case.mutation, expected_errors: test_case.expected_errors,
           input_bytes: JSON.generate(test_case.instance).bytesize, **result)
       end
     end

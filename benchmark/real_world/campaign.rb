@@ -12,7 +12,8 @@ module SchemuraiBenchmark
         if record.fetch("representation", nil) == "shared"
           instance = Corpus.new.representation(instance, id.split("/").first, "shared")
         end
-        Case.new(id, record.fetch("schema"), instance, record.fetch("expected"))
+        Case.new(id, record.fetch("schema"), instance, record.fetch("expected"), [],
+          record["mutation"], record["expected_errors"])
       end
 
       def initialize(seed:, size:, mutations:)
@@ -31,7 +32,9 @@ module SchemuraiBenchmark
           next unless test_case.id.end_with?("/valid")
 
           mutator = Mutator.new(test_case.schema, seed: @seed)
+          destroyer = DestructiveMutator.new(test_case, seed: @seed)
           @mutations.times do |index|
+            yield destroyer.mutate(index)
             yield Case.new("#{test_case.id}/mutation=#{index}", test_case.schema,
               mutator.mutate(test_case.instance), nil)
           end
@@ -43,6 +46,7 @@ module SchemuraiBenchmark
         each_case do |test_case|
           record = {id: test_case.id, seed: @seed, size: @size, schema: test_case.schema,
                     instance: test_case.instance, expected: test_case.expected, status: "running",
+                    mutation: test_case.mutation, expected_errors: test_case.expected_errors,
                     representation: test_case.id.end_with?("/shared") ? "shared" : "json"}
           # Save before entering a backend: crashes and process-level timeouts
           # must leave the active input available for replay too.

@@ -25,7 +25,7 @@ elsif ARGV.empty?
     warn "Failure input saved to #{artifact}"
     raise
   end
-  puts "Passed #{count} cases: seed=#{seed}, size=#{size}, mutations=#{mutations}, backends=#{backends.join(",")}"
+  puts "Passed #{count} cases: seed=#{seed}, size=#{size}, mutation_pairs=#{mutations}, backends=#{backends.join(",")}"
 else
   abort "Usage: ruby script/real-world-fuzz [--replay ARTIFACT]"
 end

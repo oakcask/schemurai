@@ -55,10 +55,12 @@ ruby script/real-world-fuzz --replay failure.json
 ```
 
 Build the native extension before selecting `native`. The standalone runner
-defaults to `ruby,vm`, seed 9571, size 8 and 100 mutations per schema. Set
+defaults to `ruby,vm`, seed 9571, size 8 and 100 pairs of destructive/exploratory
+mutations per schema. Set
 `FUZZ_ARTIFACT` to choose the failure JSON file; its default is in the system
 temporary directory. The artifact embeds the exact schema, instance, seed,
-mutation index and expected verdict, allowing replay after upstream updates.
+mutation index, edited position, before/after values, broken type contract and
+expected public errors, allowing replay after upstream updates.
 Replay uses the backends selected by `FUZZ_BACKENDS` too. Shared-container
 controls restore their Ruby object identity when replayed. The active input is
 saved before entering a backend, including before a native crash or timeout;
@@ -70,13 +72,31 @@ break nested fields at the first, middle and final position. Equal-content
 controls use either shared Ruby containers or independent copies. Shared identity
 is a Ruby API workload; serialized JSON represents the copied form.
 
-The mutator deletes members, inserts unexpected values or replaces arbitrary
+Each guaranteed destruction chooses a nested run/uses field, task command or
+geometry coordinate from a successful input and replaces it with a randomly
+selected null or boolean. These types violate reviewed contracts for those fields.
+The generator creates the edited instance and exact expected public errors
+(instance path, schema path and keyword) together, without consulting a backend.
+The same mechanism creates the fixed first/middle/last-position controls.
+
+Every backend must reject the instance with that exact error list. Restoring the
+edited field must make the input valid again. Thus consistent rejection for an
+unrelated error is insufficient. Expected diagnostics describe the public API:
+workflow errors appear at the enclosing job's `oneOf`, Taskfile errors at the
+task's `anyOf`, and GeoJSON errors at its root `oneOf`. Leaf diagnostics are not
+exposed through these failed applicators, so the separate mutation pointer
+records the actual edit; a root GeoJSON diagnostic alone cannot identify which
+coordinate failed. These contracts are deliberately specific to the current
+builders and must be reviewed when upstream semantics or diagnostics change.
+
+The exploratory mutator deletes members, inserts unexpected values or replaces arbitrary
 nested positions. Its replacement pool includes upstream enum/const values,
 numeric boundaries and bounded length/count boundaries. This is seeded mutation
 of schema-specific successful inputs, not a general JSON Schema instance
 generator or coverage-guided fuzzer. Replacements need not match the constraint
 at the chosen path. Mutants have no assumed validity: another branch may accept
-them. Ruby/VM/native comparisons check both public methods and ordered error
+them. These exploratory cases retain backend comparisons rather than an invented
+expected error. Ruby/VM/native comparisons check both public methods and ordered error
 paths/keywords; error wording follows the existing oracle's exclusion policy.
 The independently expected controls reduce reliance on backend agreement alone.
 

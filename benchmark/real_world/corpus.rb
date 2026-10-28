@@ -2,10 +2,15 @@
 
 require "digest"
 require "json"
+require_relative "destructive_mutator"
 
 module SchemuraiBenchmark
   module RealWorld
-    Case = Data.define(:id, :schema, :instance, :expected)
+    Case = Data.define(:id, :schema, :instance, :expected, :faults, :mutation, :expected_errors) do
+      def initialize(id:, schema:, instance:, expected:, faults: [], mutation: nil, expected_errors: nil)
+        super
+      end
+    end
 
     # Immutable upstream schemas; inputs are synthetic, never harvested user data.
     class Corpus
@@ -37,11 +42,10 @@ module SchemuraiBenchmark
           name = entry.fetch("id")
           instance, failure_paths = public_send(name.tr("-", "_"), random, size)
           prefix = "#{name}/seed=#{seed}/size=#{size}"
-          valid = Case.new("#{prefix}/valid", entry.fetch("schema"), instance, true)
-          invalid = failure_paths.each_with_index.map do |path, index|
-            value = copy(instance)
-            replace(value, path, false)
-            Case.new("#{prefix}/invalid-position=#{index}", entry.fetch("schema"), value, false)
+          valid = Case.new("#{prefix}/valid", entry.fetch("schema"), instance, true, failure_paths)
+          destroyer = DestructiveMutator.new(valid, seed: seed)
+          invalid = positions(failure_paths.length).each_with_index.map do |position, index|
+            destroyer.at(position, replacement: false, id: "#{prefix}/invalid-position=#{index}")
           end
           representations = %w[shared copied].map do |mode|
             Case.new("#{prefix}/#{mode}", entry.fetch("schema"), representation(instance, name, mode), true)
@@ -60,7 +64,7 @@ module SchemuraiBenchmark
         end
         instance = {"name" => "generated", "on" => ["push", "pull_request"],
                     "jobs" => {"build" => {"runs-on" => "ubuntu-latest", "steps" => steps}}}
-        paths = positions(size).map do |index|
+        paths = size.times.map do |index|
           ["jobs", "build", "steps", index, steps.fetch(index).key?("run") ? "run" : "uses"]
         end
         [instance, paths]
@@ -71,7 +75,7 @@ module SchemuraiBenchmark
           command = random.rand(2).zero? ? "echo #{random.rand(10_000)}" : {"task" => "helper", "vars" => {"COUNT" => index}}
           ["task_#{index}", {"cmds" => [command], "desc" => "generated #{index}", "silent" => random.rand(2).zero?}]
         end
-        [{"version" => "3", "tasks" => tasks}, positions(size).map { |index| ["tasks", "task_#{index}", "cmds", 0] }]
+        [{"version" => "3", "tasks" => tasks}, size.times.map { |index| ["tasks", "task_#{index}", "cmds", 0] }]
       end
 
       def geojson(random, size)
@@ -85,7 +89,7 @@ module SchemuraiBenchmark
           {"type" => "Feature", "geometry" => geometry, "properties" => {"id" => index, "label" => "地点 #{index}"}}
         end
         [{"type" => "FeatureCollection", "features" => features},
-          positions(size).map { |index| ["features", index, "geometry", "coordinates", 0] }]
+          size.times.map { |index| ["features", index, "geometry", "coordinates", 0] }]
       end
 
       def copy(value)
