@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require_relative "../benchmark/comparison"
+require_relative "../benchmark/support/comparison"
 
 SchemuraiBenchmark::Comparison.new(
   baseline_lib: ENV.fetch("BASELINE_LIB"),

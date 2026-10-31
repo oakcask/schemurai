@@ -35,7 +35,7 @@ jobs:
           ruby extconf.rb
           make
       - name: Compare VM and native with YJIT
-        run: bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
+        run: bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
         env:
           BENCHMARK_JSON: native-benchmark.json
       - name: Publish benchmark summary
@@ -53,11 +53,13 @@ jobs:
           make
       - name: Compare pattern kernels on the same runner
         run: |
-          cp benchmark/native.rb .benchmark-base/benchmark/native.rb
-          BENCHMARK_JSON=pattern-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
-          BENCHMARK_JSON=pattern-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=pattern-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=pattern-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          mkdir -p .benchmark-base/benchmark/native/runtime .benchmark-base/benchmark/support
+          cp benchmark/support/measurement.rb .benchmark-base/benchmark/support/measurement.rb
+          cp benchmark/native/runtime/comparison.rb .benchmark-base/benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=pattern-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=pattern-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=pattern-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=pattern-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
         env:
           BENCHMARK_GROUP: pattern
           BENCHMARK_ITERATIONS: "15"
@@ -66,10 +68,10 @@ jobs:
         run: ruby script/native-benchmark-comparison pattern
       - name: Compare integer kernels on the same runner
         run: |
-          BENCHMARK_JSON=integer-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
-          BENCHMARK_JSON=integer-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=integer-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=integer-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=integer-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=integer-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=integer-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=integer-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
         env:
           BENCHMARK_WORKLOAD: integer array
           BENCHMARK_ITERATIONS: "31"
@@ -78,10 +80,10 @@ jobs:
         run: ruby script/native-benchmark-comparison integer
       - name: Compare content kernels on the same runner
         run: |
-          BENCHMARK_JSON=content-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
-          BENCHMARK_JSON=content-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=content-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=content-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=content-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=content-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=content-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=content-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
         env:
           BENCHMARK_GROUP: content
           BENCHMARK_WIDTH: "100"
@@ -91,10 +93,10 @@ jobs:
         run: ruby script/native-benchmark-comparison content
       - name: Compare format kernels on the same runner
         run: |
-          BENCHMARK_JSON=format-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
-          BENCHMARK_JSON=format-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=format-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native.rb
-          BENCHMARK_JSON=format-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native.rb
+          BENCHMARK_JSON=format-base-1.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=format-head-1.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=format-head-2.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native/runtime/comparison.rb
+          BENCHMARK_JSON=format-base-2.json bundle exec ruby --yjit -I.benchmark-base/ext/schemurai_native .benchmark-base/benchmark/native/runtime/comparison.rb
         env:
           BENCHMARK_GROUP: format
           BENCHMARK_ITERATIONS: "15"

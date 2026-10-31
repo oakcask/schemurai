@@ -226,7 +226,7 @@ candidates without nested iteration keep their direct scans, avoiding cache
 admissions for ordinary scalar/record arrays. The existing cycle, unsupported
 and dynamic-binding checks still apply. Two temporary bit vectors track loop
 roots and reachable iteration during the same O(N + E + A + K) graph analysis.
-`benchmark/native_repeated_positions.rb` measures single-reference chains over
+`benchmark/native/runtime/repeated_positions.rb` measures single-reference chains over
 shared input containers and distinct record controls.
 Verdicts retain at most 4,096 entries;
 tracked validity and diagnostic successes share up to 8,192 entries and a
@@ -279,18 +279,18 @@ constant number of O(N + E + A + K + R) graph analyses, including R recursive
 resources, and retains five additional node bit vectors. Linear recursion
 without repeated positions or branching keeps direct evaluation. These choices
 reduce shared recursive workloads substantially but add some overhead to
-ordinary recursive trees; `benchmark/native_cyclic_memo.rb` measures both.
+ordinary recursive trees; `benchmark/native/runtime/cyclic_memo.rb` measures both.
 
 These limits bound extra retained memory rather than guaranteeing
 linear evaluation for arbitrary schemas. Failed diagnostics still visit each
 path: if the contract requires 2^D distinct errors, producing them takes at
 least O(2^D) work. See the reproducible workloads in
-`benchmark/native_algorithms.rb`.
-`benchmark/native_memo_turnover.rb` exercises arrays that exceed the entry
+`benchmark/native/runtime/algorithms.rb`.
+`benchmark/native/runtime/memo_turnover.rb` exercises arrays that exceed the entry
 budget and confirms direct native coverage after the limits are crossed.
-`benchmark/native_dynamic_memo.rb` exercises the previously exponential
+`benchmark/native/runtime/dynamic_memo.rb` exercises the previously exponential
 shared-reference chain ending in an invariant dynamic reference.
-`benchmark/native_contextual_memo.rb` covers changing single and multiple
+`benchmark/native/runtime/contextual_memo.rb` covers changing single and multiple
 bindings, including annotation collection, with exact VM parity.
 
 Dynamic binding discovery stores only actual `(resource, name) -> target`
@@ -315,7 +315,7 @@ indexed. Temporary storage is O(R + B + K + A), while retained binding tables
 store O(K + A). Many unused declarations can cost more in the multi-name case;
 the single-name path keeps direct lookups. Single-name scope metadata uses the
 compiled index in O(N) expected work for N nodes, replacing an O(NA) scan.
-See `benchmark/native_scope_compile.rb` for cached-VM constructor timing and
+See `benchmark/native/compile/scope.rb` for cached-VM constructor timing and
 sparse scaling; the Cartesian O(RK) absent-lookup work is eliminated from the
 multi-name discovery path.
 
@@ -718,7 +718,7 @@ it does not guarantee polynomial traversal for arbitrary graphs whose reusable
 working set exceeds the limit. When the working set fits, the repeated binary
 container chain takes O(D) work after a constant four-level prefix instead of
 O(2^D). Large branching factors still require scanning their actual edges.
-Ordinary deep trees pay table bookkeeping. `benchmark/native_shared_containers.rb`
+Ordinary deep trees pay table bookkeeping. `benchmark/native/runtime/shared_containers.rb`
 covers shared array/hash graphs and an ordinary shallow-tree control.
 Known schema key fingerprints are cached once during compilation. Array/object
 rule payloads live separately from scalar opcodes to keep instruction storage
@@ -1182,7 +1182,7 @@ compilation, and a Numeric subclass with only a decimal string representation
 raises during bound comparison. Those tests describe Ruby-backend behavior;
 native retains the VM behavior. The suite also has 1,287 pending cases, so
 this result does not claim support for the entire official optional catalog.
-See `benchmark/native.rb` for performance and allocation measurements that
+See `benchmark/native/runtime/comparison.rb` for performance and allocation measurements that
 include valid and invalid instances and delegated operations.
 
 Public-behavior regressions found during native development are shared through

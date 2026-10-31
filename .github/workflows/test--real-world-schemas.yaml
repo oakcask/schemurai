@@ -11,7 +11,7 @@ on:
       - rust-toolchain.toml
       - lib/**/*
       - ext/**/*
-      - benchmark/real_world.rb
+      - benchmark/real_world/run.rb
       - benchmark/real_world/**/*
       - script/fetch-real-world-schemas
       - script/real-world-fuzz
@@ -65,7 +65,7 @@ jobs:
           FUZZ_BACKENDS: ruby,vm,native
           FUZZ_ARTIFACT: real-world-failure.json
       - name: Exercise size and representation benchmarks
-        run: ruby -Iext/schemurai_native benchmark/real_world.rb
+        run: ruby -Iext/schemurai_native benchmark/real_world/run.rb
         env:
           BENCHMARK_BACKENDS: ruby,vm,native
           BENCHMARK_JSON: real-world-benchmark.jsonl

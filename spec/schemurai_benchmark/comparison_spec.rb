@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative "../../benchmark/comparison"
+require_relative "../../benchmark/support/comparison"
 
 RSpec.describe SchemuraiBenchmark::Comparison do
   subject(:comparison) do

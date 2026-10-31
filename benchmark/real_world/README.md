@@ -110,8 +110,8 @@ Minimizing findings and promoting them to fixed regressions remains manual.
 ## Performance
 
 ```sh
-BENCHMARK_BACKENDS=ruby,vm,native BENCHMARK_JSON=real-world.jsonl ruby -Iext/schemurai_native benchmark/real_world.rb
-BENCHMARK_SIZES=8,16,32,64 BENCHMARK_ITERATIONS=15 BENCHMARK_BATCH=10 ruby benchmark/real_world.rb
+BENCHMARK_BACKENDS=ruby,vm,native BENCHMARK_JSON=real-world.jsonl ruby -Iext/schemurai_native benchmark/real_world/run.rb
+BENCHMARK_SIZES=8,16,32,64 BENCHMARK_ITERATIONS=15 BENCHMARK_BATCH=10 ruby benchmark/real_world/run.rb
 ```
 
 The runner checks expected verdicts and backend diagnostic parity first. It
