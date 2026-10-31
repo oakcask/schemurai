@@ -1,13 +1,70 @@
 //! Content validation borrows Ruby string storage. Base64 decoding uses bounded
-//! stack scratch; native JSON scanning never constructs a tree. Other source
+//! scratch; native JSON scanning never constructs a tree. Other source
 //! encodings request Ruby parsing after Rust evaluation returns.
 use super::*;
 use std::mem::MaybeUninit;
 
-const STACK_BYTES: usize = 384;
+const STACK_BYTES: usize = 256;
 // Full refills must end on a three-byte Base64 group boundary.
-const STREAM_BYTES: usize = 1536;
+const STREAM_BYTES: usize = 8190;
 const DIRECT_BYTES: usize = 8192;
+
+// Runner-local derived content storage. The decoder overwrites the requested
+// prefix before parsing; previous decoded bytes are never used as input.
+#[derive(Default)]
+pub(super) struct Scratch(std::cell::RefCell<Vec<u8>>);
+impl Scratch {
+    fn decode(&self, bytes: &[u8], length: usize) -> Verdict {
+        let mut scratch = self.0.borrow_mut();
+        if scratch.is_empty() {
+            scratch.resize(DIRECT_BYTES + 2, 0);
+        }
+        if length <= DIRECT_BYTES {
+            decode_json_turbo(bytes, length, &mut scratch)
+        } else {
+            let mut input = BufferedBase64 {
+                bytes,
+                decoded: &mut scratch,
+                at: 0,
+                len: 0,
+                remaining: length,
+                valid: true,
+            };
+            input.fill();
+            json(input)
+        }
+    }
+    pub(super) fn memory_usage(&self) -> usize {
+        self.0.try_borrow().map_or(0, |scratch| scratch.capacity())
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    #[test]
+    fn reused_decoding_ignores_old_bytes_and_reports_bounded_memory() {
+        let caches = runtime::Caches::default();
+        let before = unsafe { runtime::sn_caches_size(&caches) };
+        assert_eq!(caches.content.memory_usage(), 0);
+        for length in [8192, 385, 32768, 4096, 386, 8191, 387] {
+            let json = format!("\"{}\"", "x".repeat(length - 2));
+            let encoded = base64_simd::STANDARD.encode_to_string(&json);
+            assert_eq!(caches.content.decode(encoded.as_bytes(), length), Valid);
+            let mut malformed = encoded.into_bytes();
+            malformed[0] = b'!';
+            assert_eq!(caches.content.decode(&malformed, length), Invalid);
+            let bad_json = base64_simd::STANDARD.encode_to_string("x".repeat(length));
+            assert_eq!(caches.content.decode(bad_json.as_bytes(), length), Invalid);
+            assert_eq!(caches.content.memory_usage(), DIRECT_BYTES + 2);
+        }
+        assert_eq!(
+            unsafe { runtime::sn_caches_size(&caches) } - before,
+            DIRECT_BYTES + 2
+        );
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct Content {
@@ -156,10 +213,7 @@ impl Content {
             if length <= STACK_BYTES {
                 return decode_json_medium(bytes, length);
             }
-            if length <= DIRECT_BYTES {
-                return decode_json_direct(bytes, length);
-            }
-            decode_json_stream(bytes, length)
+            caches.content.decode(bytes, length)
         } else {
             if JSON {
                 let encoding = match (BORROWED, encoding) {
@@ -187,13 +241,6 @@ fn decode_json_medium(bytes: &[u8], length: usize) -> Verdict {
     decode_json_turbo(bytes, length, &mut scratch)
 }
 
-// Keep the 8 KiB scratch frame out of shorter decoded-content paths.
-#[inline(never)]
-fn decode_json_direct(bytes: &[u8], length: usize) -> Verdict {
-    let mut scratch = [0; DIRECT_BYTES + 2];
-    decode_json_turbo(bytes, length, &mut scratch)
-}
-
 #[cfg(target_arch = "aarch64")]
 fn decode_json_turbo(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict {
     let capacity = base64_turbo::STANDARD.decoded_len_estimate(bytes.len());
@@ -216,22 +263,7 @@ fn decode_json_turbo(bytes: &[u8], length: usize, scratch: &mut [u8]) -> Verdict
     }
 }
 
-// Isolate the streaming frame from both direct-decoding paths.
-#[inline(never)]
-fn decode_json_stream(bytes: &[u8], length: usize) -> Verdict {
-    let mut input = BufferedBase64 {
-        bytes,
-        decoded: [0; STREAM_BYTES + 2],
-        at: 0,
-        len: 0,
-        remaining: length,
-        valid: true,
-    };
-    input.fill();
-    json(input)
-}
-
-// Decode borrowed bytes into the caller's fixed stack scratch. The STANDARD
+// Decode borrowed bytes into the caller's bounded scratch. The STANDARD
 // variant also checks each chunk's alphabet, padding and unused trailing bits.
 #[cfg(target_arch = "aarch64")]
 fn decode_groups(bytes: &[u8], output: &mut [u8], expected: usize) -> bool {
@@ -398,7 +430,7 @@ unsafe fn string_run_avx2(bytes: &[u8]) -> (usize, bool) {
 }
 struct BufferedBase64<'a> {
     bytes: &'a [u8],
-    decoded: [u8; STREAM_BYTES + 2],
+    decoded: &'a mut [u8],
     at: usize,
     len: usize,
     remaining: usize,

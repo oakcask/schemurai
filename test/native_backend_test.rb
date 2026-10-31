@@ -5286,7 +5286,7 @@ RSpec.describe "native VALUE execution" do
     schema = {"contentEncoding" => "base64", "contentMediaType" => "application/json"}
     vm = Schemurai.compile(schema, content: true, backend: :vm)
     native = Schemurai.compile(schema, content: true, backend: :native)
-    inputs = (94..99).chain(126..131).chain(382..387).chain(8190..8195).flat_map do |length|
+    inputs = (94..99).chain(126..131).chain(254..259).chain(382..387).chain(8190..8195).flat_map do |length|
       json = '"' + "x" * (length - 2) + '"'
       encoded = Base64.strict_encode64(json)
       malformed = Base64.strict_encode64(json[0...-1] + "]")
@@ -5326,9 +5326,9 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "rejects invalid Base64 bytes across SIMD and refill boundaries" do # rubocop:disable RSpec/ExampleLength
-    encoded = Base64.strict_encode64('"' + "x" * 8193 + '"').b
+    encoded = Base64.strict_encode64('"' + "x" * 16383 + '"').b
     offsets = [0, 1, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 512, 513, 514, 1023, 1024, 1025, 1026,
-      2047, 2048, 2049, encoded.bytesize - 2, encoded.bytesize - 1]
+      2047, 2048, 2049, 10919, 10920, 10921, 21839, 21840, 21841, encoded.bytesize - 2, encoded.bytesize - 1]
     inputs = offsets.flat_map do |at|
       256.times.map do |byte|
         value = encoded.dup
@@ -5336,7 +5336,7 @@ RSpec.describe "native VALUE execution" do
         value
       end
     end
-    inputs.concat([128, 256, 512, 1024, 2048].flat_map do |boundary|
+    inputs.concat([128, 256, 512, 1024, 2048, 10920, 21840].flat_map do |boundary|
       ["TQ==", "TWE="].map { |tail| encoded[0...boundary - 4] + tail + encoded[boundary..] }
     end)
     schemas = [{"contentEncoding" => "base64"}, {"contentEncoding" => "base64", "contentMediaType" => "application/json"}]
@@ -5360,7 +5360,7 @@ RSpec.describe "native VALUE execution" do
         value
       end
     end
-    values.concat([90, 186, 378, 762, 9210].flat_map do |prefix|
+    values.concat([90, 186, 378, 762, 8186, 9210, 16376].flat_map do |prefix|
       8.times.flat_map do |alignment|
         ['\\"', "\\\\", '\\n', '\\u1234', '\\uD800\\uDFFF', '\\uD800\\u0041', '\\q'].map do |escape|
           '"' + "x" * (prefix + alignment) + escape + "x" * 16 + '"'
@@ -5499,16 +5499,22 @@ RSpec.describe "native VALUE execution" do
     schema = {"type" => "array", "items" => {"contentEncoding" => "base64", "contentMediaType" => "application/json"}}
     registry = Schemurai::SchemaRegistry.new(schemas: {"urn:content" => schema}, backend: :native)
     registry.make_shareable
-    workers = Array.new(2) do
-      Ractor.new(registry) do |shared|
+    workers = Array.new(2) do |index|
+      Ractor.new(registry, index) do |shared, worker|
         asserted = shared.validator_for("urn:content", content: true)
         annotation = shared.validator_for("urn:content")
-        [asserted.valid?(["e30=", "W10="]), asserted.valid?(["ezp9"]), annotation.valid?(["ezp9"]), asserted.valid?(["bnVsbA=="])]
+        length = worker.zero? ? 4096 : 16384
+        valid = Base64.strict_encode64('"' + "x" * length + '"')
+        invalid = Base64.strict_encode64('"' + "y" * length + "]")
+        50.times { raise "content scratch isolation" unless asserted.valid?([valid]) && !asserted.valid?([invalid]) }
+        GC.start
+        [asserted.valid?(["e30=", "W10="]), asserted.valid?(["ezp9"]), annotation.valid?(["ezp9"]), asserted.valid?(["bnVsbA=="]),
+          asserted.validate([invalid]).errors.map(&:keyword), asserted.valid?([valid])]
       end
     end
     workers.each do |worker|
       result = worker.respond_to?(:value) ? worker.value : worker.take
-      expect(result).to eq([true, false, true, true])
+      expect(result).to eq([true, false, true, true, ["contentEncoding"], true])
     end
   end
 

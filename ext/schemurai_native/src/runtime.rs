@@ -37,6 +37,7 @@ pub struct Caches {
     reports: reports::Reports,
     properties: properties::Properties,
     report_continuations_allowed: std::cell::Cell<bool>,
+    pub(super) content: content::Scratch,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -692,6 +693,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         + messages
         + unsafe { &*caches_ptr }.reports.memory_usage()
         + unsafe { &*caches_ptr }.properties.memory_usage()
+        + unsafe { &*caches_ptr }.content.memory_usage()
         + pointers
         + caches.capacity() * std::mem::size_of::<Option<Box<Cache>>>()
         + caches

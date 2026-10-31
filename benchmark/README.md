@@ -11,6 +11,70 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Native decoded-content scratch
+
+`native_content_scratch.rb` verifies complete VM error parity and direct native
+coverage before measuring arrays of Base64-encoded JSON. Decoded byte lengths
+span the stack, reusable-buffer and streaming boundaries. Compilation and GC
+are outside timing. The JSON report includes all samples and runner memory.
+
+```sh
+BENCHMARK_JSON=content-scratch.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native_content_scratch.rb
+BENCHMARK_SHAPE=numbers BENCHMARK_WIDTH=100 ruby --yjit -Iext/schemurai_native benchmark/native_content_scratch.rb
+BENCHMARK_SHAPE=unicode BENCHMARK_WIDTH=100 ruby --yjit -Iext/schemurai_native benchmark/native_content_scratch.rb
+BENCHMARK_COLD=1 BENCHMARK_WIDTH=1 ruby --yjit -Iext/schemurai_native benchmark/native_content_scratch.rb
+```
+
+`BENCHMARK_LENGTHS` accepts comma-separated decoded byte lengths. Cold mode
+creates fresh runners outside timing and measures their first raw `valid?` or
+`diagnostics` call; the `validate` result label then denotes raw diagnostics.
+Normal mode measures public `valid?` and `validate` on a reused validator.
+`BENCHMARK_CLOCK=cpu` selects thread CPU time instead of elapsed time. This
+single-threaded workload performs its Rust work on the calling Ruby thread.
+
+A `cycles:u` profile of 1,000 strings containing about 4 KiB of decoded JSON
+at `6084279` attributed about 39% of samples to clearing the 8 KiB stack scratch.
+Long inputs now reuse one lazily allocated 8,194-byte buffer per runner.
+Inputs of at most 256 decoded bytes retain stack scratch. Streaming refills
+use 8,190-byte decoded groups, preserving Base64 group boundaries without
+allocating a complete decoded document. The runner reports retained capacity
+to Ruby's native memory-size hook and releases it with the runner.
+
+Repeated release comparisons on Ruby 4.0.9/YJIT, Rust 1.99.0, Linux x86_64,
+Ryzen 9 7900X established gains on long ASCII JSON strings. For example, the
+following medians use thread CPU time, 1,000 strings, 15 samples and batches of
+30, with the process pinned to CPU 2. Values are microseconds per validation:
+
+| Decoded bytes / operation | Before | After |
+| --- | ---: | ---: |
+| 385 / valid? | 111.855 | 37.923 |
+| 385 / validate | 114.181 | 45.384 |
+| 4,096 / valid? | 233.166 | 185.680 |
+| 4,096 / validate | 220.687 | 196.931 |
+| 16,384 / valid? | 888.844 | 653.949 |
+| 16,384 / validate | 973.541 | 670.407 |
+
+Elapsed-time comparisons also reproduced gains on these workloads. Later host
+load caused substantial variation, including in unchanged short controls;
+these measurements do not establish an aggregate backend speedup or a precise
+small-input regression bound. A fixed-count numeric-array control took about
+9.18 billion cycles before and 9.19 billion afterward. Unicode controls retained
+exact VM parity; their timings were also noisy. Reproduce representative shapes
+on an otherwise idle target machine before attributing small differences.
+
+The first longer input pays a heap allocation, and a runner retains its scratch
+until collection. Cold-call latency depends on allocator state and is not
+claimed to improve. The buffer holds derived bytes only, and the parser sees
+only the prefix written by a successful decode. Rust tests alternate sizes and
+failed decodes and check the memory bound and reporting. Ruby tests cover the
+256-byte boundary, invalid bytes and padding across refills, escape boundaries,
+and independent direct/streamed buffers in Ractors.
+
+Duplication review found no clone involving the changed Rust or benchmark code.
+Ruby's Base64/JSON library checks and the native syntax scanner intentionally
+remain independent implementations, with VM comparisons guarding their shared
+validity, error-keyword and padding rules.
+
 ## Native diagnostic pointer names
 
 `native_pointer_names.rb` compares exact VM errors before timing public native
