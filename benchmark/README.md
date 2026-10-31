@@ -150,6 +150,53 @@ the generated name mappings across rule types. Duplication review retained
 existing count-bound rules, scope-test setup and independent Ruby/VM semantics;
 the accessor name mapping itself is defined once in the shared protocol.
 
+## Native callback setup
+
+`native_callback_setup.rb` checks direct native coverage and complete VM errors
+before timing validity and diagnostics on Hash/String subclasses. The `types`
+and `boolean` modes use direct callback dispatch; `record` adds numeric/string
+rules that enter the native evaluator. `plain` uses ordinary Hash records as a
+control. Each of 21 samples collects garbage outside timing and measures 20
+direct calls using thread CPU time. Optional JSON retains samples and root-runner
+memory before and after evaluation.
+
+```sh
+BENCHMARK_JSON=callback-setup.json ruby -Iext/schemurai_native benchmark/native_callback_setup.rb
+BENCHMARK_MODES=types,boolean BENCHMARK_WIDTH=128 ruby -Iext/schemurai_native benchmark/native_callback_setup.rb
+```
+
+Runner objects now acquire Rust caches and the two observation tables only when
+they execute or become an invocation scope. Factories and direct Boolean/type
+callbacks retain their own Ruby identities without allocating unused observation
+state. Initialization remains before native execution and deadline inheritance;
+marking, freeing and memory accounting already support absent state. No runner
+is recycled or shared between retained blocks.
+
+Local Ruby 4.0.9/Rust 1.99.0 release-build medians against `ab459e3`, without
+YJIT on Ryzen 9 7900X, for arrays of 128 values (microseconds):
+
+| Mode | Validity before | Validity after | Diagnostics before | Diagnostics after |
+| --- | ---: | ---: | ---: | ---: |
+| Record subclass | 1,335.8 | 1,090.3 | 4,561.1 | 4,698.2 |
+| Types subclass | 837.2 | 528.2 | 3,171.1 | 3,017.1 |
+| Boolean subclass | 487.5 | 325.0 | 1,242.4 | 1,228.8 |
+| String subclass | 231.7 | 227.7 | 936.8 | 937.6 |
+| Ordinary record | 3.68 | 3.69 | 39.56 | 42.44 |
+
+A separate fixed-count record-subclass validity run used 100 warmups and 3,000
+calls, with three processes per extension. Cycles fell from 22.334 to 19.674
+billion (11.9%). Reversing extension order measured 22.612 to 20.186 billion
+(10.7%). An ordinary-record diagnostics control with 20,000 calls measured
+4.542 to 4.670 billion cycles (2.8% slower) with nearly unchanged instructions.
+The change targets callback setup, not a general diagnostics speedup; host
+variation and small regressions remain visible in the controls.
+
+An unused root runner reported 344 bytes rather than 4,784; both reported 4,784
+after evaluation. Existing differential cases cover retained blocks, GC
+compaction, exceptions, reentry and shared deadlines. Duplication review found
+no clones involving the new benchmark; initialization stays in one C helper,
+and Ruby/VM callback semantics remain an independent differential oracle.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native
