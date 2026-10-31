@@ -344,12 +344,17 @@ static VALUE build_runner(VALUE self, size_t index) {
     r->caches = NULL;
     r->matches = NULL;
     r->frame_indices = NULL;
-    r->frame_indices = st_init_numtable();
-    r->matches = st_init_numtable();
-    r->caches = sn_caches_new();
-    sn_caches_runtime(r->caches, r->matches);
     RB_GC_GUARD(self);
     return object;
+}
+/* Child factories and direct Boolean/type callbacks do not evaluate. Keep
+ * their observation state absent until an execution or invocation scope needs it. */
+static void prepare_runner(runner_holder *r) {
+    if (r->caches) return;
+    if (!r->frame_indices) r->frame_indices = st_init_numtable();
+    if (!r->matches) r->matches = st_init_numtable();
+    r->caches = sn_caches_new();
+    sn_caches_runtime(r->caches, r->matches);
 }
 typedef struct { uint32_t kind; size_t attempted; } native_outcome;
 extern int sn_valid_with_limits(const void *, const void *, size_t, VALUE, size_t, const native_limits *, native_outcome *);
@@ -909,6 +914,7 @@ static VALUE callback_scope(evaluation_call *call) {
         scope->active_budget = call->budget;
         scope->active_limits = call->limits;
         copy_states(scope, runner, 1, 0);
+        prepare_runner(scope);
         sn_caches_child(scope->caches, runner->caches, !NIL_P(call->budget), 1);
         runner->callback_scope = object;
     }
@@ -1960,6 +1966,7 @@ static VALUE finish_evaluation(VALUE context) {
 static VALUE evaluate_runner(VALUE self, VALUE instance, VALUE budget, int diagnostics) {
     runner_holder *runner;
     TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
+    prepare_runner(runner);
     if (runner->busy) {
         VALUE nested = build_runner(runner->owner, runner->root);
         runner_holder *child;
