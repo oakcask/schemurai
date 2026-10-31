@@ -38,16 +38,21 @@ impl Path {
                 simdutf8::compat::from_utf8(bytes).ok()
             }
         {
-            // ASCII escape bytes are UTF-8 boundaries. Copy the unchanged
-            // prefix together; retain the scalar loop for densely escaped names.
-            let end = memchr::memchr2(b'~', b'/', bytes).unwrap_or(bytes.len());
-            self.text.push_str(&name[..end]);
-            for character in name[end..].chars() {
-                match character {
-                    '~' => self.text.push_str("~0"),
-                    '/' => self.text.push_str("~1"),
-                    _ => self.text.push(character),
+            // ASCII escape bytes are UTF-8 boundaries. Copy unchanged ends
+            // together; retain the scalar loop for densely escaped names.
+            if let Some(first) = memchr::memchr2(b'~', b'/', bytes) {
+                let end = memchr::memrchr2(b'~', b'/', bytes).unwrap() + 1;
+                self.text.push_str(&name[..first]);
+                for character in name[first..end].chars() {
+                    match character {
+                        '~' => self.text.push_str("~0"),
+                        '/' => self.text.push_str("~1"),
+                        _ => self.text.push(character),
+                    }
                 }
+                self.text.push_str(&name[end..]);
+            } else {
+                self.text.push_str(name);
             }
         } else {
             self.names.push((self.text.len(), value));

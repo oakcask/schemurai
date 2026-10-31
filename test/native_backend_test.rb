@@ -5039,7 +5039,7 @@ RSpec.describe "native VALUE execution" do
   end
 
   it "copies long UTF-8 pointer spans across escape boundaries without VM execution" do # rubocop:disable RSpec/ExampleLength
-    keys = ["", "~/~", "日" * 1024, "a" * 16384]
+    keys = ["", "~/~", "日" * 1024, "a" * 16384, "~/" + "日" * 1024, "日" * 1024 + "~/"]
     [15, 16, 31, 32, 63, 64].each do |offset|
       keys << "a" * offset + "~/日/~" + "b" * 65
     end

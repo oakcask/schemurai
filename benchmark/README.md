@@ -14,8 +14,8 @@ the updated PR. Other labels do not run benchmarks.
 ## Native diagnostic pointer names
 
 `native_pointer_names.rb` compares exact VM errors before timing public native
-`validate` on 16 failing objects. It varies ASCII, Unicode and densely escaped
-property names; compilation is excluded. Run the same Ruby and release extension
+`validate` on 16 failing objects. It varies ASCII, Unicode, densely escaped
+property names and escapes at either end; compilation is excluded. Run the same Ruby and release extension
 build settings for base and candidate, without concurrent CPU-heavy work:
 
 ```sh
@@ -27,19 +27,21 @@ per public validation were:
 
 | Name / repetitions | Before | After |
 | --- | ---: | ---: |
-| ASCII / 64 | 17.017 | 15.467 |
-| Unicode / 64 | 19.431 | 15.768 |
-| ASCII / 1,024 | 34.843 | 18.549 |
-| Unicode / 1,024 | 81.261 | 29.188 |
-| ASCII / 16,384 | 287.108 | 70.347 |
-| Unicode / 16,384 | 1,004.229 | 249.491 |
-| Escaped / 16,384 | 731.111 | 766.105 |
+| ASCII / 64 | 16.577 | 15.542 |
+| Unicode / 64 | 21.581 | 16.041 |
+| ASCII / 1,024 | 38.502 | 19.876 |
+| Unicode / 1,024 | 82.324 | 29.750 |
+| ASCII / 16,384 | 274.070 | 71.996 |
+| Unicode / 16,384 | 995.841 | 222.109 |
+| Escaped / 16,384 | 771.841 | 694.633 |
+| Leading escape + Unicode / 16,384 | 991.113 | 214.197 |
 
-The native pointer builder copies the prefix before the first escape as one
-span and uses SIMD UTF-8 validation for names of at least 64 bytes. The scalar
+The native pointer builder copies the prefix before the first escape and suffix
+after the last escape as spans and uses SIMD UTF-8 validation for names of at least 64 bytes. The scalar
 escape loop retains inexpensive processing of densely escaped names. Short
-8-unit names measured 15.5–15.9 µs versus 15.9–16.1 µs; these small differences
-do not establish an improvement. The escaped control varied by about 5%.
+8-unit names measured 15.4–15.7 µs versus 15.6–16.0 µs; these small differences
+do not establish an improvement. The escaped control varied across repeated runs,
+so no gain is attributed to this change for densely escaped names.
 These results establish gains for long diagnostic names, not an aggregate
 backend speedup. Non-UTF-8 and malformed strings still use Ruby pointer semantics.
 

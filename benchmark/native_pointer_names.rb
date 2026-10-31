@@ -9,8 +9,8 @@ iterations = Integer(ENV.fetch("BENCHMARK_ITERATIONS", "15"))
 abort "benchmark settings must be positive" unless batch.positive? && iterations.positive?
 results = {}
 [8, 64, 1024, 16384].each do |length|
-  {"ascii" => "a", "unicode" => "日", "escaped" => "a~/"}.each do |kind, unit|
-    key = unit * length
+  {"ascii" => "a" * length, "unicode" => "日" * length, "escaped" => "a~/" * length,
+   "leading escape" => "~/" + "日" * length, "trailing escape" => "日" * length + "~/"}.each do |kind, key|
     schema = {"items" => {"additionalProperties" => false}}
     value = Array.new(16) { {key => 1} }
     native = Schemurai.compile(schema, backend: :native)
