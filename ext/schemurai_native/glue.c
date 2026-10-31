@@ -1831,7 +1831,8 @@ static VALUE evaluate_runner_body(VALUE context) {
         h->report = NULL;
         call.report = h;
     }
-    clear_runtime((VALUE)&call);
+    /* New runners are empty; finish_evaluation clears every completed or
+     * interrupted execution before it makes the runner available again. */
     r->active_budget = budget;
     r->report_sink_done = 0;
     if (!NIL_P(r->report_seed)) {
