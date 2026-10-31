@@ -1680,8 +1680,8 @@ pub unsafe extern "C" fn sn_diagnose(
 ) -> *mut Report {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let engine = unsafe { &*engine };
-        let local = runtime::Caches::default();
-        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let mut local = None;
+        let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let execution = Execution {
             engine,
             caches,
@@ -1718,8 +1718,8 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
     outcome: *mut budget::Outcome,
 ) -> *mut Report {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let local = runtime::Caches::default();
-        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let mut local = None;
+        let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let limits = unsafe { *limits };
         let execution = Execution {
             engine: unsafe { &*engine },

@@ -3588,8 +3588,8 @@ pub unsafe extern "C" fn sn_valid(
 ) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &*engine };
-        let local = runtime::Caches::default();
-        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let mut local = None;
+        let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         caches.admit(e, root);
         let execution = Execution {
             engine: e,
@@ -3616,8 +3616,8 @@ pub unsafe extern "C" fn sn_valid_with_limits(
     outcome: *mut budget::Outcome,
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let local = runtime::Caches::default();
-        let caches = unsafe { caches.as_ref() }.unwrap_or(&local);
+        let mut local = None;
+        let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let e = unsafe { &*engine };
         caches.admit(e, root);
         let execution = Execution {

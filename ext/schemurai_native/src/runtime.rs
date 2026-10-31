@@ -96,6 +96,15 @@ unsafe extern "C" {
     ) -> i32;
 }
 impl Caches {
+    // FFI callers normally provide runner-owned state. Only null-cache calls
+    // need a temporary owner, whose lifetime stays in the adapter's scope.
+    pub(super) fn supplied_or_default<'a>(
+        supplied: Option<&'a Self>,
+        fallback: &'a mut Option<Self>,
+    ) -> &'a Self {
+        supplied.unwrap_or_else(|| fallback.get_or_insert_with(Self::default))
+    }
+
     fn reset_pass(&self) {
         self.scopes.reset();
         self.reports.reset();
@@ -980,6 +989,22 @@ pub unsafe extern "C" fn sn_scalar_arguments(caches: *const Caches, output: *mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ffi_fallback_is_created_only_without_supplied_state() {
+        let supplied = Caches::default();
+        supplied.dynamic_calls.set(true);
+        let mut fallback = None;
+        let selected = Caches::supplied_or_default(Some(&supplied), &mut fallback);
+        assert!(std::ptr::eq(selected, &supplied));
+        assert!(selected.dynamic_calls());
+        assert!(fallback.is_none());
+
+        let selected = Caches::supplied_or_default(None, &mut fallback);
+        assert!(!selected.dynamic_calls());
+        selected.dynamic_calls.set(true);
+        assert!(fallback.as_ref().unwrap().dynamic_calls());
+    }
+
     #[test]
     fn child_modes_inherit_deadlines_without_adding_normal_scalar_checkpoints() {
         let parent = Caches::default();

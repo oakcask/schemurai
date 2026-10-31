@@ -250,6 +250,38 @@ retained blocks and bounded invocation scopes. Duplication review found no new
 benchmark/production-rule clones; exit cleanup remains centralized in C and
 Ruby/VM callback semantics remain independent.
 
+### Temporary caches at FFI entry
+
+The validity/diagnostics adapters, with and without limits, previously constructed
+a temporary `Caches` even when C supplied the runner's existing cache. A shared
+selection helper now leaves the fallback uninitialized when supplied state is
+present, and lazily owns a default cache for the existing null-cache ABI path.
+The adapters retain ownership of that temporary for the full execution.
+
+Using `native_runner_reuse.rb` against `6ae79f1` in the same local environment,
+21 CPU samples of 1,000 calls measured these valid-fixture medians (microseconds):
+
+| Fixture | Validity before | Validity after | Diagnostics before | Diagnostics after |
+| --- | ---: | ---: | ---: | ---: |
+| Boolean | 0.463 | 0.438 | 0.622 | 0.615 |
+| Integer | 0.457 | 0.436 | 0.618 | 0.603 |
+| Bounds | 0.475 | 0.441 | 0.641 | 0.623 |
+| Array | 0.527 | 0.489 | 1.312 | 1.291 |
+| Record | 3.271 | 3.241 | 43.108 | 40.928 |
+| Pattern | 0.499 | 0.471 | 0.675 | 0.651 |
+
+Three-process bounded-integer validity comparisons with 3,000,000 calls measured
+7.480 to 6.531 billion cycles (12.7%). Reversing extension order measured
+7.541 to 6.698 billion cycles (11.2%). Benefits are smaller when instruction
+evaluation or diagnostics dominate; these local stages are not additive speedup
+percentages.
+
+A Rust ownership regression asserts that supplied state is selected without
+initializing the fallback, while absent state receives a fresh owned default.
+The selection policy is shared by all four adapters. Duplication review found
+no new clones involving this change; independent Ruby/VM rule implementations
+continue to provide differential coverage.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native
