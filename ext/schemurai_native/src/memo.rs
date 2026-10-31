@@ -810,6 +810,35 @@ mod tests {
 }
 
 impl Engine {
+    fn clear_memo_guards(&mut self) {
+        for flags in [
+            &mut self.memo_guarded,
+            &mut self.memo_guard_sources,
+            &mut self.memo_guard_same_sources,
+            &mut self.memo_guard_scalar_sources,
+            &mut self.memo_guard_scalar_amplification,
+        ] {
+            *flags = vec![false; self.nodes.len()];
+        }
+    }
+
+    fn clear_memo_analysis(&mut self) {
+        self.memoizable = vec![false; self.nodes.len()];
+        self.memo_contextual = vec![false; self.nodes.len()];
+        self.clear_memo_guards();
+        self.memo_scope_projection = memo_scope::Projection::default();
+    }
+
+    fn compile_memo_projection(&mut self, edges: &[Vec<usize>], parents: &[Vec<usize>]) {
+        self.memo_scope_projection = if self.memo_guarded.iter().any(|&guarded| guarded)
+            || self.anchor_tables.len() > 1 && self.memo_contextual.iter().any(|&scoped| scoped)
+        {
+            memo_scope::Projection::compile(edges, parents, self.nodes.len())
+        } else {
+            memo_scope::Projection::default()
+        };
+    }
+
     pub(super) fn compile_memoization(&mut self) {
         let mut incoming = vec![0_usize; self.nodes.len()];
         let mut repeated_position = vec![false; self.nodes.len()];
@@ -909,6 +938,27 @@ impl Engine {
                 }
             }
         }
+        // Every admission requires multiple incoming references or repeated
+        // positions. If neither exists, skip guard/cycle analysis and retain
+        // indexed false flags for the runtime's ordinary uncached path.
+        if incoming.iter().all(|&count| count <= 1)
+            && !repeated_position.iter().any(|&repeated| repeated)
+        {
+            self.clear_memo_analysis();
+            return;
+        }
+        let parents = graph::parents(&edges);
+        // Compute iteration reachability once, before either admission policy.
+        graph::propagate(&mut repeated_subtree, &parents);
+        // A position-only candidate needs nested iteration to amplify sharing.
+        // Share this necessary condition with both admission policies below.
+        let candidates: Vec<_> = (0..count)
+            .map(|node| incoming[node] > 1 || repeated_position[node] && repeated_subtree[node])
+            .collect();
+        if !candidates.iter().any(|&candidate| candidate) {
+            self.clear_memo_analysis();
+            return;
+        }
         // Reject cycles through any possible binding, plus recursive refs.
         // States 2 and 4 distinguish scope-independent and scoped successes.
         // Bound analysis depth just as evaluation is bounded; conservatively
@@ -920,7 +970,6 @@ impl Engine {
             eligible: &[bool],
             states: &mut [u8],
             count: usize,
-            repeated_subtree: &mut [bool],
         ) -> bool {
             match states[node] {
                 1 | 3 => return false,
@@ -934,16 +983,7 @@ impl Engine {
             states[node] = 1;
             let mut scoped = node >= count;
             let safe = edges[node].iter().all(|&child| {
-                let safe = reusable(
-                    child,
-                    depth + 1,
-                    edges,
-                    eligible,
-                    states,
-                    count,
-                    repeated_subtree,
-                );
-                repeated_subtree[node] |= repeated_subtree[child];
+                let safe = reusable(child, depth + 1, edges, eligible, states, count);
                 scoped |= states[child] == 4;
                 safe
             });
@@ -959,20 +999,21 @@ impl Engine {
         let mut states = vec![0; edges.len()];
         self.memoizable = (0..self.nodes.len())
             .map(|node| {
-                (incoming[node] > 1 || repeated_position[node])
-                    && reusable(node, 0, &edges, &eligible, &mut states, count, &mut repeated_subtree)
-                    // Position-only candidates need nested iteration to amplify
-                    // sharing. Simple records/scalars keep their cheap scans.
-                    && (incoming[node] > 1 || repeated_subtree[node])
+                candidates[node] && reusable(node, 0, &edges, &eligible, &mut states, count)
             })
             .collect();
         self.memo_contextual = states[..count].iter().map(|&state| state == 4).collect();
+        // Proven acyclic candidates do not need any guard signatures, even if
+        // unrelated non-candidates lie on cycles elsewhere in the program.
+        if (0..count).all(|node| !candidates[node] || self.memoizable[node]) {
+            self.clear_memo_guards();
+            self.compile_memo_projection(&edges, &parents);
+            return;
+        }
         // Cyclic candidates can reuse results only under an exact guard/scope
         // context. Propagate unsupported instructions and nested iteration
         // through reverse edges without a per-candidate graph walk.
-        let parents = graph::parents(&edges);
         graph::propagate(&mut unsupported, &parents);
-        graph::propagate(&mut repeated_subtree, &parents);
         // Iterative Kosaraju analysis identifies the only active sources
         // whose guards can affect descendants: sources lying on a schema cycle.
         fn cycle_nodes(edges: &[Vec<usize>], parents: &[Vec<usize>]) -> Vec<bool> {
@@ -1098,7 +1139,7 @@ impl Engine {
         for node in 0..count {
             let amplified_cycle = incoming[node] > 2 || cyclic_incoming[node] > 1;
             if !self.memoizable[node] && !unsupported[node]
-                && (incoming[node] > 1 || repeated_position[node] && repeated_subtree[node])
+                && candidates[node]
                 // A linear recursive property chain has no amplification.
                 // Avoid signatures unless a cycle has repeated input positions
                 // or multiple recursive edges, with or without an entry ref.
@@ -1111,12 +1152,6 @@ impl Engine {
                 self.memo_guarded[node] = true;
             }
         }
-        self.memo_scope_projection = if self.memo_guarded.iter().any(|&guarded| guarded)
-            || self.anchor_tables.len() > 1 && self.memo_contextual.iter().any(|&scoped| scoped)
-        {
-            memo_scope::Projection::compile(&edges, &parents, count)
-        } else {
-            memo_scope::Projection::default()
-        };
+        self.compile_memo_projection(&edges, &parents);
     }
 }
