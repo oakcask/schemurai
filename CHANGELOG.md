@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.1.1](https://github.com/oakcask/schemurai/compare/v3.1.0...v3.1.1) (2026-10-31)
+
+
+### Performance Improvements
+
+* copy native diagnostic pointer spans in bulk ([#260](https://github.com/oakcask/schemurai/issues/260)) ([6084279](https://github.com/oakcask/schemurai/commit/6084279a5a5aa33319501eb79a248e6676a9534d))
+* create native FFI fallback caches only when needed ([#268](https://github.com/oakcask/schemurai/issues/268)) ([7ce6667](https://github.com/oakcask/schemurai/commit/7ce666707a732452c0da62206391e8064ae7bd29))
+* defer unused native callback observation state ([#266](https://github.com/oakcask/schemurai/issues/266)) ([e23b4f7](https://github.com/oakcask/schemurai/commit/e23b4f7b38148d50d3b3a882b9767a4379076272))
+* precompute native constructor accessor identifiers ([#265](https://github.com/oakcask/schemurai/issues/265)) ([ab459e3](https://github.com/oakcask/schemurai/commit/ab459e345278d2c4f99bff87dcbf425791b72f27))
+* remove duplicate native runner observation resets ([#267](https://github.com/oakcask/schemurai/issues/267)) ([6ae79f1](https://github.com/oakcask/schemurai/commit/6ae79f17f5469e603ccaeea9644d643dc72cfc71))
+* reuse bounded native content decoding buffers ([#262](https://github.com/oakcask/schemurai/issues/262)) ([f83ff1e](https://github.com/oakcask/schemurai/commit/f83ff1efbffeeb786bad2091642dcb3ff034cac5))
+* reuse native cyclic graph analysis results ([#264](https://github.com/oakcask/schemurai/issues/264)) ([30ec58e](https://github.com/oakcask/schemurai/commit/30ec58e51759f347fcde4b41da875fceff105e4e))
+* skip unnecessary native memoization analysis ([#263](https://github.com/oakcask/schemurai/issues/263)) ([61021c5](https://github.com/oakcask/schemurai/commit/61021c5522c98eecb1ddce4f5011440074b77ab8))
+
 ## [3.1.0](https://github.com/oakcask/schemurai/compare/v3.0.2...v3.1.0) (2026-10-20)
 
 
