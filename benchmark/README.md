@@ -197,6 +197,59 @@ compaction, exceptions, reentry and shared deadlines. Duplication review found
 no clones involving the new benchmark; initialization stays in one C helper,
 and Ruby/VM callback semantics remain an independent differential oracle.
 
+## Native runner reuse
+
+`native_runner_reuse.rb` compares repeated calls on one runner across Boolean,
+integer, four-bound integer, array, record and pattern schemas. Both valid and
+invalid fixtures first verify direct native coverage and complete VM errors.
+Timing defaults to valid fixtures; `BENCHMARK_INVALID=1` selects failure fixtures
+(the Boolean-true control remains valid). Samples use thread CPU time, 21 samples
+of 1,000 calls and GC outside timing. JSON output retains all samples.
+
+```sh
+BENCHMARK_JSON=runner-reuse.json ruby -Iext/schemurai_native benchmark/native_runner_reuse.rb
+BENCHMARK_INVALID=1 BENCHMARK_WORKLOAD=pattern BENCHMARK_ITERATIONS=101 BENCHMARK_BATCH=10000 ruby -Iext/schemurai_native benchmark/native_runner_reuse.rb
+```
+
+Observation state was cleared at both the end of a call and the beginning of
+the next. New runners already have empty observations, and `finish_evaluation`
+clears completed and interrupted calls before releasing the busy flag. The
+redundant beginning-of-call reset is now removed; exit cleanup, scope/deadline
+inheritance and persistent matcher/decoder scratch retain their existing roles.
+
+Local Ruby 4.0.9/Rust 1.99.0 release-build CPU medians against `e23b4f7`, without
+YJIT on Ryzen 9 7900X, in microseconds (arrays contain 128 values):
+
+| Valid fixture | Validity before | Validity after | Diagnostics before | Diagnostics after |
+| --- | ---: | ---: | ---: | ---: |
+| Boolean | 0.600 | 0.507 | 0.765 | 0.672 |
+| Integer | 0.609 | 0.502 | 0.767 | 0.661 |
+| Bounds | 0.618 | 0.519 | 0.772 | 0.688 |
+| Array | 0.693 | 0.553 | 1.432 | 1.362 |
+| Record | 3.408 | 3.614 | 42.872 | 40.813 |
+| Pattern | 0.638 | 0.533 | 0.819 | 0.720 |
+
+Three-process fixed-count comparisons corroborated the short-call improvement.
+One million bounded-integer validity calls reduced cycles from 3.387 to 2.637
+billion (22.1%); three million calls with extension order reversed measured
+9.275 to 7.199 billion (22.4%). A record-validity control using 500,000 calls
+measured 9.215 to 8.797 billion cycles (4.5% improvement), despite the slower
+short CPU sample above.
+
+An early failure-pattern CPU sample was also slower. A longer repeat using
+101 samples of 10,000 calls measured validity 0.640 to 0.493 microseconds and
+diagnostics 1.193 to 1.027. Three-process counters for that runner measured
+11.663 to 10.027 billion cycles (14.0%) and 27.740 to 24.774 billion instructions.
+Host variation makes isolated short samples unreliable; these results do not
+promise an improvement for every workload or machine.
+
+A regression raises inside a String-subclass length callback, then reuses the
+same runner for success, failure and complete VM diagnostics after both validity
+and diagnostics exceptions. Existing differential cases cover GC, reentry,
+retained blocks and bounded invocation scopes. Duplication review found no new
+benchmark/production-rule clones; exit cleanup remains centralized in C and
+Ruby/VM callback semantics remain independent.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native

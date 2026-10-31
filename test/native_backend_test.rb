@@ -1999,6 +1999,35 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "clears native observations after a callback raises before reusing the runner" do # rubocop:disable RSpec/ExampleLength
+    strings = Class.new(String) do
+      attr_accessor :fail_length
+
+      def length
+        raise "length callback" if fail_length
+
+        super
+      end
+    end
+    schema = {"items" => {"type" => "string", "minLength" => 3}}
+    native = Schemurai.compile(schema, backend: :native)
+    vm = Schemurai.compile(schema, backend: :vm)
+    runner = native.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+    value = strings.new("good")
+    %i[valid? diagnostics].each do |method|
+      value.fail_length = true
+      expect { runner.public_send(method, [value]) }.to raise_error(RuntimeError, "length callback")
+      value.fail_length = false
+      value.replace("good")
+      expect(runner.valid?([value])).to be(true)
+      expect(runner.diagnostics([value])).to eq([])
+      value.replace("x")
+      expect(runner.valid?([value])).to be(false)
+      expect(runner.diagnostics([value])).not_to be_nil
+      expect(native.validate([value]).errors).to eq(vm.validate([value]).errors)
+    end
+  end
+
   it "roots continued diagnostic results through compaction and clears them after exceptions" do # rubocop:disable RSpec/ExampleLength
     inspections = 0
     messages = Schemurai.const_get(:Internal)::ErrorMessage
