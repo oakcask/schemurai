@@ -11,6 +11,44 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Native diagnostic pointer names
+
+`native_pointer_names.rb` compares exact VM errors before timing public native
+`validate` on 16 failing objects. It varies ASCII, Unicode and densely escaped
+property names; compilation is excluded. Run the same Ruby and release extension
+build settings for base and candidate, without concurrent CPU-heavy work:
+
+```sh
+BENCHMARK_ITERATIONS=31 BENCHMARK_BATCH=300 BENCHMARK_JSON=pointer-names.json bundle exec ruby --yjit -Iext/schemurai_native benchmark/native_pointer_names.rb
+```
+
+On Ruby 4.0.9/YJIT, Linux x86_64, compared with `09bab60`, median microseconds
+per public validation were:
+
+| Name / repetitions | Before | After |
+| --- | ---: | ---: |
+| ASCII / 64 | 17.017 | 15.467 |
+| Unicode / 64 | 19.431 | 15.768 |
+| ASCII / 1,024 | 34.843 | 18.549 |
+| Unicode / 1,024 | 81.261 | 29.188 |
+| ASCII / 16,384 | 287.108 | 70.347 |
+| Unicode / 16,384 | 1,004.229 | 249.491 |
+| Escaped / 16,384 | 731.111 | 766.105 |
+
+The native pointer builder copies the prefix before the first escape as one
+span and uses SIMD UTF-8 validation for names of at least 64 bytes. The scalar
+escape loop retains inexpensive processing of densely escaped names. Short
+8-unit names measured 15.5–15.9 µs versus 15.9–16.1 µs; these small differences
+do not establish an improvement. The escaped control varied by about 5%.
+These results establish gains for long diagnostic names, not an aggregate
+backend speedup. Non-UTF-8 and malformed strings still use Ruby pointer semantics.
+
+Duplication review found no clone involving the changed Rust pointer builder.
+The new boundary tests intentionally repeat the existing native/VM comparison
+setup: they verify native UTF-8 spans separately from opaque encoded names.
+Ruby's two ordered replacements and the Rust escape loop both implement
+`~` → `~0`, then `/` → `~1`; keeping both preserves independent backend checks.
+
 ## Shared native scans
 
 `native_shared_scans.rb` checks direct native coverage and exact VM verdict/error

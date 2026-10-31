@@ -32,9 +32,17 @@ impl Path {
         let bytes = unsafe { byte_view(data, len) };
         if matches!(encoding, ENCODING_UTF8 | ENCODING_ASCII)
             && (encoding != ENCODING_ASCII || bytes.is_ascii())
-            && let Ok(name) = std::str::from_utf8(bytes)
+            && let Some(name) = if bytes.len() < 64 {
+                std::str::from_utf8(bytes).ok()
+            } else {
+                simdutf8::compat::from_utf8(bytes).ok()
+            }
         {
-            for character in name.chars() {
+            // ASCII escape bytes are UTF-8 boundaries. Copy the unchanged
+            // prefix together; retain the scalar loop for densely escaped names.
+            let end = memchr::memchr2(b'~', b'/', bytes).unwrap_or(bytes.len());
+            self.text.push_str(&name[..end]);
+            for character in name[end..].chars() {
                 match character {
                     '~' => self.text.push_str("~0"),
                     '/' => self.text.push_str("~1"),

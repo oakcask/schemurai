@@ -4994,7 +4994,9 @@ RSpec.describe "native VALUE execution" do
   it "builds encoded diagnostic pointers through libruby without VM execution" do # rubocop:disable RSpec/ExampleLength
     keys = ["a~/b", "é~/x", "é~/x".encode(Encoding::ISO_8859_1), "ミ~/x".encode(Encoding::Shift_JIS),
       "\xff~/x".b, "a~/b".b, "a".encode(Encoding::UTF_16LE), "\xff".dup.force_encoding(Encoding::UTF_8),
-      "\xff".dup.force_encoding(Encoding::US_ASCII)]
+      "\xff".dup.force_encoding(Encoding::US_ASCII),
+      ("a" * 64 + "\xff~/").force_encoding(Encoding::UTF_8),
+      ("a" * 64 + "\xff~/").force_encoding(Encoding::US_ASCII)]
     dialect = {"$schema" => "https://json-schema.org/draft/2020-12/schema"}
     rule = {"additionalProperties" => false}
     schemas = [rule, {"items" => rule}, {"additionalProperties" => rule},
@@ -5028,6 +5030,24 @@ RSpec.describe "native VALUE execution" do
         vm = Schemurai.compile(schema, backend: :vm)
         [Schemurai.compile(schema, backend: :native), value, capture_pointer_validation(vm, :validate, value)]
       end
+    end
+    allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
+    cases.each do |native, value, expected|
+      expect(capture_pointer_validation(native, :validate, value)).to eq(expected)
+      expect(capture_pointer_validation(native, :validate, value, timeout: 10)).to eq(expected)
+    end
+  end
+
+  it "copies long UTF-8 pointer spans across escape boundaries without VM execution" do # rubocop:disable RSpec/ExampleLength
+    keys = ["", "~/~", "日" * 1024, "a" * 16384]
+    [15, 16, 31, 32, 63, 64].each do |offset|
+      keys << "a" * offset + "~/日/~" + "b" * 65
+    end
+    cases = keys.map do |key|
+      schema = {"properties" => {key => {"additionalProperties" => false}}}
+      value = {key => {key => 1}}
+      vm = Schemurai.compile(schema, backend: :vm)
+      [Schemurai.compile(schema, backend: :native), value, capture_pointer_validation(vm, :validate, value)]
     end
     allow_any_instance_of(vm_class).to receive(:validate).and_raise("VM execution") # rubocop:disable RSpec/AnyInstance
     cases.each do |native, value, expected|
