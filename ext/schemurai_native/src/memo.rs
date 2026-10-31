@@ -1124,16 +1124,21 @@ impl Engine {
         self.memo_guard_scalar_amplification = scalar_amplification[..count].to_vec();
         // Object dependencies keep the same value; all other container child
         // edges change positions. Scalar/array inputs cannot take dependencies.
+        let mut has_dependencies = false;
         for (node, ops) in self.nodes.iter().enumerate() {
             for op in ops {
                 if let Op::Object(_, rules) = op {
+                    has_dependencies |= !rules.dependent_schemas.is_empty();
                     same_edges[node]
                         .extend(rules.dependent_schemas.iter().map(|&(_, child)| child));
                 }
             }
         }
-        self.memo_guard_same_sources =
-            cycle_nodes(&same_edges, &graph::parents(&same_edges))[..count].to_vec();
+        self.memo_guard_same_sources = if has_dependencies {
+            cycle_nodes(&same_edges, &graph::parents(&same_edges))[..count].to_vec()
+        } else {
+            self.memo_guard_scalar_sources.clone()
+        };
         self.memo_guard_sources = cyclic[..count].to_vec();
         self.memo_guarded = vec![false; count];
         for node in 0..count {
