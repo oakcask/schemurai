@@ -5,10 +5,12 @@ fn main() {
     let definitions = fs::read_to_string("protocol.def").expect("read native protocol");
     let mut output = String::new();
     for line in definitions.lines() {
-        let (fields, opcode) = if let Some(fields) = line.strip_prefix("SN_OPCODE(") {
-            (fields, true)
+        let (fields, prefix) = if let Some(fields) = line.strip_prefix("SN_OPCODE(") {
+            (fields, "OP_")
+        } else if let Some(fields) = line.strip_prefix("SN_FIELD(") {
+            (fields, "FIELD_")
         } else if let Some(fields) = line.strip_prefix("SN_CONSTANT(") {
-            (fields, false)
+            (fields, "")
         } else {
             continue;
         };
@@ -18,16 +20,15 @@ fn main() {
             .split(',')
             .map(str::trim)
             .collect();
-        assert_eq!(fields.len(), if opcode { 3 } else { 2 });
+        assert_eq!(fields.len(), if prefix.is_empty() { 2 } else { 3 });
         let name = fields[0];
         assert!(
             name.bytes()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
         );
-        let value: i32 = fields[if opcode { 2 } else { 1 }]
+        let value: i32 = fields[if prefix.is_empty() { 1 } else { 2 }]
             .parse()
             .expect("protocol integer value");
-        let prefix = if opcode { "OP_" } else { "" };
         output.push_str(&format!("pub const {prefix}{name}: i32 = {value};\n"));
     }
     let directory = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));

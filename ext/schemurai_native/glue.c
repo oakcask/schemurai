@@ -671,14 +671,23 @@ int sn_same(VALUE a, VALUE b) { return a == b; }
 int sn_same_class(VALUE a, VALUE b) { return CLASS_OF(a) == CLASS_OF(b); }
 int sn_string_equal(VALUE a, VALUE b) { return rb_str_cmp(a, b) == 0; }
 
-struct access { VALUE object; const char *name; };
+static struct { ID id; const char *symbol; } fields[] = {
+#define SN_OPCODE(name, symbol, value)
+#define SN_CONSTANT(name, value)
+#define SN_FIELD(name, symbol, value) [SN_FIELD_##name] = {0, symbol},
+#include "protocol.def"
+#undef SN_OPCODE
+#undef SN_CONSTANT
+#undef SN_FIELD
+};
+struct access { VALUE object; ID name; };
 static VALUE get_field(VALUE arg) {
     struct access *a = (struct access *)arg;
-    return rb_funcall(a->object, rb_intern_const(a->name), 0);
+    return rb_funcall(a->object, a->name, 0);
 }
-/* Rust supplies a fixed, NUL-terminated field name from a static byte string. */
-int sn_field(VALUE object, const char *name, VALUE *value) {
-    struct access a = {object, name};
+/* Rust supplies an accessor index from the shared protocol. */
+int sn_field(VALUE object, int name, VALUE *value) {
+    struct access a = {object, fields[name].id};
     int state = 0;
     *value = rb_protect(get_field, (VALUE)&a, &state);
     if (state) { *value = rb_errinfo(); rb_set_errinfo(Qnil); }
@@ -687,9 +696,11 @@ int sn_field(VALUE object, const char *name, VALUE *value) {
 static struct { ID id; const char *symbol; int opcode; } opcodes[] = {
 #define SN_OPCODE(name, symbol, value) {0, #symbol, SN_OP_##name},
 #define SN_CONSTANT(name, value)
+#define SN_FIELD(name, symbol, value)
 #include "protocol.def"
 #undef SN_OPCODE
 #undef SN_CONSTANT
+#undef SN_FIELD
 };
 int sn_opcode(VALUE symbol) {
     ID id = SYM2ID(symbol);
@@ -2168,15 +2179,19 @@ void Init_schemurai_native(void) {
     binary_index = rb_ascii8bit_encindex();
     for (size_t i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); i++)
         opcodes[i].id = rb_intern_const(opcodes[i].symbol);
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+        fields[i].id = rb_intern_const(fields[i].symbol);
     rb_ext_ractor_safe(true);
     VALUE schemurai = rb_define_module("Schemurai");
     VALUE native = rb_define_module_under(schemurai, "Native");
     VALUE protocol = rb_define_module_under(native, "Protocol");
 #define SN_OPCODE(name, symbol, value) rb_define_const(protocol, "OP_" #name, INT2NUM(SN_OP_##name));
 #define SN_CONSTANT(name, value) rb_define_const(protocol, #name, INT2NUM(SN_##name));
+#define SN_FIELD(name, symbol, value)
 #include "protocol.def"
 #undef SN_OPCODE
 #undef SN_CONSTANT
+#undef SN_FIELD
     VALUE klass = rb_define_class_under(native, "Program", rb_cObject);
     rb_define_alloc_func(klass, allocate);
     rb_define_method(klass, "initialize", initialize, 4);

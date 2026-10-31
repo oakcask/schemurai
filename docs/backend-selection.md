@@ -75,6 +75,9 @@ codes are named in `ext/schemurai_native/protocol.def`. C includes that shared
 definition and Cargo generates Rust constants from it during the build; Ruby
 diagnostics use the constants exported by the extension. A compatibility test
 checks the shared masks against the Ruby VM compiler's constants.
+The same definition assigns private constructor accessor indexes. Their Ruby
+method IDs are initialized once when the extension loads, before Ractor use;
+construction still invokes the accessors through protected Ruby method calls.
 
 The existing Ruby compiler builds the dialect-aware immutable VM programs.
 Rust reads those programs once and stores native instructions plus opaque

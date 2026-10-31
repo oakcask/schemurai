@@ -305,8 +305,8 @@ impl Engine {
     pub(super) fn container_header(
         &mut self,
         source: Value,
-        maximum: &'static [u8],
-        minimum: &'static [u8],
+        maximum: i32,
+        minimum: i32,
         object: bool,
         tail: u8,
     ) -> Result<Header, Value> {
@@ -314,7 +314,7 @@ impl Engine {
         let minimum = self.field(source, minimum)?;
         let native_bounds = self.native_count(maximum)? && self.native_count(minimum)?;
         let required = if object {
-            self.field(source, b"required\0")?
+            self.field(source, FIELD_REQUIRED)?
         } else {
             unsafe { sn_nil() }
         };
@@ -324,8 +324,8 @@ impl Engine {
         let mut native_dependencies = true;
         if object {
             for (field, keyword) in [
-                (b"dependencies\0".as_slice(), "dependencies"),
-                (b"dependent_required\0", "dependentRequired"),
+                (FIELD_DEPENDENCIES, "dependencies"),
+                (FIELD_DEPENDENT_REQUIRED, "dependentRequired"),
             ] {
                 let entries = self.field(source, field)?;
                 for pair in self.values(entries) {
@@ -375,7 +375,7 @@ impl Engine {
         if unsafe { sn_is_float(value) } != 0 {
             return Ok(unsafe { sn_float(value) } >= 0.0);
         }
-        let negative = self.field(value, b"negative?\0")?;
+        let negative = self.field(value, FIELD_NEGATIVE_P)?;
         Ok(unsafe { sn_true(negative) } == 0)
     }
 }

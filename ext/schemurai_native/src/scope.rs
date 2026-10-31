@@ -220,10 +220,10 @@ impl Engine {
         index: usize,
         flags: i64,
     ) -> Result<(), Value> {
-        let node = self.field(program, b"node\0")?;
-        let resource = self.field(node, b"resource\0")?;
-        let recursive = self.field(program, b"recursive_anchor?\0")?;
-        let dynamic = self.field(program, b"dynamic_anchor\0")?;
+        let node = self.field(program, FIELD_NODE)?;
+        let resource = self.field(node, FIELD_RESOURCE)?;
+        let recursive = self.field(program, FIELD_RECURSIVE_ANCHOR_P)?;
+        let dynamic = self.field(program, FIELD_DYNAMIC_ANCHOR)?;
         self.metadata[index] = Metadata {
             resource,
             enters_scope: flags & i64::from(TRACKS_DYNAMIC_SCOPE) != 0,
@@ -251,7 +251,7 @@ impl Engine {
         opcode: i32,
         target: usize,
     ) -> Result<Op, Value> {
-        let fragment = self.field(operand, b"fragment\0")?;
+        let fragment = self.field(operand, FIELD_FRAGMENT)?;
         let kind = if opcode == OP_RECURSIVE_REF
             && unsafe { sn_same(fragment, sn_nil()) } == 0
             && unsafe { sn_string_bytes(fragment) } == 0
