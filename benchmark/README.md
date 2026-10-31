@@ -65,6 +65,44 @@ cached-VM benchmark setup shared with `native_scope_compile.rb` and existing
 scope-test setup; production admission rules are centralized. Ruby/VM evaluation
 remains an independent implementation checked by differential tests.
 
+### Cyclic compilation graphs
+
+The `cyclic` mode adds independent self-referential schemas with two `allOf`
+references per property. The `dependencies` mode adds recursive properties and
+same-instance dependency schemas. Both retain the runner's native coverage and
+VM parity checks.
+
+```sh
+BENCHMARK_MODE=cyclic BENCHMARK_WIDTHS=128 BENCHMARK_ITERATIONS=61 BENCHMARK_BATCH=50 ruby -Iext/schemurai_native benchmark/native_memo_compile.rb
+BENCHMARK_MODE=dependencies BENCHMARK_WIDTHS=128,2048 ruby -Iext/schemurai_native benchmark/native_memo_compile.rb
+```
+
+Without dependency-schema edges, scalar and general same-instance guard graphs
+are identical, so they now share cycle-analysis results. Scope projection also
+constructs shared empty name sets directly when every dispatch vertex has no
+incoming edges. An unused dispatch vertex may still point into a real cycle;
+that cannot make a dynamic name reachable from real nodes. Active guard-source
+tracking remains independent and unchanged.
+
+On the same environment as above, comparison with the preceding memo-analysis
+change used three process runs per extension, each with 61 samples of 50
+constructions. Hardware counters include setup, GC and correctness checks.
+Reversing extension order confirmed a reduction above 5%:
+
+| Extension order | Before cycles | After cycles | Cycle reduction | Before instructions | After instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| After, before | 13.605 billion | 12.773 billion | 6.1% | 35.075 billion | 31.698 billion |
+| Before, after | 13.518 billion | 12.253 billion | 9.4% | 34.952 billion | 31.710 billion |
+
+Reported program size remained 344,170 bytes at width 128. A width-2,048 control
+with the shorter default sampling measured 15.350 ms before and 15.022 ms after
+in thread CPU time (2.1%); benefits depend on graph shape and size. Rust coverage
+checks that static cycles return shared empty projections even with a zero
+closure budget. Native differential coverage includes recursive dependency
+schemas as well as static, dynamic and recursive shared inputs. Duplication
+review found no new production clones; benchmark VM-construction setup remains
+intentionally consistent with the dynamic-scope benchmark.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native

@@ -24,14 +24,23 @@ widths.each do |width|
       definitions["v#{index}"] = leaf
       {"$ref" => "#/$defs/v#{index}"}
     when "nested" then {"items" => leaf}
+    when "cyclic", "dependencies"
+      reference = {"$ref" => "#/$defs/v#{index}"}
+      definitions["v#{index}"] = if mode == "cyclic"
+        {"allOf" => [reference, reference], "minimum" => index}
+      else
+        {"properties" => {"next" => reference}, "dependentSchemas" => {"next" => reference}, "minimum" => index}
+      end
+      reference
     when "shared"
       definitions["value"] = {"type" => "integer", "minimum" => 0}
       {"$ref" => "#/$defs/value"}
-    else abort "BENCHMARK_MODE must be plain, closed, references, nested or shared"
+    else abort "BENCHMARK_MODE must be plain, closed, references, nested, cyclic, dependencies or shared"
     end
     ["p#{index}", rule]
   end
   schema = {"properties" => properties, "$defs" => definitions}
+  schema["$schema"] = "https://json-schema.org/draft/2020-12/schema" if mode == "dependencies"
   schema["additionalProperties"] = false if mode == "closed"
   vm = Schemurai.compile(schema, backend: :vm)
   evaluator = vm.instance_variable_get(:@evaluator)

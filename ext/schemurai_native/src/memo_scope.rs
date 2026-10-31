@@ -18,6 +18,14 @@ impl Projection {
         Self::bounded(edges, parents, count, MAX_NAMES)
     }
     fn bounded(edges: &[Vec<usize>], parents: &[Vec<usize>], count: usize, limit: usize) -> Self {
+        // With no incoming edges to any dispatch vertex, every real node's
+        // reachable name set is empty, including nodes on schema cycles.
+        if parents[count..].iter().all(Vec::is_empty) {
+            return Self {
+                names: vec![Some(Arc::from([])); count],
+                graph: None,
+            };
+        }
         let mut seen = vec![false; edges.len()];
         let order = graph::postorder(edges, &mut seen);
         let mut component = vec![usize::MAX; edges.len()];
@@ -177,6 +185,28 @@ mod tests {
             }
         }
         parents
+    }
+    #[test]
+    fn static_cycles_share_empty_projections_without_default_scope_names() {
+        // The unused dispatch vertex points into a real cycle, but no real
+        // node can reach it. Even a zero closure budget needs no graph fallback.
+        let edges = vec![vec![1], vec![0], vec![], vec![0]];
+        for limit in [0, 1, MAX_NAMES] {
+            let projection = Projection::bounded(&edges, &parents(&edges), 3, limit);
+            assert!(projection.graph.is_none());
+            for node in 0..3 {
+                assert!(
+                    projection
+                        .names(node, 3, 0, true, &budget::Budget::default())
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(Arc::ptr_eq(
+                    projection.names[0].as_ref().unwrap(),
+                    projection.names[node].as_ref().unwrap()
+                ));
+            }
+        }
     }
     #[test]
     fn projects_cycles_and_transitive_dynamic_dispatch_targets() {
