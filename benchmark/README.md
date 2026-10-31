@@ -103,6 +103,53 @@ schemas as well as static, dynamic and recursive shared inputs. Duplication
 review found no new production clones; benchmark VM-construction setup remains
 intentionally consistent with the dynamic-scope benchmark.
 
+### Constructor accessor IDs
+
+Native construction previously interned a fixed accessor name on every read.
+The shared C/Rust protocol now assigns those names indexes into a method-ID
+table initialized at extension load. The table is read-only during compilation,
+including concurrent Ractor use. Reads still call the original Ruby methods
+under `rb_protect`; return values, overrides and exception identity are retained.
+The private indexes add no Ruby protocol constants or per-program storage.
+
+Using the same environment and constructor runner, compared with the cyclic
+graph improvement above, local medians of 21 samples of five constructions
+measured these thread CPU times at width 2,048:
+
+| Mode | Before (ms) | After (ms) | Reduction |
+| --- | ---: | ---: | ---: |
+| Plain | 2.106 | 1.455 | 30.9% |
+| References | 4.071 | 3.028 | 25.6% |
+| Nested | 5.495 | 3.492 | 36.4% |
+| Shared | 2.135 | 1.590 | 25.5% |
+| Cyclic | 11.603 | 9.284 | 20.0% |
+| Dependencies | 18.255 | 14.495 | 20.6% |
+
+All reported program sizes matched. A width-128 plain-case hardware-counter
+comparison used three process runs per extension, each with 61 samples of 500
+constructions. Cycles fell from 28.102 to 21.847 billion (22.3%), and instructions
+from 65.834 to 43.338 billion (34.2%). Reversing extension order measured 28.054
+to 21.748 billion cycles (22.5%) with the same instruction reduction. Counters
+include setup, GC and correctness checks; native-constructor timings exclude
+schema discovery, VM compilation and extension loading. These are local results.
+
+The pinned real-world runner also checked native/Ruby verdicts and ordered error
+paths and keywords before timing full `Schemurai.compile` calls (native backend, size 1, seed 9571,
+21 samples of 10 calls, extension already loaded). Wall-time medians include
+schema discovery and VM compilation:
+
+| Corpus | Before (ms) | After (ms) | Reduction |
+| --- | ---: | ---: | ---: |
+| GeoJSON | 2.862 | 2.676 | 6.5% |
+| GitHub Workflow | 4.735 | 4.408 | 6.9% |
+| Taskfile | 2.566 | 2.463 | 4.0% |
+
+An accessor regression checks that constructor reads still dispatch to Ruby and
+rethrow the original exception. Native differential and Ractor coverage exercise
+the generated name mappings across rule types. Duplication review retained
+existing count-bound rules, scope-test setup and independent Ruby/VM semantics;
+the accessor name mapping itself is defined once in the shared protocol.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native

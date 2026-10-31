@@ -2,7 +2,7 @@
 //! Ruby runs with the GVL held. Evaluation calls only non-allocating C adapters;
 //! Ruby callbacks during compilation are protected on the C side.
 use std::collections::HashMap;
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 mod budget;
@@ -108,7 +108,7 @@ unsafe extern "C" {
         context: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, Value) -> i32,
     ) -> i32;
-    fn sn_field(object: Value, name: *const c_char, value: *mut Value) -> i32;
+    fn sn_field(object: Value, name: i32, value: *mut Value) -> i32;
     fn sn_pairs(hash: Value, value: *mut Value) -> i32;
     fn sn_key_copy(key: Value, value: *mut Value) -> i32;
     fn sn_opcode(symbol: Value) -> i32;
@@ -733,9 +733,9 @@ impl Engine {
         unsafe { &mut *self.roots }.values.push(value);
         value
     }
-    fn field(&mut self, value: Value, name: &'static [u8]) -> Result<Value, Value> {
+    fn field(&mut self, value: Value, name: i32) -> Result<Value, Value> {
         let mut result = 0;
-        if unsafe { sn_field(value, name.as_ptr().cast(), &mut result) } != 0 {
+        if unsafe { sn_field(value, name, &mut result) } != 0 {
             return Err(result);
         }
         Ok(self.retain(result))
@@ -786,7 +786,7 @@ impl Engine {
             .map(|p| (p[0], p[1]))
             .collect())
     }
-    fn size_field(&mut self, value: Value, name: &'static [u8]) -> Result<Option<usize>, Value> {
+    fn size_field(&mut self, value: Value, name: i32) -> Result<Option<usize>, Value> {
         let n = self.field(value, name)?;
         Ok(if unsafe { sn_same(n, sn_nil()) } != 0 {
             None
@@ -802,7 +802,7 @@ impl Engine {
             None // The only non-integral bound is maxContains' +Infinity.
         })
     }
-    fn child(&mut self, value: Value, name: &'static [u8]) -> Result<Option<usize>, Value> {
+    fn child(&mut self, value: Value, name: i32) -> Result<Option<usize>, Value> {
         let child = self.field(value, name)?;
         if unsafe { sn_same(child, sn_nil()) } != 0 {
             Ok(None)
@@ -886,7 +886,7 @@ impl Engine {
         self.tracks.push(false);
         self.kind_demand.push(KindDemand::None);
         self.metadata.push(scope::Metadata::default());
-        let code = self.field(program, b"code\0")?;
+        let code = self.field(program, FIELD_CODE)?;
         let flags = unsafe { sn_integer(sn_entry(code, 0)) };
         self.tracks[index] = flags & i64::from(TRACKS_EVALUATION) != 0;
         self.compile_scope(program, index, flags)?;
@@ -906,7 +906,7 @@ impl Engine {
                 OP_TYPE_INTEGER => Op::Type(TYPE_INTEGER, false),
                 OP_TYPE_STRING => Op::Type(TYPE_STRING, false),
                 OP_TYPES => {
-                    let mask = self.field(operand, b"mask\0")?;
+                    let mask = self.field(operand, FIELD_MASK)?;
                     Op::Type(unsafe { sn_integer(mask) } as i32, true)
                 }
                 OP_CONST => Op::Const(operand),
@@ -920,11 +920,11 @@ impl Engine {
                 OP_ONE_OF => Op::One(self.branches(operand)?),
                 OP_NOT => Op::Not(self.compile(operand)?),
                 OP_CONDITIONAL => {
-                    let condition = self.field(operand, b"condition\0")?;
+                    let condition = self.field(operand, FIELD_CONDITION)?;
                     Op::Conditional(
                         self.compile(condition)?,
-                        self.child(operand, b"then_branch\0")?,
-                        self.child(operand, b"else_branch\0")?,
+                        self.child(operand, FIELD_THEN_BRANCH)?,
+                        self.child(operand, FIELD_ELSE_BRANCH)?,
                     )
                 }
                 OP_NUMBER | OP_TYPED_NUMBER | OP_TYPED_INTEGER => {
@@ -944,10 +944,10 @@ impl Engine {
                     }
                 }
                 OP_STRING | OP_TYPED_STRING => {
-                    let pattern = self.field(operand, b"pattern\0")?;
-                    let format = self.field(operand, b"format\0")?;
-                    let base64 = self.field(operand, b"decode_base64\0")?;
-                    let json = self.field(operand, b"parse_json\0")?;
+                    let pattern = self.field(operand, FIELD_PATTERN)?;
+                    let format = self.field(operand, FIELD_FORMAT)?;
+                    let base64 = self.field(operand, FIELD_DECODE_BASE64)?;
+                    let json = self.field(operand, FIELD_PARSE_JSON)?;
                     {
                         let content = if self.validate_content
                             && unsafe { sn_true(base64) | sn_true(json) } != 0
@@ -959,12 +959,12 @@ impl Engine {
                         } else {
                             None
                         };
-                        let assertion = self.field(operand, b"format_assertion\0")?;
+                        let assertion = self.field(operand, FIELD_FORMAT_ASSERTION)?;
                         let runtime_format = (self.validate_format
                             || unsafe { sn_true(assertion) } != 0)
                             && unsafe { sn_same(format, sn_nil()) } == 0;
                         let format = if runtime_format {
-                            let name = self.field(format, b"name\0")?;
+                            let name = self.field(format, FIELD_NAME)?;
                             if unsafe { sn_same(name, sn_nil()) } != 0 {
                                 None
                             } else {
@@ -973,8 +973,8 @@ impl Engine {
                         } else {
                             None
                         };
-                        let max_length = self.field(operand, b"max_length\0")?;
-                        let min_length = self.field(operand, b"min_length\0")?;
+                        let max_length = self.field(operand, FIELD_MAX_LENGTH)?;
+                        let min_length = self.field(operand, FIELD_MIN_LENGTH)?;
                         let length_flags = (unsafe { sn_truthy(max_length) } << 2)
                             | (unsafe { sn_truthy(min_length) } << 3);
                         Op::String(
@@ -991,8 +991,8 @@ impl Engine {
                                 runtime_format,
                                 format,
                                 content,
-                                min: self.size_field(operand, b"min_length\0")?,
-                                max: self.size_field(operand, b"max_length\0")?,
+                                min: self.size_field(operand, FIELD_MIN_LENGTH)?,
+                                max: self.size_field(operand, FIELD_MAX_LENGTH)?,
                                 pattern: if unsafe { sn_truthy(pattern) } == 0 {
                                     None
                                 } else {
@@ -1006,11 +1006,11 @@ impl Engine {
                     }
                 }
                 OP_ARRAY | OP_TYPED_ARRAY => {
-                    let unique = self.field(operand, b"unique\0")?;
-                    let prefix = self.field(operand, b"prefix_items\0")?;
+                    let unique = self.field(operand, FIELD_UNIQUE)?;
+                    let prefix = self.field(operand, FIELD_PREFIX_ITEMS)?;
                     let prefix = self.children(prefix)?;
-                    let items = self.field(operand, b"items\0")?;
-                    let list = self.field(operand, b"items_list\0")?;
+                    let items = self.field(operand, FIELD_ITEMS)?;
+                    let list = self.field(operand, FIELD_ITEMS_LIST)?;
                     let list = unsafe { sn_true(list) } != 0;
                     let items = if list {
                         self.children(items)?
@@ -1028,8 +1028,8 @@ impl Engine {
                         Box::new(Array {
                             header: self.container_header(
                                 operand,
-                                b"max_items\0",
-                                b"min_items\0",
+                                FIELD_MAX_ITEMS,
+                                FIELD_MIN_ITEMS,
                                 false,
                                 (if unsafe { sn_truthy(unique) } != 0 {
                                     4
@@ -1038,25 +1038,27 @@ impl Engine {
                                 }) | (if list { 8 } else { 0 }),
                             )?,
                             unique: unsafe { sn_truthy(unique) } != 0,
-                            min: self.size_field(operand, b"min_items\0")?,
-                            max: self.size_field(operand, b"max_items\0")?,
+                            min: self.size_field(operand, FIELD_MIN_ITEMS)?,
+                            max: self.size_field(operand, FIELD_MAX_ITEMS)?,
                             prefix,
                             items,
                             list,
-                            additional: self.child(operand, b"additional\0")?,
-                            contains: self.child(operand, b"contains\0")?,
-                            min_contains: self.size_field(operand, b"min_contains\0")?.unwrap_or(1),
-                            max_contains: self.size_field(operand, b"max_contains\0")?,
+                            additional: self.child(operand, FIELD_ADDITIONAL)?,
+                            contains: self.child(operand, FIELD_CONTAINS)?,
+                            min_contains: self
+                                .size_field(operand, FIELD_MIN_CONTAINS)?
+                                .unwrap_or(1),
+                            max_contains: self.size_field(operand, FIELD_MAX_CONTAINS)?,
                             count_contains: unsafe {
-                                sn_true(self.field(operand, b"count_contains\0")?)
+                                sn_true(self.field(operand, FIELD_COUNT_CONTAINS)?)
                             } != 0,
-                            unevaluated: self.child(operand, b"unevaluated\0")?,
+                            unevaluated: self.child(operand, FIELD_UNEVALUATED)?,
                         }),
                     )
                 }
                 OP_OBJECT | OP_TYPED_OBJECT => {
-                    let patterns = self.field(operand, b"patterns\0")?;
-                    let dependencies = self.field(operand, b"dependencies\0")?;
+                    let patterns = self.field(operand, FIELD_PATTERNS)?;
+                    let dependencies = self.field(operand, FIELD_DEPENDENCIES)?;
                     {
                         let patterns = self.compile_map(patterns)?;
                         let pattern_names: Vec<_> = patterns.iter().map(|&(key, _)| key).collect();
@@ -1071,7 +1073,7 @@ impl Engine {
                             .collect();
                         let pattern_group =
                             pattern::PatternGroup::compile(&pattern_names, &patterns);
-                        let required = self.field(operand, b"required\0")?;
+                        let required = self.field(operand, FIELD_REQUIRED)?;
                         let inspect_required = unsafe { sn_truthy(required) } != 0
                             && !(unsafe { sn_kind(required) } == TYPE_ARRAY
                                 && unsafe { sn_len(required) } == 0);
@@ -1082,7 +1084,7 @@ impl Engine {
                             .filter(|key| key.ordinary_string)
                             .map(|key| key.name)
                             .collect();
-                        let properties = self.field(operand, b"properties\0")?;
+                        let properties = self.field(operand, FIELD_PROPERTIES)?;
                         let properties = self.compile_map(properties)?;
                         if properties
                             .iter()
@@ -1157,7 +1159,7 @@ impl Engine {
                                 }
                             })
                             .collect();
-                        let dependent = self.field(operand, b"dependent_required\0")?;
+                        let dependent = self.field(operand, FIELD_DEPENDENT_REQUIRED)?;
                         let mut dependent_required = vec![];
                         let mut dependent_schemas = vec![];
                         let mut diagnostic_dependencies = vec![];
@@ -1192,7 +1194,7 @@ impl Engine {
                             ));
                             dependent_required.push((name, names));
                         }
-                        let dependent = self.field(operand, b"dependent_schemas\0")?;
+                        let dependent = self.field(operand, FIELD_DEPENDENT_SCHEMAS)?;
                         let schemas = self.compile_map(dependent)?;
                         diagnostic_dependencies.extend(schemas.iter().map(|&(name, child)| {
                             DiagnosticDependency::Schema(name, child, "dependentSchemas")
@@ -1211,15 +1213,15 @@ impl Engine {
                         let mut object = Object {
                             header: self.container_header(
                                 operand,
-                                b"max_properties\0",
-                                b"min_properties\0",
+                                FIELD_MAX_PROPERTIES,
+                                FIELD_MIN_PROPERTIES,
                                 true,
                                 0,
                             )?,
                             inspect_required,
                             record: None,
-                            min: self.size_field(operand, b"min_properties\0")?,
-                            max: self.size_field(operand, b"max_properties\0")?,
+                            min: self.size_field(operand, FIELD_MIN_PROPERTIES)?,
+                            max: self.size_field(operand, FIELD_MAX_PROPERTIES)?,
                             required,
                             required_order,
                             properties,
@@ -1231,12 +1233,12 @@ impl Engine {
                             required_property_indices,
                             property_keys,
                             property_indices,
-                            additional: self.child(operand, b"additional\0")?,
-                            names: self.child(operand, b"property_names\0")?,
+                            additional: self.child(operand, FIELD_ADDITIONAL)?,
+                            names: self.child(operand, FIELD_PROPERTY_NAMES)?,
                             dependent_required,
                             dependent_schemas,
                             diagnostic_dependencies,
-                            unevaluated: self.child(operand, b"unevaluated\0")?,
+                            unevaluated: self.child(operand, FIELD_UNEVALUATED)?,
                         }
                         .with_record();
                         if let Some(record) = &mut object.record {
@@ -1289,11 +1291,11 @@ impl Engine {
                     }
                 }
                 OP_REF | OP_RECURSIVE_REF | OP_DYNAMIC_REF => {
-                    let reference = self.field(operand, b"value\0")?;
+                    let reference = self.field(operand, FIELD_VALUE)?;
                     let mut target = 0;
                     if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
                         if unsafe { sn_resolution_error(target) } != 0 {
-                            let message = self.field(target, b"message\0")?;
+                            let message = self.field(target, FIELD_MESSAGE)?;
                             Op::UnresolvedRef(message)
                         } else {
                             return Err(target);

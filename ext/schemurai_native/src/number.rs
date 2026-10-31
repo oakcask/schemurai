@@ -440,14 +440,14 @@ impl FastMultiple {
 
 impl Engine {
     pub(super) fn compile_number(&mut self, operand: Value) -> Result<Option<Rules>, Value> {
-        let mask = self.field(operand, b"mask\0")?;
+        let mask = self.field(operand, FIELD_MASK)?;
         let mask = unsafe { sn_integer(mask) } as i32;
         let mut limits = vec![];
         for (bit, name) in [
-            (MAXIMUM, b"maximum\0".as_slice()),
-            (MINIMUM, b"minimum\0"),
-            (EXCLUSIVE_MAXIMUM, b"exclusive_maximum\0"),
-            (EXCLUSIVE_MINIMUM, b"exclusive_minimum\0"),
+            (MAXIMUM, FIELD_MAXIMUM),
+            (MINIMUM, FIELD_MINIMUM),
+            (EXCLUSIVE_MAXIMUM, FIELD_EXCLUSIVE_MAXIMUM),
+            (EXCLUSIVE_MINIMUM, FIELD_EXCLUSIVE_MINIMUM),
         ] {
             if mask & bit != 0 {
                 let value = self.field(operand, name)?;
@@ -460,7 +460,7 @@ impl Engine {
         let multiple = if mask & MULTIPLE_OF == 0 {
             None
         } else {
-            let value = self.field(operand, b"multiple_of\0")?;
+            let value = self.field(operand, FIELD_MULTIPLE_OF)?;
             let Some(limit) = self.numeric_limit(value)? else {
                 return Ok(None);
             };
@@ -537,8 +537,8 @@ impl Engine {
         let (numerator, denominator) = if integer {
             (value, None)
         } else {
-            let numerator = self.field(value, b"numerator\0")?;
-            let denominator = self.field(value, b"denominator\0")?;
+            let numerator = self.field(value, FIELD_NUMERATOR)?;
+            let denominator = self.field(value, FIELD_DENOMINATOR)?;
             (numerator, Some(denominator))
         };
         let exact = read_integer(numerator)
@@ -550,7 +550,7 @@ impl Engine {
         let arbitrary = exact
             .is_none()
             .then(|| Box::new(arbitrary::fraction(numerator, denominator)));
-        let rounded = self.field(value, b"to_f\0")?;
+        let rounded = self.field(value, FIELD_TO_F)?;
         let rounded = unsafe { sn_float(rounded) };
         let wide_rounded_order = if integer && exact.is_none() {
             wide_float_tie(value, rounded)

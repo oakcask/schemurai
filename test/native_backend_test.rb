@@ -42,6 +42,25 @@ RSpec.describe "native VALUE execution" do
     expect([status.success?, output]).to eq([true, ""])
   end
 
+  it "preserves native constructor accessor dispatch and exception identity" do
+    Schemurai.compile(true, backend: :native)
+    vm = Schemurai.compile({"type" => "integer"}, backend: :vm)
+    evaluator = vm.instance_variable_get(:@evaluator)
+    root = evaluator.instance_variable_get(:@root).dup
+    compiler = evaluator.instance_variable_get(:@compiler)
+    program_class = Schemurai.const_get(:Native)::Program
+    calls = 0
+    root.define_singleton_method(:code) do
+      calls += 1
+      super()
+    end
+    expect(program_class.new(root, compiler, false, false).valid?(1)).to be(true)
+    expect(calls).to eq(1)
+    error = RuntimeError.new("constructor accessor")
+    root.define_singleton_method(:code) { raise error }
+    expect { program_class.new(root, compiler, false, false) }.to raise_error { |raised| expect(raised).to equal(error) }
+  end
+
   it "rejects unknown internal instructions before evaluation and permits initialization retry" do # rubocop:disable RSpec/ExampleLength
     Schemurai.compile(true, backend: :native)
     graph = Schemurai.const_get(:Internal)::SchemaGraph.new
