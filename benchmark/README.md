@@ -11,6 +11,60 @@ only when `workflow:enable-benchmark` is added to a pull request. Commits pushed
 afterward do not start another run; remove and re-add the label to benchmark
 the updated PR. Other labels do not run benchmarks.
 
+## Native memoization analysis during compilation
+
+`native_memo_compile.rb` measures native program construction from already
+compiled VM programs, excluding Ruby schema discovery and VM compilation. It
+checks direct native validity and complete VM error parity before timing. Each
+sample collects garbage outside timing and constructs five programs; the runner
+reports medians of 21 samples using both thread CPU time and monotonic wall time.
+Optional JSON output retains every sample and reported native program bytes.
+
+```sh
+ruby -Iext/schemurai_native benchmark/native_memo_compile.rb
+BENCHMARK_MODE=shared BENCHMARK_WIDTHS=128,8192 BENCHMARK_JSON=memo-compile.json ruby -Iext/schemurai_native benchmark/native_memo_compile.rb
+```
+
+Modes cover independent properties (`plain`), closed objects (`closed`), one
+distinct reference per property (`references`), scalar arrays (`nested`), and
+many references to one shared scalar schema (`shared`). Width controls property
+count. These isolate native construction costs, not end-to-end `Schemurai.compile`
+or validation throughput.
+
+Memoization admission now computes iteration reachability before testing a
+single shared candidate condition: multiple incoming references, or repeated
+positions with nested iteration. With no candidate it clears cache-analysis
+metadata immediately. If every candidate passes the existing acyclic reuse
+proof, it skips guard-signature cycle analyses while retaining any required
+dynamic-scope projection. Candidates needing guarded reuse retain the full
+analysis. Runtime cache limits and key semantics are unchanged.
+
+Local release-build medians against `f83ff1e`, Ruby 4.0.9 without YJIT,
+Rust 1.99.0, x86-64 Linux on Ryzen 9 7900X (milliseconds of thread CPU time):
+
+| Mode | Width 128 before | Width 128 after | Width 8,192 before | Width 8,192 after |
+| --- | ---: | ---: | ---: | ---: |
+| Plain | 0.135 | 0.121 | 9.900 | 9.316 |
+| Closed | 0.135 | 0.124 | 10.510 | 10.526 |
+| References | 0.299 | 0.258 | 26.718 | 23.566 |
+| Nested | 0.346 | 0.333 | 27.899 | 28.194 |
+| Shared | 0.190 | 0.166 | 12.137 | 9.474 |
+
+Reported program bytes were identical in every comparison. The wide plain,
+reference and shared cases improve by 5.9%, 11.8% and 21.9%; closed and nested
+controls do not show an improvement in this run. These are local measurements,
+with host scheduling/frequency variation, rather than portable guarantees.
+A shared-case repeat with extension order reversed measured 11.025 ms before
+and 10.439 ms after (5.3%); the size of the improvement varies between runs.
+
+Rust regressions cover clearing prior guarded/projection state when candidates
+disappear and retaining ordinary reuse alongside an unrelated cycle. Existing
+native differential tests cover guarded recursive and dynamic bindings, ordered
+diagnostics, annotations and VM fallback. Duplication review found intentional
+cached-VM benchmark setup shared with `native_scope_compile.rb` and existing
+scope-test setup; production admission rules are centralized. Ruby/VM evaluation
+remains an independent implementation checked by differential tests.
+
 ## Native decoded-content scratch
 
 `native_content_scratch.rb` verifies complete VM error parity and direct native

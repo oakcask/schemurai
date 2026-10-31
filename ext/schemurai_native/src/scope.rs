@@ -16,6 +16,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn acyclic_candidates_do_not_require_guards_for_unrelated_cycles() {
+        let reference = |target| {
+            Op::Ref(Reference {
+                target,
+                kind: ReferenceKind::Static,
+            })
+        };
+        let mut engine = Engine {
+            nodes: vec![
+                vec![Op::Boolean(true)],
+                vec![reference(1)],
+                vec![reference(0)],
+                vec![reference(0)],
+            ],
+            ..Engine::default()
+        };
+        engine.compile_memoization();
+        assert_eq!(engine.memoizable, [true, false, false, false]);
+        assert_eq!(engine.memo_guarded, [false; 4]);
+        assert_eq!(engine.memo_guard_sources, [false; 4]);
+    }
+
+    #[test]
+    fn clears_prior_guard_analysis_when_no_reuse_positions_remain() {
+        let mut engine = Engine {
+            nodes: (0..4)
+                .map(|_| {
+                    vec![Op::Ref(Reference {
+                        target: 0,
+                        kind: ReferenceKind::Static,
+                    })]
+                })
+                .collect(),
+            ..Engine::default()
+        };
+        engine.compile_memoization();
+        assert!(engine.memo_guarded[0]);
+        assert!(engine.memo_scope_projection.memory_usage() > 0);
+        engine.nodes = vec![vec![Op::Boolean(true)], vec![Op::Boolean(false)]];
+        engine.compile_memoization();
+        assert_eq!(engine.memoizable, [false, false]);
+        assert_eq!(engine.memo_guarded, [false, false]);
+        assert_eq!(engine.memo_guard_sources, [false, false]);
+        assert_eq!(engine.memo_scope_projection.memory_usage(), 0);
+    }
+
+    #[test]
     fn requires_guard_histories_for_cycles_reached_through_dynamic_overrides() {
         let reference = |target, kind| Op::Ref(Reference { target, kind });
         let mut engine = Engine {
