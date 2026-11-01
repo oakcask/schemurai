@@ -33,7 +33,11 @@ pub(super) struct PatternGroup {
     all: u64,
 }
 impl PatternGroup {
-    pub(super) fn compile(names: &[Value], patterns: &[(Pattern, usize)]) -> Option<Self> {
+    pub(super) fn compile(
+        vm: &Ruby,
+        names: &[Value],
+        patterns: &[(Pattern, usize)],
+    ) -> Option<Self> {
         if !(2..=64).contains(&patterns.len())
             || !patterns
                 .iter()
@@ -46,7 +50,7 @@ impl PatternGroup {
         let sources: Option<Vec<_>> = names
             .iter()
             .map(|&name| {
-                std::str::from_utf8(unsafe { string_bytes(name) })
+                std::str::from_utf8(unsafe { vm.string(name) })
                     .ok()
                     .and_then(translate)
             })
@@ -65,14 +69,14 @@ impl PatternGroup {
         let all = u64::MAX >> (64 - patterns.len());
         Some(Self { dfa, all })
     }
-    pub(super) fn matches(&self, value: Value) -> Option<u64> {
+    pub(super) fn matches(&self, vm: &Ruby, value: Value) -> Option<u64> {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
         if encoding == ENCODING_OTHER {
             return None;
         }
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { vm.bytes(data, len) };
         if !valid_encoding(bytes, encoding) {
             return None;
         }
@@ -104,6 +108,7 @@ impl Pattern {
     // still checked on every element, including non-string instances.
     pub(super) fn visit_invalid_items(
         &self,
+        vm: &Ruby,
         caches: &Caches,
         required: i32,
         values: &[Value],
@@ -111,6 +116,7 @@ impl Pattern {
     ) -> Verdict {
         match &self.matcher {
             Matcher::Dfa(dfa) => scan_items(
+                vm,
                 required,
                 values,
                 invalid,
@@ -123,6 +129,7 @@ impl Pattern {
                 |value| caches.ruby_match(self.source, value, true),
             ),
             Matcher::Compiled { regex, index } => scan_items(
+                vm,
                 required,
                 values,
                 invalid,
@@ -130,6 +137,7 @@ impl Pattern {
                 |value| caches.ruby_match(self.source, value, true),
             ),
             Matcher::Unsupported => scan_items(
+                vm,
                 required,
                 values,
                 invalid,
@@ -147,20 +155,20 @@ impl Pattern {
         }
     }
 
-    pub(super) fn compile(value: Value, cache_count: &mut usize) -> Self {
+    pub(super) fn compile(vm: &Ruby, value: Value, cache_count: &mut usize) -> Self {
         Self {
             source: value,
-            matcher: Matcher::compile(value, cache_count),
+            matcher: Matcher::compile(vm, value, cache_count),
         }
     }
 
-    pub(super) fn eval(&self, caches: &Caches, value: Value) -> Verdict {
-        self.eval_value(caches, value, false)
+    pub(super) fn eval(&self, vm: &Ruby, caches: &Caches, value: Value) -> Verdict {
+        self.eval_value(vm, caches, value, false)
     }
-    pub(super) fn assertion(&self, caches: &Caches, value: Value) -> Verdict {
-        self.eval_value(caches, value, true)
+    pub(super) fn assertion(&self, vm: &Ruby, caches: &Caches, value: Value) -> Verdict {
+        self.eval_value(vm, caches, value, true)
     }
-    fn eval_value(&self, caches: &Caches, value: Value, assertion: bool) -> Verdict {
+    fn eval_value(&self, vm: &Ruby, caches: &Caches, value: Value, assertion: bool) -> Verdict {
         if matches!(self.matcher, Matcher::Unsupported) {
             return caches.ruby_match(self.source, value, assertion);
         }
@@ -170,7 +178,7 @@ impl Pattern {
         if encoding == ENCODING_OTHER {
             return caches.ruby_match(self.source, value, assertion);
         }
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { vm.bytes(data, len) };
         let result = self.matcher.eval_bytes(caches, bytes, encoding);
         if result == Unsupported {
             caches.ruby_match(self.source, value, assertion)
@@ -199,7 +207,7 @@ impl Pattern {
 }
 
 impl Matcher {
-    fn compile(value: Value, cache_count: &mut usize) -> Self {
+    fn compile(vm: &Ruby, value: Value, cache_count: &mut usize) -> Self {
         if unsafe { sn_kind(value) } != TYPE_STRING {
             return Self::Unsupported;
         }
@@ -209,7 +217,7 @@ impl Matcher {
         if encoding == ENCODING_OTHER {
             return Self::Unsupported;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let bytes = unsafe { vm.bytes(data, len) };
         if encoding == ENCODING_ASCII && !bytes.is_ascii() {
             return Self::Unsupported;
         }
@@ -294,6 +302,7 @@ fn valid_encoding(bytes: &[u8], encoding: i32) -> bool {
 }
 
 fn scan_items(
+    vm: &Ruby,
     required: i32,
     values: &[Value],
     mut invalid: impl FnMut(usize, Value) -> Verdict,
@@ -323,7 +332,7 @@ fn scan_items(
         let result = if encoding == ENCODING_OTHER {
             Unsupported
         } else {
-            let bytes = unsafe { byte_view(data, len) };
+            let bytes = unsafe { vm.bytes(data, len) };
             if valid_encoding(bytes, encoding) {
                 matches(bytes)
             } else {

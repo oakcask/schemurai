@@ -61,6 +61,37 @@ RSpec.describe "native VALUE execution" do
     expect { program_class.new(root, compiler, false, false) }.to raise_error { |raised| expect(raised).to equal(error) }
   end
 
+  it "blocks generic Ractor publication during compilation and shares completed hidden operands" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      Schemurai.compile(true, backend: :native)
+      evaluator = Schemurai.compile({"const" => "original"}, backend: :vm).instance_variable_get(:@evaluator)
+      root = evaluator.instance_variable_get(:@root).dup
+      compiler = evaluator.instance_variable_get(:@compiler)
+      program = Schemurai.const_get(:Native)::Program.allocate
+      payload = nil
+      blocked = false
+      root.define_singleton_method(:code) do
+        begin
+          Ractor.make_shareable(program)
+        rescue Ractor::Error
+          blocked = true
+        end
+        payload = String.new("late mutable operand")
+        super().dup.tap { |code| code[2] = payload }
+      end
+      program.send(:initialize, root, compiler, false, false)
+      abort "building Program was shareable" unless blocked
+      abort "mutable hidden operand was published" if Ractor.shareable?(program)
+      Ractor.make_shareable(program)
+      abort "hidden operand was not frozen" unless payload.frozen?
+      worker = Ractor.new(program) { |shared| shared.valid?("late mutable operand") }
+      abort "published Program failed" unless (worker.respond_to?(:value) ? worker.value : worker.take)
+    RUBY
+    output, status = Open3.capture2e(RbConfig.ruby, "-W0", "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect([status.success?, output]).to eq([true, ""])
+  end
+
   it "rejects unknown internal instructions before evaluation and permits initialization retry" do # rubocop:disable RSpec/ExampleLength
     Schemurai.compile(true, backend: :native)
     graph = Schemurai.const_get(:Internal)::SchemaGraph.new
@@ -5141,6 +5172,53 @@ RSpec.describe "native VALUE execution" do
     expect(native.validate({}).errors).to be_empty
   end
 
+  it "keeps suspended pointer roots across input mutation and GC in independent Ractors" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      Schemurai.compile(true, backend: :native)
+      helper = Schemurai.const_get(:Internal)::JsonPointer
+      class << helper
+        alias_method :escape_before_root_snapshot_test, :escape
+        def escape(segment)
+          if (input = Ractor.current[:pointer_input])
+            Ractor.current[:pointer_input] = nil
+            input.clear
+            if Ractor.current[:compact_pointer_roots]
+              GC.verify_compaction_references(double_heap: true, toward: :empty)
+            else
+              GC.start
+            end
+          end
+          escape_before_root_snapshot_test(segment)
+        end
+      end
+      schema = {"additionalProperties" => {"additionalProperties" => false}}
+      registry = Schemurai::SchemaRegistry.new(schemas: {"urn:roots" => schema}, backend: :native).make_shareable
+      # Use one compaction verifier; concurrent verifiers can crash CRuby itself.
+      workers = Array.new(2) do |index|
+        Ractor.new(registry, index) do |shared, index|
+          Ractor.current[:compact_pointer_roots] = index.zero?
+          validator = shared.validator_for("urn:roots")
+          runner = validator.instance_variable_get(:@evaluator).instance_variable_get(:@program)
+          3.times do
+            input = {"é".encode(Encoding::ISO_8859_1) => {"à".encode(Encoding::ISO_8859_1) => 1}}
+            Ractor.current[:pointer_input] = input
+            runner.diagnostics(input)
+            abort "pointer callback was not reached" unless Ractor.current[:pointer_input].nil?
+            abort "runner roots leaked into another invocation" unless validator.valid?({})
+          end
+          true
+        end
+      end
+      collector = Ractor.new { 20.times { GC.start }; true }
+      [*workers, collector].each do |worker|
+        abort "worker failed" unless (worker.respond_to?(:value) ? worker.value : worker.take)
+      end
+    RUBY
+    output, status = Open3.capture2e(RbConfig.ruby, "-W0", "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect([status.success?, output]).to eq([true, ""])
+  end
+
   it "returns independently mutable encoded paths for repeated errors" do
     schema = {"additionalProperties" => {"allOf" => [false, false]}}
     key = "é".encode(Encoding::ISO_8859_1)
@@ -6827,6 +6905,38 @@ RSpec.describe "native VALUE execution" do
     expect(program.valid?({"id" => 1.0})).to be(true)
     expect(program.diagnostics({"id" => 1})).to eq([])
     expect(program.valid?({"id" => 2})).to be(false)
+  end
+
+  it "protects exception classification callbacks and permits constructor retry" do # rubocop:disable RSpec/ExampleLength
+    script = <<~RUBY
+      require "schemurai"
+      Schemurai.compile(true, backend: :native)
+      graph = Schemurai.const_get(:Internal)::SchemaGraph.new
+      compiler = Schemurai.const_get(:VM)::Compiler.new(graph)
+      root = compiler.compile(graph.compile({"$ref" => "#/$defs/value", "$defs" => {"value" => {"type" => "integer"}}}))
+      program = Schemurai.const_get(:Native)::Program.allocate
+      initial = RuntimeError.new("resolve")
+      compiler.define_singleton_method(:resolve) { |*| raise initial }
+      klass = Schemurai.send(:remove_const, :ResolutionError)
+      error = RuntimeError.new("classify")
+      Schemurai.define_singleton_method(:const_missing) do |name|
+        super(name) unless name == :ResolutionError
+        GC.verify_compaction_references(double_heap: true, toward: :empty)
+        raise error
+      end
+      begin
+        program.send(:initialize, root, compiler, false, false)
+        abort "classification did not raise"
+      rescue RuntimeError => raised
+        abort "classification exception lost" unless raised.equal?(error)
+      end
+      Schemurai.const_set(:ResolutionError, klass)
+      compiler.singleton_class.send(:remove_method, :resolve)
+      program.send(:initialize, root, compiler, false, false)
+      abort "retry failed" unless program.valid?(1)
+    RUBY
+    output, status = Open3.capture2e(RbConfig.ruby, "-Ilib", "-Iext/schemurai_native", "-e", script)
+    expect([status.success?, output]).to eq([true, ""])
   end
 
   it "releases roots after compilation exceptions and allows initialization to retry" do # rubocop:disable RSpec/ExampleLength

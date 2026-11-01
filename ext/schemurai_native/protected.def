@@ -1,0 +1,8 @@
+SN_PROTECTED(sn_field, get_field)
+SN_PROTECTED(sn_pairs, pairs)
+SN_PROTECTED(sn_key_copy, key_copy)
+SN_PROTECTED(sn_resolve, resolve_reference)
+SN_PROTECTED(sn_resolution_error, resolution_error)
+SN_PROTECTED(sn_anchor_names, anchor_names)
+SN_PROTECTED(sn_resource_program, resource_program)
+SN_PROTECTED(sn_anchor_program, anchor_program)

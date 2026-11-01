@@ -95,8 +95,9 @@ impl Admission {
             self.bits.fill(0);
             self.admissions = 0;
         }
-        let hash =
-            mix(node as u64 ^ (value as u64).rotate_left(21) ^ (depth as u64).rotate_left(42));
+        let hash = mix(node as u64
+            ^ (value.bits() as u64).rotate_left(21)
+            ^ (depth as u64).rotate_left(42));
         let a = hash as usize & 65535;
         let b = (hash >> 32) as usize & 65535;
         let seen =
@@ -245,7 +246,7 @@ impl Memo {
             let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names);
             signature.push(Some(pairs.len()));
             for (source, value) in pairs {
-                signature.extend([Some(source), Some(value)]);
+                signature.extend([Some(source), Some(value.bits())]);
             }
             let first_binding = signature.len();
             signature.resize(first_binding + names, None);
@@ -357,15 +358,16 @@ impl Memo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn approximate_admission_bounds_density_and_resets_for_later_positions() {
         let mut admission = Admission::default();
         assert!(admission.bits.is_empty());
-        assert!(!admission.admit((1, 2, 3)));
-        assert!(admission.admit((1, 2, 3)));
+        assert!(!admission.admit((1, v(2), 3)));
+        assert!(admission.admit((1, v(2), 3)));
         for value in 0..MAX_ENTRIES * 3 {
-            admission.admit((4, value, 5));
+            admission.admit((4, v(value), 5));
             assert!(admission.admissions <= MAX_ENTRIES);
             assert!(
                 admission
@@ -378,8 +380,8 @@ mod tests {
         }
         assert_eq!(admission.bits.len(), 1024);
         admission.admissions = MAX_ENTRIES;
-        assert!(!admission.admit((1, 2, 3)));
-        assert!(admission.admit((1, 2, 3)));
+        assert!(!admission.admit((1, v(2), 3)));
+        assert!(admission.admit((1, v(2), 3)));
         assert_eq!(admission.admissions, 1);
     }
 
@@ -402,7 +404,7 @@ mod tests {
                 };
                 3
             ],
-            resources: HashMap::from([(1, 0), (2, 1), (42, 2)]),
+            resources: HashMap::from([(v(1), 0), (v(2), 1), (v(42), 2)]),
             ..Engine::default()
         };
         let frame = |source, value| RefFrame {
@@ -410,50 +412,50 @@ mod tests {
             value,
             parent: None,
         };
-        let active = frame(1, 42);
-        let equivalent = frame(1, 42);
-        let other_source = frame(2, 42);
-        let other_value = frame(1, 43);
+        let active = frame(1, v(42));
+        let equivalent = frame(1, v(42));
+        let other_source = frame(2, v(42));
+        let other_value = frame(1, v(43));
         let context = |active| scope::Context {
             active: Some(active),
             scope: None,
         };
         let key = memo
-            .key_without_instance_proof(&engine, 0, 42, 8, context(&active))
+            .key_without_instance_proof(&engine, 0, v(42), 8, context(&active))
             .unwrap();
         assert_eq!(
-            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&equivalent)),
+            memo.key_without_instance_proof(&engine, 0, v(42), 8, context(&equivalent)),
             Some(key)
         );
         assert_ne!(
-            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&other_source)),
+            memo.key_without_instance_proof(&engine, 0, v(42), 8, context(&other_source)),
             Some(key)
         );
         assert_ne!(
-            memo.key_without_instance_proof(&engine, 0, 43, 8, context(&other_value)),
+            memo.key_without_instance_proof(&engine, 0, v(43), 8, context(&other_value)),
             Some(key)
         );
         assert_ne!(
-            memo.key_without_instance_proof(&engine, 0, 42, 9, context(&active)),
+            memo.key_without_instance_proof(&engine, 0, v(42), 9, context(&active)),
             Some(key)
         );
         let outer = scope::ScopeFrame {
-            resource: 1,
+            resource: v(1),
             parent: None,
             primary_binding: None,
         };
         let inner = scope::ScopeFrame {
-            resource: 2,
+            resource: v(2),
             parent: Some(&outer),
             primary_binding: None,
         };
         let swapped_outer = scope::ScopeFrame {
-            resource: 2,
+            resource: v(2),
             parent: None,
             primary_binding: None,
         };
         let swapped_inner = scope::ScopeFrame {
-            resource: 1,
+            resource: v(1),
             parent: Some(&swapped_outer),
             primary_binding: None,
         };
@@ -461,7 +463,7 @@ mod tests {
             memo.key_without_instance_proof(
                 &engine,
                 0,
-                7,
+                v(7),
                 8,
                 scope::Context {
                     scope: Some(&inner),
@@ -471,7 +473,7 @@ mod tests {
             memo.key_without_instance_proof(
                 &engine,
                 0,
-                7,
+                v(7),
                 8,
                 scope::Context {
                     scope: Some(&swapped_inner),
@@ -482,7 +484,7 @@ mod tests {
         // The pair count separates guard membership from effective scope
         // bindings even when their numeric handles coincide.
         let a = scope::ScopeFrame {
-            resource: 42,
+            resource: v(42),
             parent: Some(&outer),
             primary_binding: None,
         };
@@ -491,7 +493,7 @@ mod tests {
             memo.key_without_instance_proof(
                 &engine,
                 0,
-                7,
+                v(7),
                 8,
                 scope::Context {
                     active: None,
@@ -506,7 +508,7 @@ mod tests {
             memo.key_with_instance_proof(
                 &engine,
                 0,
-                42,
+                v(42),
                 8,
                 other,
                 (false, |_| true, &budget::Budget::default())
@@ -514,7 +516,7 @@ mod tests {
             memo.key_with_instance_proof(
                 &engine,
                 0,
-                42,
+                v(42),
                 8,
                 empty,
                 (false, |_| true, &budget::Budget::default())
@@ -524,7 +526,7 @@ mod tests {
             memo.key_with_instance_proof(
                 &engine,
                 0,
-                42,
+                v(42),
                 8,
                 other,
                 (false, |_| false, &budget::Budget::default())
@@ -532,7 +534,7 @@ mod tests {
             memo.key_with_instance_proof(
                 &engine,
                 0,
-                42,
+                v(42),
                 8,
                 empty,
                 (false, |_| false, &budget::Budget::default())
@@ -540,17 +542,17 @@ mod tests {
         );
         let a = RefFrame {
             source: 1,
-            value: 42,
+            value: v(42),
             parent: Some(&other_source),
         };
         let b = RefFrame {
             source: 2,
-            value: 42,
+            value: v(42),
             parent: Some(&active),
         };
         assert_eq!(
-            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&a)),
-            memo.key_without_instance_proof(&engine, 0, 42, 8, context(&b)),
+            memo.key_without_instance_proof(&engine, 0, v(42), 8, context(&a)),
+            memo.key_without_instance_proof(&engine, 0, v(42), 8, context(&b)),
         );
     }
 
@@ -562,7 +564,12 @@ mod tests {
             memoizable: vec![true],
             memo_contextual: vec![true],
             anchor_tables: vec![vec![], vec![]],
-            dynamic_bindings: HashMap::from([((1, 0), 7), ((2, 0), 8), ((2, 1), 9), ((3, 0), 7)]),
+            dynamic_bindings: HashMap::from([
+                ((v(1), 0), 7),
+                ((v(2), 0), 8),
+                ((v(2), 1), 9),
+                ((v(3), 0), 7),
+            ]),
             ..Engine::default()
         };
         let frame = |resource, parent| scope::ScopeFrame {
@@ -570,16 +577,16 @@ mod tests {
             parent,
             primary_binding: None,
         };
-        let outer = frame(1, None);
-        let inner = frame(2, Some(&outer));
-        let equivalent_outer = frame(3, None);
-        let equivalent_inner = frame(2, Some(&equivalent_outer));
-        let different = frame(2, None);
+        let outer = frame(v(1), None);
+        let inner = frame(v(2), Some(&outer));
+        let equivalent_outer = frame(v(3), None);
+        let equivalent_inner = frame(v(2), Some(&equivalent_outer));
+        let different = frame(v(2), None);
         let key = |frame| {
             memo.key_without_instance_proof(
                 &engine,
                 0,
-                10,
+                v(10),
                 2,
                 scope::Context {
                     scope: Some(frame),
@@ -609,8 +616,13 @@ mod tests {
             memo_guard_sources: vec![false; 3],
             memo_scope_projection: memo_scope::Projection::compile(&edges, &parents, 3),
             anchor_tables: vec![vec![], vec![]],
-            dynamic_bindings: HashMap::from([((1, 0), 7), ((2, 0), 7), ((1, 1), 8), ((2, 1), 9)]),
-            resources: HashMap::from([(1, 0), (2, 1)]),
+            dynamic_bindings: HashMap::from([
+                ((v(1), 0), 7),
+                ((v(2), 0), 7),
+                ((v(1), 1), 8),
+                ((v(2), 1), 9),
+            ]),
+            resources: HashMap::from([(v(1), 0), (v(2), 1)]),
             metadata: vec![
                 scope::Metadata {
                     recursive_anchor: true,
@@ -626,13 +638,13 @@ mod tests {
             parent: None,
             primary_binding: None,
         };
-        let a = frame(1);
-        let b = frame(2);
+        let a = frame(v(1));
+        let b = frame(v(2));
         let key = |engine: &Engine, node, frame| {
             memo.key_without_instance_proof(
                 engine,
                 node,
-                10,
+                v(10),
                 2,
                 scope::Context {
                     scope: Some(frame),
@@ -645,7 +657,7 @@ mod tests {
         assert_ne!(key(&engine, 1, &a), key(&engine, 1, &b));
         // Neither dynamic nor recursive dispatch can affect node 2.
         assert_eq!(key(&engine, 2, &a), key(&engine, 2, &b));
-        engine.dynamic_bindings.insert((2, 0), 8);
+        engine.dynamic_bindings.insert((v(2), 0), 8);
         assert_ne!(key(&engine, 0, &a), key(&engine, 0, &b));
     }
 
@@ -656,16 +668,16 @@ mod tests {
             memoizable: vec![true; 3],
             memo_contextual: vec![true, true, false],
             anchor_tables: vec![vec![], vec![]],
-            dynamic_bindings: HashMap::from([((1, 0), 0), ((2, 0), 1)]),
+            dynamic_bindings: HashMap::from([((v(1), 0), 0), ((v(2), 0), 1)]),
             ..Engine::default()
         };
         let first = scope::ScopeFrame {
-            resource: 1,
+            resource: v(1),
             parent: None,
             primary_binding: None,
         };
         let second = scope::ScopeFrame {
-            resource: 2,
+            resource: v(2),
             parent: None,
             primary_binding: None,
         };
@@ -675,30 +687,30 @@ mod tests {
         };
         let memo = Memo::default();
         let a = memo
-            .key_without_instance_proof(&engine, 1, 10, 2, context(&first))
+            .key_without_instance_proof(&engine, 1, v(10), 2, context(&first))
             .unwrap();
         let b = memo
-            .key_without_instance_proof(&engine, 0, 10, 2, context(&second))
+            .key_without_instance_proof(&engine, 0, v(10), 2, context(&second))
             .unwrap();
         assert_ne!(a, b);
         assert_eq!(
-            memo.key_without_instance_proof(&engine, 2, 10, 2, context(&first)),
-            Some((2, 10, 2))
+            memo.key_without_instance_proof(&engine, 2, v(10), 2, context(&first)),
+            Some((2, v(10), 2))
         );
         assert_eq!(
-            memo.key_without_instance_proof(&engine, 2, 10, 2, context(&second)),
-            Some((2, 10, 2))
+            memo.key_without_instance_proof(&engine, 2, v(10), 2, context(&second)),
+            Some((2, v(10), 2))
         );
         let exhausted = Memo::default();
         exhausted.scopes.borrow_mut().next_id = usize::MAX / 2;
         assert!(
             exhausted
-                .key_without_instance_proof(&engine, 0, 10, 2, context(&first))
+                .key_without_instance_proof(&engine, 0, v(10), 2, context(&first))
                 .is_none()
         );
         assert_eq!(
-            exhausted.key_without_instance_proof(&engine, 2, 10, 2, context(&first)),
-            Some((2, 10, 2))
+            exhausted.key_without_instance_proof(&engine, 2, v(10), 2, context(&first)),
+            Some((2, v(10), 2))
         );
     }
 
@@ -716,8 +728,8 @@ mod tests {
         assert_ne!(old, new);
         assert_eq!(scopes.intern(vec![Some(0)]), Some(new));
         let memo = Memo::default();
-        memo.record_verdict((old, 2, 3), Invalid);
-        assert_eq!(memo.verdict((new, 2, 3)), None);
+        memo.record_verdict((old, v(2), 3), Invalid);
+        assert_eq!(memo.verdict((new, v(2), 3)), None);
     }
 
     #[test]
@@ -737,7 +749,7 @@ mod tests {
     #[test]
     fn separates_annotation_policies_and_returns_independent_coverage() {
         let memo = Memo::default();
-        let key = (1, 2, 3);
+        let key = (1, v(2), 3);
         let mut coverage = Tracked::new(Valid);
         coverage.item(65);
         memo.record_diagnostic_success(key, true, &coverage);
@@ -762,13 +774,13 @@ mod tests {
     fn admits_new_results_after_entry_limits() {
         let memo = Memo::default();
         for node in 0..MAX_ENTRIES * 3 {
-            memo.record_verdict((node, 2, 3), Valid);
-            memo.record_tracked((node, 2, 3), &Tracked::new(Valid));
+            memo.record_verdict((node, v(2), 3), Valid);
+            memo.record_tracked((node, v(2), 3), &Tracked::new(Valid));
         }
-        assert!(memo.verdict((0, 2, 3)).is_none());
-        assert_eq!(memo.verdict((MAX_ENTRIES * 3 - 1, 2, 3)), Some(Valid));
-        assert!(memo.tracked((0, 2, 3)).is_none());
-        assert!(memo.tracked((MAX_ENTRIES * 3 - 1, 2, 3)).is_some());
+        assert!(memo.verdict((0, v(2), 3)).is_none());
+        assert_eq!(memo.verdict((MAX_ENTRIES * 3 - 1, v(2), 3)), Some(Valid));
+        assert!(memo.tracked((0, v(2), 3)).is_none());
+        assert!(memo.tracked((MAX_ENTRIES * 3 - 1, v(2), 3)).is_some());
         assert_eq!(memo.verdicts.borrow().results.len(), MAX_ENTRIES);
         assert_eq!(memo.coverage.borrow().results.len(), MAX_ENTRIES * 2);
         assert_eq!(memo.coverage.borrow().order.len(), MAX_ENTRIES * 2);
@@ -777,16 +789,16 @@ mod tests {
     #[test]
     fn skips_oversized_results_without_evicting_or_charging_duplicates() {
         let memo = Memo::default();
-        let key = (1, 2, 3);
+        let key = (1, v(2), 3);
         let mut small = Tracked::new(Valid);
         small.item(0);
         memo.record_tracked(key, &small);
         memo.record_tracked(key, &small);
         let mut huge = Tracked::new(Valid);
         huge.item(MAX_ANNOTATION_SLOTS * 64);
-        memo.record_diagnostic_success((2, 2, 3), true, &huge);
+        memo.record_diagnostic_success((2, v(2), 3), true, &huge);
         assert!(memo.tracked(key).is_some());
-        assert!(memo.diagnostic_success((2, 2, 3), true).is_none());
+        assert!(memo.diagnostic_success((2, v(2), 3), true).is_none());
         assert_eq!(memo.coverage.borrow().slots, small.memo_slots());
         assert_eq!(memo.coverage.borrow().order.len(), 1);
     }
@@ -796,16 +808,16 @@ mod tests {
         let memo = Memo::default();
         let mut large = Tracked::new(Valid);
         large.item(MAX_ANNOTATION_SLOTS * 64 - 1);
-        memo.record_tracked((1, 2, 3), &large);
-        assert!(memo.tracked((1, 2, 3)).is_some());
+        memo.record_tracked((1, v(2), 3), &large);
+        assert!(memo.tracked((1, v(2), 3)).is_some());
         let mut small = Tracked::new(Valid);
         small.item(0);
-        memo.record_diagnostic_success((2, 2, 3), true, &small);
-        assert!(memo.diagnostic_success((2, 2, 3), true).is_some());
-        assert!(memo.tracked((1, 2, 3)).is_none());
+        memo.record_diagnostic_success((2, v(2), 3), true, &small);
+        assert!(memo.diagnostic_success((2, v(2), 3), true).is_some());
+        assert!(memo.tracked((1, v(2), 3)).is_none());
         assert_eq!(memo.coverage.borrow().slots, small.memo_slots());
-        memo.record_diagnostic_success((3, 2, 3), false, &Tracked::new(Valid));
-        assert!(memo.diagnostic_success((3, 2, 3), false).is_some());
+        memo.record_diagnostic_success((3, v(2), 3), false, &Tracked::new(Valid));
+        assert!(memo.diagnostic_success((3, v(2), 3), false).is_some());
     }
 }
 

@@ -2,7 +2,7 @@
 //! Stop before any uncertain block so the ordinary evaluator retains ordering.
 use super::Value;
 
-pub(super) fn valid_prefix(values: &[Value], min: i64, max: i64, fixnum_flag: Value) -> usize {
+pub(super) fn valid_prefix(values: &[Value], min: i64, max: i64, fixnum_flag: usize) -> usize {
     if fixnum_flag != 1 || values.len() < 16 {
         return 0;
     }
@@ -92,7 +92,7 @@ mod tests {
     use super::*;
 
     fn tag(value: i64) -> Value {
-        ((value << 1) | 1) as Value
+        super::super::ruby::test_value(((value << 1) | 1) as usize)
     }
 
     #[test]
@@ -100,7 +100,14 @@ mod tests {
         for len in 0..65 {
             let original: Vec<_> = (0..len).map(|at| tag((at % 33) as i64 - 16)).collect();
             for at in 0..len {
-                for value in [0, 2, tag(-17), tag(17), tag(-(1 << 62)), tag((1 << 62) - 1)] {
+                for value in [
+                    super::super::ruby::test_value(0),
+                    super::super::ruby::test_value(2),
+                    tag(-17),
+                    tag(17),
+                    tag(-(1 << 62)),
+                    tag((1 << 62) - 1),
+                ] {
                     let mut values = original.clone();
                     values[at] = value;
                     let prefix = valid_prefix(&values, -16, 16, 1);

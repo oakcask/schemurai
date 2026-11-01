@@ -25,7 +25,7 @@ VALUE sn_runtime_ordinal(size_t ordinal) {
  * fallback. Its callback below only reads handles under the GVL. */
 extern int rb_hash_stlike_foreach(VALUE, st_foreach_callback_func *, st_data_t);
 #endif
-typedef struct { void *engine; const void *roots; VALUE program; int compiling; } holder;
+typedef struct { void *engine; const void *roots; VALUE construction_guard, program; int compiling; } holder;
 extern void *sn_new(void);
 extern int sn_compile(void *, VALUE, VALUE, int, int, int, VALUE *);
 extern int sn_valid(const void *, const void *, size_t, VALUE, size_t);
@@ -52,6 +52,10 @@ extern size_t sn_caches_size(const void *);
 extern void sn_caches_runtime(const void *, const void *);
 extern int sn_caches_pending(const void *, VALUE *, VALUE *, int *);
 extern void sn_caches_mark(const void *);
+extern void *sn_caches_snapshot(const void *);
+extern void sn_root_snapshot_mark(const void *);
+extern size_t sn_root_snapshot_size(const void *);
+extern void sn_root_snapshot_free(void *);
 extern void sn_caches_begin(const void *);
 extern void sn_caches_observe(const void *);
 extern int sn_caches_take_reorder(const void *);
@@ -86,6 +90,7 @@ extern size_t sn_size(const void *);
 
 static void mark(void *ptr) {
     holder *h = ptr;
+    rb_gc_mark(h->construction_guard);
     rb_gc_mark(h->program);
     if (h->roots) sn_roots_mark(h->roots);
 }
@@ -99,17 +104,27 @@ static size_t size(const void *ptr) {
     return sizeof(*h) + (h->roots ? sn_roots_size(h->roots) : 0)
         + (h->engine ? (h->compiling ? sn_engine_header_size() : sn_size(h->engine)) : 0);
 }
+/* A hidden, intrinsically unshareable object blocks the generic Ractor API
+ * while Ruby callbacks can still append native operands. TypedData type
+ * metadata is immutable; removing the guard after success publishes readiness. */
+static const rb_data_type_t construction_guard_type = {
+    "Schemurai::Native::ProgramConstruction", {NULL, NULL, NULL, NULL, {NULL}},
+    NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY
+};
 static const rb_data_type_t engine_type = {
     "Schemurai::Native::Program", {mark, release, size, NULL, {NULL}},
     NULL, NULL, RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_FROZEN_SHAREABLE
 };
 static VALUE allocate(VALUE klass) {
+    VALUE guard = rb_data_typed_object_wrap(rb_cObject, NULL, &construction_guard_type);
     holder *h;
     VALUE obj = TypedData_Make_Struct(klass, holder, &engine_type, h);
+    h->construction_guard = guard;
     h->engine = NULL;
     h->roots = NULL;
     h->compiling = 0;
     h->program = Qnil;
+    RB_GC_GUARD(guard);
     return obj;
 }
 static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format, VALUE content) {
@@ -133,6 +148,7 @@ static VALUE initialize(VALUE self, VALUE program, VALUE compiler, VALUE format,
         if (status == SN_VERDICT_UNSUPPORTED) rb_raise(rb_eRuntimeError, "native compiler encountered an unsupported instruction or operand");
         rb_raise(rb_eRuntimeError, "native compiler panicked");
     }
+    h->construction_guard = Qnil;
     return self;
 }
 static void check_evaluation_status(int status, const char *panic_message) {
@@ -161,12 +177,28 @@ typedef struct {
     VALUE regexps, limited_regexps, pointers, messages, frames;
     VALUE number_state, limited_number_state, string_state, limited_string_state;
     void *caches;
+    void *root_snapshot;
     size_t root;
     int busy, callback_context, scope_owner, closed_limited;
     int callback_kind, callback_flags;
     native_limits active_limits;
     st_table *matches, *frame_indices;
 } runner_holder;
+/* Replace only between native passes. The old immutable roots protect cache
+ * handles while Rust constructs the replacement; neither operation runs Ruby. */
+static void refresh_root_snapshot(runner_holder *runner) {
+    void *next = sn_caches_snapshot(runner->caches);
+    if (!next) rb_raise(rb_eRuntimeError, "native root snapshot has an active borrow");
+    void *previous = runner->root_snapshot;
+    runner->root_snapshot = next;
+    sn_root_snapshot_free(previous);
+}
+static void clear_native_caches(runner_holder *runner) {
+    sn_caches_begin(runner->caches);
+    void *previous = runner->root_snapshot;
+    runner->root_snapshot = NULL;
+    sn_root_snapshot_free(previous);
+}
 static int mark_match(st_data_t key, st_data_t value, st_data_t context) {
     rb_gc_mark((VALUE)key);
     return ST_CONTINUE;
@@ -218,11 +250,13 @@ static void runner_mark(void *ptr) {
     rb_gc_mark(r->limited_string_state);
     rb_gc_mark(r->limited_number_state);
     if (r->caches) sn_caches_mark(r->caches);
+    if (r->root_snapshot) sn_root_snapshot_mark(r->root_snapshot);
     if (r->matches) st_foreach(r->matches, mark_operation, 0);
 }
 static void runner_release(void *ptr) {
     runner_holder *h = ptr;
     if (h->caches) sn_caches_free(h->caches);
+    sn_root_snapshot_free(h->root_snapshot);
     if (h->frame_indices) st_free_table(h->frame_indices);
     if (h->matches) {
         st_foreach(h->matches, release_operation, 0);
@@ -242,6 +276,7 @@ static int operation_size(st_data_t key, st_data_t value, st_data_t context) {
 static size_t runner_size(const void *ptr) {
     const runner_holder *h = ptr;
     size_t bytes = sizeof(*h) + (h->caches ? sn_caches_size(h->caches) : 0);
+    if (h->root_snapshot) bytes += sn_root_snapshot_size(h->root_snapshot);
     if (h->frame_indices) bytes += st_memsize(h->frame_indices);
     if (h->matches) {
         bytes += st_memsize(h->matches);
@@ -353,6 +388,7 @@ static void prepare_runner(runner_holder *r) {
     if (r->caches) return;
     if (!r->frame_indices) r->frame_indices = st_init_numtable();
     if (!r->matches) r->matches = st_init_numtable();
+    r->root_snapshot = NULL;
     r->caches = sn_caches_new();
     sn_caches_runtime(r->caches, r->matches);
 }
@@ -690,13 +726,18 @@ static VALUE get_field(VALUE arg) {
     struct access *a = (struct access *)arg;
     return rb_funcall(a->object, a->name, 0);
 }
+/* Only this barrier may run an allocating callback from a Rust frame.
+ * The callback result/exception is returned without another Ruby allocation. */
+static int protected_result(VALUE (*callback)(VALUE), VALUE argument, VALUE *result) {
+    int state = 0;
+    *result = rb_protect(callback, argument, &state);
+    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
+    return state;
+}
 /* Rust supplies an accessor index from the shared protocol. */
 int sn_field(VALUE object, int name, VALUE *value) {
     struct access a = {object, fields[name].id};
-    int state = 0;
-    *value = rb_protect(get_field, (VALUE)&a, &state);
-    if (state) { *value = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(get_field, (VALUE)&a, value);
 }
 static struct { ID id; const char *symbol; int opcode; } opcodes[] = {
 #define SN_OPCODE(name, symbol, value) {0, #symbol, SN_OP_##name},
@@ -725,17 +766,11 @@ static VALUE pairs(VALUE hash) {
     return array;
 }
 int sn_pairs(VALUE hash, VALUE *value) {
-    int state = 0;
-    *value = rb_protect(pairs, hash, &state);
-    if (state) { *value = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(pairs, hash, value);
 }
 static VALUE key_copy(VALUE key) { return rb_str_dup(key); }
 int sn_key_copy(VALUE key, VALUE *value) {
-    int state = 0;
-    *value = rb_protect(key_copy, key, &state);
-    if (state) { *value = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(key_copy, key, value);
 }
 /* Output records are built only after Rust traversal has returned. The report
  * is owned by TypedData so exceptions and GC cannot leak it or move its VALUEs. */
@@ -808,7 +843,7 @@ static void close_callback_scope(runner_holder *runner) {
     scope->active_budget = Qnil;
     scope->active_limits = (native_limits){0};
     scope->callback_context = 0;
-    sn_caches_begin(scope->caches);
+    clear_native_caches(scope);
     runner->callback_scope = Qnil;
 }
 static VALUE clear_runtime(VALUE context) {
@@ -824,7 +859,7 @@ static VALUE clear_runtime(VALUE context) {
     call->runner->limited_regexps = Qnil;
     st_clear(call->runner->frame_indices);
     sn_caches_runtime(call->runner->caches, call->runner->matches);
-    sn_caches_begin(call->runner->caches);
+    clear_native_caches(call->runner);
     return Qnil;
 }
 /* Rust owns scope snapshots; the Ruby Array is the evaluator's live scope.
@@ -880,6 +915,9 @@ static void evaluate_native(evaluation_call *call) {
             call->instance, 0, &call->limits, &outcome);
     }
     active_caches = previous_caches;
+    /* Only suspended passes can call Ruby and then re-enter mutable caches.
+     * A terminal pass needs no new backup; its caches are cleared by ensure. */
+    if (call->status == SN_VERDICT_UNSUPPORTED) refresh_root_snapshot(r);
     publish_scope(r);
     publish_references(r, 0);
     check_evaluation_status(call->status,
@@ -1116,12 +1154,25 @@ static runtime_locations read_runtime_locations(VALUE buffer) {
         locations.properties = rb_funcall(buffer, rb_intern_const("evaluated_properties"), 0);
         locations.items = rb_funcall(buffer, rb_intern_const("evaluated_items"), 0);
     }
+    RB_GC_GUARD(buffer);
+    RB_GC_GUARD(locations.properties);
+    RB_GC_GUARD(locations.items);
     return locations;
+}
+/* Accessors may return independent sets. Root every copied handle, rather than
+ * assuming that keeping only the buffer keeps all accessor results alive. */
+static void root_runtime_locations(VALUE roots, runtime_locations *locations) {
+    rb_ary_push(roots, locations->buffer);
+    rb_ary_push(roots, locations->properties);
+    rb_ary_push(roots, locations->items);
+    RB_GC_GUARD(locations->buffer);
+    RB_GC_GUARD(locations->properties);
+    RB_GC_GUARD(locations->items);
 }
 static VALUE collector_finish(VALUE self, VALUE valid, VALUE buffer) {
     report_collector *c = get_report_collector(self);
     runtime_locations locations = read_runtime_locations(buffer);
-    if (!NIL_P(buffer)) rb_ary_push(c->results, buffer);
+    if (!NIL_P(buffer)) root_runtime_locations(c->results, &locations);
     c->busy = 1;
     sn_container_report_finish(c->report, RTEST(valid), &locations);
     c->busy = 0;
@@ -1524,7 +1575,7 @@ static VALUE merge_runtime_properties(evaluation_call *call) {
     VALUE result = rb_funcallv(helper, rb_intern_const("merge"), 6, args);
     runtime_locations locations = read_runtime_locations(result);
     if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
-    rb_ary_push(r->report_results, result);
+    root_runtime_locations(r->report_results, &locations);
     sn_properties_result(r->caches, &locations);
     for (size_t i = 0; i < 6; i++) RB_GC_GUARD(args[i]);
     RB_GC_GUARD(result);
@@ -2261,15 +2312,15 @@ static VALUE resolve_reference(VALUE arg) {
 }
 int sn_resolve(VALUE compiler, VALUE program, VALUE reference, VALUE *result) {
     struct resolution r = {compiler, program, reference};
-    int state = 0;
-    *result = rb_protect(resolve_reference, (VALUE)&r, &state);
-    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(resolve_reference, (VALUE)&r, result);
 }
-int sn_resolution_error(VALUE error) {
+static VALUE resolution_error(VALUE error) {
     VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
     VALUE klass = rb_const_get(schemurai, id_resolution_error);
     return rb_obj_is_kind_of(error, klass);
+}
+int sn_resolution_error(VALUE error, VALUE *result) {
+    return protected_result(resolution_error, error, result);
 }
 
 typedef int (*hash_callback)(void *, VALUE, VALUE);
@@ -2399,22 +2450,13 @@ static VALUE anchor_names(VALUE arg) {
 }
 int sn_anchor_names(VALUE compiler, VALUE resource, VALUE *result) {
     struct binding b = {compiler, resource, Qnil};
-    int state = 0;
-    *result = rb_protect(anchor_names, (VALUE)&b, &state);
-    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(anchor_names, (VALUE)&b, result);
 }
 int sn_resource_program(VALUE compiler, VALUE resource, VALUE *result) {
     struct binding b = {compiler, resource, Qnil};
-    int state = 0;
-    *result = rb_protect(resource_program, (VALUE)&b, &state);
-    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(resource_program, (VALUE)&b, result);
 }
 int sn_anchor_program(VALUE compiler, VALUE resource, VALUE name, VALUE *result) {
     struct binding b = {compiler, resource, name};
-    int state = 0;
-    *result = rb_protect(anchor_program, (VALUE)&b, &state);
-    if (state) { *result = rb_errinfo(); rb_set_errinfo(Qnil); }
-    return state;
+    return protected_result(anchor_program, (VALUE)&b, result);
 }

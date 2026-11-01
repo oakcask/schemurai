@@ -14,6 +14,7 @@ pub unsafe extern "C" fn sn_object_report_child(
     child: Value,
     flags: i32,
 ) -> *mut Report {
+    let vm = unsafe { Ruby::enter() };
     let mut seed = unsafe { &*report }.continuation(flags & 4 != 0);
     if !seed.silent {
         if flags & 1 == 0 {
@@ -24,7 +25,7 @@ pub unsafe extern "C" fn sn_object_report_child(
         }
         seed.schema_path.push_str("/");
         seed.schema_path.push_str(
-            std::str::from_utf8(unsafe { byte_view(keyword, len) }).expect("object keyword"),
+            std::str::from_utf8(unsafe { vm.bytes(keyword, len) }).expect("object keyword"),
         );
         if flags & 2 != 0 {
             seed.schema_path.text.push('/');
@@ -137,7 +138,7 @@ pub unsafe extern "C" fn sn_property_locations_key(
 /// Locations is live and immutable, called from C's GC mark callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_property_locations_mark(locations: *const tracking::PropertyLocations) {
-    unsafe { &*locations }.mark();
+    unsafe { (&*locations).mark() };
 }
 /// # Safety
 /// Locations is live and immutable, called from C's memory size callback.
@@ -157,6 +158,7 @@ pub unsafe extern "C" fn sn_property_locations_free(locations: *mut tracking::Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
     #[test]
     fn silent_child_failure_marks_the_live_collection_without_reserving_an_error() {
         let mut report = Report {
@@ -183,25 +185,25 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_runtime(tracking::RuntimeLocations {
-                buffer: 11,
-                properties: 13,
-                items: 15,
+                buffer: v(11),
+                properties: v(13),
+                items: v(15),
             });
         let mut completed = parent.continuation(true);
         let mut child = Tracked::new(Valid);
         child.set_runtime(tracking::RuntimeLocations {
-            buffer: 17,
-            properties: 19,
-            items: 21,
+            buffer: v(17),
+            properties: v(19),
+            items: v(21),
         });
         completed.evaluation = Some(child);
         let child = parent.adopt(completed);
-        assert_eq!(child.properties_set(), Some(19));
+        assert_eq!(child.properties_set(), Some(v(19)));
         assert_eq!(child.property_count(), 0);
-        assert_eq!(child.items_set(), Some(21));
+        assert_eq!(child.items_set(), Some(v(21)));
         assert_eq!(
             parent.evaluation.as_ref().unwrap().properties_set(),
-            Some(13)
+            Some(v(13))
         );
         assert_eq!(parent.evaluation.as_ref().unwrap().property_count(), 0);
         let empty = Tracked::new(Valid);

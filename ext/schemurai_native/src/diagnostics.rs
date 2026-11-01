@@ -161,37 +161,7 @@ impl Report {
                 .as_ref()
                 .map_or(0, Tracked::memory_usage)
     }
-    pub(super) fn mark(&self) {
-        for path in [&self.instance_path, &self.schema_path] {
-            for &(_, value) in &path.names {
-                unsafe {
-                    sn_pin(value);
-                }
-            }
-        }
-        for error in &self.errors {
-            unsafe {
-                sn_pin(error.instance_path.value());
-                sn_pin(error.schema_path.value());
-                sn_pin(error.operand);
-                sn_pin(error.instance);
-                sn_pin(error.message);
-            }
-        }
-        if let Some(evaluation) = &self.evaluation {
-            evaluation.mark();
-        }
-        if let Some(prior) = &self.container_prior {
-            prior.mark();
-        }
-        if let Some(entry) = &self.entry {
-            unsafe {
-                sn_pin(entry.source.1);
-                sn_pin(entry.instance);
-                sn_pin(entry.frame);
-            }
-        }
-    }
+
     fn container_error(
         &self,
         engine: &Engine,
@@ -405,6 +375,7 @@ impl Report {
     }
     fn property<T>(
         &mut self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         segment: &str,
         key: Value,
@@ -417,9 +388,9 @@ impl Report {
 
         let reset = self.collection_reset;
         let instance_len = self.instance_path.checkpoint();
-        self.instance_path.name(key)?;
+        self.instance_path.name(vm, key)?;
         let result = if let Some(key) = schema_key {
-            self.schema_name(caches, segment, key, visit)
+            self.schema_name(vm, caches, segment, key, visit)
         } else {
             self.scoped(caches, segment, None, visit)
         };
@@ -430,6 +401,7 @@ impl Report {
 
     fn schema_name<T>(
         &mut self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         segment: &str,
         key: Value,
@@ -440,7 +412,7 @@ impl Report {
         }
 
         self.scoped(caches, segment, None, |report| {
-            report.schema_path.name(key)?;
+            report.schema_path.name(vm, key)?;
             let reset = report.collection_reset;
             let result = visit(report);
             report.cleanup_reset_paths(caches, reset, result, 1)
@@ -867,7 +839,7 @@ impl Execution<'_> {
                             report.add(self.caches, "minLength", source, value, len)?;
                         }
                         if let Some(pattern) = &rules.pattern {
-                            match pattern.assertion(self.caches, value) {
+                            match pattern.assertion(self.vm, self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => {
                                     let invalid = pattern.invalid(self.caches, value);
@@ -886,14 +858,14 @@ impl Execution<'_> {
                             }
                         }
                         if let Some(format) = &rules.format {
-                            match format.eval(value) {
+                            match format.eval(self.vm, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => report.add(self.caches, "format", source, value, 0)?,
                                 Valid => {}
                             }
                         }
                         if let Some(content) = &rules.content {
-                            match content.eval(self.caches, value) {
+                            match content.eval(self.vm, self.caches, value) {
                                 Unsupported => return Err(Unsupported),
                                 Invalid => report.add(
                                     self.caches,
@@ -1010,7 +982,7 @@ impl Execution<'_> {
                         let values = if len == 0 {
                             &[]
                         } else {
-                            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
+                            unsafe { self.vm.array(value) }
                         };
                         let pattern = match self.nodes[child].as_slice() {
                             [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
@@ -1067,15 +1039,20 @@ impl Execution<'_> {
                             };
                             let status = match (pattern, format, content) {
                                 (Some((required, pattern)), _, _) => pattern.visit_invalid_items(
+                                    self.vm,
                                     self.caches,
                                     required,
                                     &values[start..],
                                     invalid,
                                 ),
-                                (_, Some((required, format)), _) => {
-                                    format.visit_invalid_items(required, &values[start..], invalid)
-                                }
+                                (_, Some((required, format)), _) => format.visit_invalid_items(
+                                    self.vm,
+                                    required,
+                                    &values[start..],
+                                    invalid,
+                                ),
                                 (_, _, Some((required, content))) => content.visit_invalid_items(
+                                    self.vm,
                                     self.caches,
                                     required,
                                     &values[start..],
@@ -1096,7 +1073,8 @@ impl Execution<'_> {
                                     coverage.item(index);
                                 }
                                 let needs = if let Some(limits) = primitive.filter(|_| {
-                                    item & self.fixnum_flag != 0 && depth < MAX_EVALUATION_DEPTH
+                                    item.has_fixnum_tag(self.fixnum_flag)
+                                        && depth < MAX_EVALUATION_DEPTH
                                 }) {
                                     let n = if limits.is_empty() {
                                         0
@@ -1138,7 +1116,7 @@ impl Execution<'_> {
                         let values = if len == 0 {
                             &[]
                         } else {
-                            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
+                            unsafe { self.vm.array(value) }
                         };
                         let matches = evaluation::scan_contains(
                             len,
@@ -1266,8 +1244,12 @@ impl Execution<'_> {
                                     continue;
                                 }
                                 if tracked {
-                                    let result =
-                                        report.schema_name(self.caches, keyword, *name, |r| {
+                                    let result = report.schema_name(
+                                        self.vm,
+                                        self.caches,
+                                        keyword,
+                                        *name,
+                                        |r| {
                                             self.collect::<true>(
                                                 r,
                                                 *child,
@@ -1275,16 +1257,29 @@ impl Execution<'_> {
                                                 depth + 1,
                                                 active,
                                             )
-                                        })?;
+                                        },
+                                    )?;
                                     if result.status == Valid
                                         && coverage.merge_runtime(self, result) == Unsupported
                                     {
                                         return Err(Unsupported);
                                     }
                                 } else if self.needs_diagnostics(*child, value, depth + 1)? {
-                                    report.schema_name(self.caches, keyword, *name, |r| {
-                                        self.collect::<false>(r, *child, value, depth + 1, active)
-                                    })?;
+                                    report.schema_name(
+                                        self.vm,
+                                        self.caches,
+                                        keyword,
+                                        *name,
+                                        |r| {
+                                            self.collect::<false>(
+                                                r,
+                                                *child,
+                                                value,
+                                                depth + 1,
+                                                active,
+                                            )
+                                        },
+                                    )?;
                                 }
                             }
                         }
@@ -1594,9 +1589,14 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
         }
         let visit = |report: &mut Report, child: usize, item: Value, segment: &str, schema_key| {
             if c.engine.needs_diagnostics(child, item, c.depth)? {
-                report.property(c.engine.caches, segment, key, schema_key, |r| {
-                    c.engine.collect::<false>(r, child, item, c.depth, c.active)
-                })?;
+                report.property(
+                    c.engine.vm,
+                    c.engine.caches,
+                    segment,
+                    key,
+                    schema_key,
+                    |r| c.engine.collect::<false>(r, child, item, c.depth, c.active),
+                )?;
             }
             Ok::<_, Verdict>(())
         };
@@ -1608,8 +1608,8 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
                 return visit(c.report, c.rules.names.unwrap(), key, "propertyNames", None);
             }
             if c.unevaluated {
-                if c.prior.contains_property(c.engine, key)
-                    || c.coverage.contains_property(c.engine, key)
+                if c.prior.contains_property(c.engine.vm, c.engine, key)
+                    || c.coverage.contains_property(c.engine.vm, c.engine, key)
                 {
                     return Ok(());
                 }
@@ -1620,19 +1620,19 @@ unsafe extern "C" fn object_diagnostic(context: *mut c_void, key: Value, value: 
                     "unevaluatedProperties",
                     None,
                 )?;
-                c.coverage.property(c.engine, key);
+                c.coverage.property(c.engine.vm, c.engine, key);
                 return Ok(());
             }
             let evaluated = c.rules.visit_value_rules(
+                c.engine.vm,
                 c.engine.caches,
                 &c.engine.budget,
                 true,
-                key,
-                None,
+                (key, None),
                 |segment, name, child| visit(c.report, child, value, segment, name),
             )?;
             if c.tracked && evaluated {
-                c.coverage.property(c.engine, key);
+                c.coverage.property(c.engine.vm, c.engine, key);
             }
             Ok(())
         })();
@@ -1678,11 +1678,13 @@ pub unsafe extern "C" fn sn_diagnose(
     instance: Value,
     status: *mut i32,
 ) -> *mut Report {
+    let vm = unsafe { Ruby::enter() };
     let result = catch_unwind(AssertUnwindSafe(|| {
         let engine = unsafe { &*engine };
         let mut local = None;
         let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let execution = Execution {
+            vm: &vm,
             engine,
             caches,
             memo: memo::Memo::default(),
@@ -1717,11 +1719,13 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
     limits: *const budget::Limits,
     outcome: *mut budget::Outcome,
 ) -> *mut Report {
+    let vm = unsafe { Ruby::enter() };
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut local = None;
         let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let limits = unsafe { *limits };
         let execution = Execution {
+            vm: &vm,
             engine: unsafe { &*engine },
             caches,
             memo: memo::Memo::default(),
@@ -1807,7 +1811,7 @@ pub unsafe extern "C" fn sn_report_record(
 /// Report must be live; call only from its synchronous Ruby GC mark callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_report_mark(report: *const Report) {
-    unsafe { &*report }.mark();
+    unsafe { (&*report).mark() };
 }
 /// # Safety
 /// Report must be owned, returned by sn_diagnose, and freed exactly once.
@@ -1819,6 +1823,7 @@ pub unsafe extern "C" fn sn_report_free(report: *mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn report_seeds_and_results_own_error_paths_limits_and_locations() {
@@ -1839,10 +1844,10 @@ mod tests {
             instance_path: pointer::Rendered::Native("/item".into()),
             schema_path: pointer::Rendered::Native("/allOf/0/type".into()),
             opcode: OP_TYPE_INTEGER,
-            operand: 0,
-            instance: 0,
+            operand: v(0),
+            instance: v(0),
             detail: 0,
-            message: 0,
+            message: v(0),
         });
         let mut locations = Tracked::new(Valid);
         locations.item(4);
@@ -1872,3 +1877,11 @@ mod tests {
         assert_eq!(adopted.attempts, 2);
     }
 }
+
+trace_fields!(Error { instance_path, schema_path, operand, instance, message ; keyword, opcode, detail });
+trace_fields!(ErrorEntry { source, instance, frame ; keyword });
+trace_fields!(Report {
+    errors, evaluation, container_prior, entry, instance_path, schema_path ;
+    annotations, attempts, collection_reset, reset_path_pops, failed, silent,
+    render_messages, limits, limit_hit
+});

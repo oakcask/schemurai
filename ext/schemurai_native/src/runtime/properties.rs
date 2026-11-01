@@ -16,16 +16,7 @@ impl Part {
             items: tracked.native_items(),
         }
     }
-    fn mark(&self) {
-        if let Some(runtime) = self.runtime {
-            runtime.mark();
-        }
-        for &key in &self.keys {
-            unsafe {
-                sn_pin(key);
-            }
-        }
-    }
+
     fn memory_usage(&self) -> usize {
         self.keys.capacity() * std::mem::size_of::<Value>()
             + self.items.capacity() * std::mem::size_of::<usize>()
@@ -52,20 +43,6 @@ impl Properties {
         }) + self.completed.try_borrow().map_or(0, |results| {
             results.capacity() * std::mem::size_of::<(Value, RuntimeLocations)>()
         })
-    }
-    pub(super) fn mark(&self) {
-        if let Ok(pending) = self.pending.try_borrow()
-            && let Some((_, parts)) = &*pending
-        {
-            for part in parts {
-                part.mark();
-            }
-        }
-        if let Ok(completed) = self.completed.try_borrow() {
-            for runtime in completed.values() {
-                runtime.mark();
-            }
-        }
     }
 }
 impl Caches {
@@ -160,3 +137,6 @@ pub unsafe extern "C" fn sn_properties_result(
         .borrow_mut()
         .insert(ordinal, unsafe { *locations });
 }
+
+trace_fields!(Part { runtime, keys ; items });
+ruby_trace::trace_runner_fields!(Properties { ; pending, completed ; ; });

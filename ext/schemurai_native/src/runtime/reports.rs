@@ -86,51 +86,6 @@ impl Reports {
                     + r.values().map(Report::memory_usage).sum::<usize>()
             })
     }
-    pub(super) fn mark(&self) {
-        // C additionally roots every completed report and inherited seed.
-        // Pending snapshots use input/schema handles and runtime observations
-        // already owned by the runner while a stopped pass borrows this state.
-        if let Ok(boundary) = self.boundary.try_borrow()
-            && let Some(report) = &*boundary
-        {
-            report.mark();
-        }
-        if let Ok(callback) = self.callback.try_borrow()
-            && let Some(report) = &*callback
-        {
-            report.mark();
-        }
-        if let Ok(live) = self.live.try_borrow()
-            && let Some(report) = &*live
-        {
-            report.mark();
-        }
-        if let Ok(effects) = self.effects.try_borrow() {
-            for report in effects.values() {
-                report.mark();
-            }
-        }
-        if let Ok(replay) = self.replay.try_borrow() {
-            for report in replay.iter() {
-                report.mark();
-            }
-        }
-        if let Ok(initial) = self.initial.try_borrow()
-            && let Some(report) = &*initial
-        {
-            report.mark();
-        }
-        if let Ok(pending) = self.pending.try_borrow()
-            && let Some((_, report)) = &*pending
-        {
-            report.mark();
-        }
-        if let Ok(completed) = self.completed.try_borrow() {
-            for report in completed.values() {
-                report.mark();
-            }
-        }
-    }
 }
 /// # Safety
 /// Caches must be idle and own a pending native report request. The returned
@@ -264,3 +219,7 @@ pub unsafe extern "C" fn sn_report_interrupted(caches: *const Caches) -> *mut Re
         Box::into_raw(Box::new(report))
     })
 }
+
+ruby_trace::trace_runner_fields!(Reports {
+    runtime_key ; initial, callback, pending, completed, live, boundary, effects, replay ; ;
+});

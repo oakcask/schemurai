@@ -28,92 +28,13 @@ mod protocol {
     include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 use protocol::*;
+mod ruby;
+mod ruby_trace;
 mod scope;
 mod structural;
 mod tracking;
-type Value = usize;
-unsafe extern "C" {
-    fn sn_pin(value: Value);
-    fn sn_nil() -> Value;
-    fn sn_undefined() -> Value;
-    fn sn_kind(value: Value) -> i32;
-    fn sn_shallow_kind(value: Value) -> i32;
-    fn sn_fingerprint_view(
-        value: Value,
-        data: *mut *const c_void,
-        length: *mut usize,
-        number: *mut f64,
-    ) -> i32;
-    fn sn_small_hash(value: Value, entries: *mut Value) -> i32;
-    fn sn_true(value: Value) -> i32;
-    fn sn_truthy(value: Value) -> i32;
-    fn sn_fixnum(value: Value) -> i32;
-    fn sn_fixnum_flag() -> Value;
-    fn sn_array_data(value: Value) -> *const Value;
-    fn sn_integer(value: Value) -> i64;
-    fn sn_integer128(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_bounds128(value: Value, words: *mut u64) -> i32;
-    fn sn_number_bounds_view(
-        value: Value,
-        words: *mut u64,
-        kind: *mut i32,
-        floating: *mut f64,
-        required: i32,
-    ) -> i32;
-    fn sn_integer1024(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_word_count(value: Value) -> usize;
-    fn sn_integer_words(value: Value, words: *mut u64, count: usize) -> i32;
-    fn sn_is_bignum(value: Value) -> i32;
-    fn sn_big256(value: Value, words: *mut u64) -> i32;
-    fn sn_big_hash(value: Value, hash: *mut u64) -> i32;
-    fn sn_big_low_word(value: Value) -> u64;
-    fn sn_big_low64_word(value: Value, word: *mut u64) -> i32;
-    fn sn_big_equal(big: Value, other: Value) -> i32;
-    fn sn_big_order(left: Value, right: Value) -> i32;
-    fn sn_wide_integer_compare(value: Value, bound: Value) -> i32;
-    fn sn_float(value: Value) -> f64;
-    fn sn_is_float(value: Value) -> i32;
-    fn sn_is_rational(value: Value) -> i32;
-    fn sn_len(value: Value) -> usize;
-    fn sn_entry(value: Value, index: usize) -> Value;
-    fn sn_lookup(hash: Value, key: Value) -> Value;
-    fn sn_missing(value: Value) -> i32;
-    fn sn_same(a: Value, b: Value) -> i32;
-    fn sn_same_class(a: Value, b: Value) -> i32;
-    fn sn_string_data(value: Value) -> *const u8;
-    fn sn_string_bytes(value: Value) -> usize;
-    fn sn_string_equal(a: Value, b: Value) -> i32;
-    fn sn_string_length_guarded(value: Value, length: *mut usize) -> i32;
-    fn sn_record_key_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_string_raw_view(value: Value, data: *mut *const u8, length: *mut usize);
-    fn sn_string_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_format_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_json_encoding(value: Value) -> i32;
-    fn sn_json_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_resolve(compiler: Value, program: Value, reference: Value, result: *mut Value) -> i32;
-    fn sn_resolution_error(error: Value) -> i32;
-    fn sn_resource_program(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_count(resource: Value) -> usize;
-    fn sn_anchor_names(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_program(compiler: Value, resource: Value, name: Value, result: *mut Value) -> i32;
-    fn sn_hash_each(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, Value, Value) -> i32,
-    ) -> i32;
-    fn sn_hash_each_key_view(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, Value) -> i32,
-    ) -> i32;
-    fn sn_field(object: Value, name: i32, value: *mut Value) -> i32;
-    fn sn_pairs(hash: Value, value: *mut Value) -> i32;
-    fn sn_key_copy(key: Value, value: *mut Value) -> i32;
-    fn sn_opcode(symbol: Value) -> i32;
-    fn sn_object_each(value: Value, context: *mut c_void) -> i32;
-}
+use ruby::*;
+use ruby_trace::{Trace, trace_fields};
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(i32)]
 enum Verdict {
@@ -236,7 +157,13 @@ impl StringRules {
             result
         }
     }
-    fn eval_guarded(&self, caches: &runtime::Caches, required: i32, value: Value) -> Verdict {
+    fn eval_guarded(
+        &self,
+        vm: &Ruby,
+        caches: &runtime::Caches,
+        required: i32,
+        value: Value,
+    ) -> Verdict {
         if caches.dynamic_calls() {
             return self.runtime_valid(caches, required, value);
         }
@@ -248,15 +175,16 @@ impl StringRules {
         } else if encoding < 0 {
             verdict(required == 0)
         } else {
-            let bytes = unsafe { byte_view(data, len) };
-            self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
+            let bytes = unsafe { vm.bytes(data, len) };
+            self.eval_with_view::<true>(vm, caches, value, Some((bytes, encoding)))
         }
     }
-    fn eval(&self, caches: &runtime::Caches, value: Value) -> Verdict {
-        self.eval_with_view::<false>(caches, value, None)
+    fn eval(&self, vm: &Ruby, caches: &runtime::Caches, value: Value) -> Verdict {
+        self.eval_with_view::<false>(vm, caches, value, None)
     }
     fn eval_with_view<const BORROWED: bool>(
         &self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         value: Value,
         view: Option<(&[u8], i32)>,
@@ -272,7 +200,7 @@ impl StringRules {
         if let Some(pattern) = &self.pattern {
             let result = match view {
                 Some((bytes, encoding)) => pattern.eval_bytes(caches, value, bytes, encoding),
-                None => pattern.assertion(caches, value),
+                None => pattern.assertion(vm, caches, value),
             };
             if result != Valid {
                 return result;
@@ -281,15 +209,15 @@ impl StringRules {
         if let Some(format) = &self.format {
             let result = match view {
                 Some((bytes, _)) => format.eval_bytes(bytes),
-                None => format.eval(value),
+                None => format.eval(vm, value),
             };
             if result != Valid {
                 return result;
             }
         }
         self.content.as_ref().map_or(Valid, |content| match view {
-            Some((bytes, encoding)) => content.eval_borrowed(caches, value, bytes, encoding),
-            None => content.eval(caches, value),
+            Some((bytes, encoding)) => content.eval_borrowed(vm, caches, value, bytes, encoding),
+            None => content.eval(vm, caches, value),
         })
     }
 }
@@ -468,6 +396,7 @@ impl Object {
     }
     fn visit_properties(
         &self,
+        vm: &Ruby,
         value: Value,
         len: usize,
         undefined: Value,
@@ -481,6 +410,7 @@ impl Object {
             // Discover only present schema fields, then retain schema order for
             // validity, including required failures and unsupported children.
             let mut candidates = PropertyCandidates {
+                vm,
                 rules: self,
                 budget,
                 indices: Vec::with_capacity(len.min(self.properties.len())),
@@ -557,11 +487,11 @@ impl Object {
     // input-order diagnostic scans visit them here as well.
     fn visit_value_rules(
         &self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         budget: &budget::Budget,
         properties: bool,
-        key: Value,
-        location: Option<tracking::JsonKey>,
+        (key, location): (Value, Option<tracking::JsonKey>),
         mut visit: impl FnMut(&'static str, Option<Value>, usize) -> Result<(), Verdict>,
     ) -> Result<bool, Verdict> {
         // Tracked scans already fingerprinted this key for location lookup.
@@ -571,7 +501,7 @@ impl Object {
         } else if properties {
             if let Some(target) = self
                 .property_targets
-                .get(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
+                .get(&location.unwrap_or_else(|| tracking::JsonKey::new(vm, key)))
             {
                 visit("properties", Some(target.name), target.child)?;
                 true
@@ -580,12 +510,12 @@ impl Object {
             }
         } else {
             self.property_keys
-                .contains(&location.unwrap_or_else(|| tracking::JsonKey::new(key)))
+                .contains(&location.unwrap_or_else(|| tracking::JsonKey::new(vm, key)))
         };
         if let Some(mut matches) = self
             .pattern_group
             .as_ref()
-            .and_then(|group| group.matches(key))
+            .and_then(|group| group.matches(vm, key))
         {
             while matches != 0 {
                 if !budget.checkpoint() {
@@ -605,7 +535,7 @@ impl Object {
                 if !budget.checkpoint() {
                     return Err(Unsupported);
                 }
-                match pattern.eval(caches, key) {
+                match pattern.eval(vm, caches, key) {
                     Unsupported => return Err(Unsupported),
                     Invalid => {}
                     Valid => {
@@ -621,7 +551,7 @@ impl Object {
         Ok(matched || self.additional.is_some())
     }
 
-    fn with_record(mut self) -> Self {
+    fn with_record(mut self, vm: &Ruby) -> Self {
         if self.required_order.len() > 64
             || self.required_order.iter().any(|key| !key.ordinary_string)
             || !self.patterns.is_empty()
@@ -636,11 +566,11 @@ impl Object {
             .iter()
             .map(|&(name, child)| {
                 (
-                    tracking::JsonKey::new(name),
+                    tracking::JsonKey::new(vm, name),
                     RecordField {
                         key: name,
                         name,
-                        short_key: short_record_key(name),
+                        short_key: short_record_key(vm, name),
                         child: Some(child),
                         bit: 0,
                         check: None,
@@ -651,11 +581,11 @@ impl Object {
         for key in &self.required_order {
             let name = key.name;
             fields
-                .entry(tracking::JsonKey::new(name))
+                .entry(tracking::JsonKey::new(vm, name))
                 .or_insert(RecordField {
                     key: name,
                     name,
-                    short_key: short_record_key(name),
+                    short_key: short_record_key(vm, name),
                     child: None,
                     bit: 0,
                     check: None,
@@ -670,12 +600,15 @@ impl Object {
         // Required names share the field bits already used for duplicate-key
         // detection. Repeated required names therefore need no extra state.
         let required = self.required_order.iter().fold(0, |bits, key| {
-            bits | fields[&tracking::JsonKey::new(key.name)].bit
+            bits | fields[&tracking::JsonKey::new(vm, key.name)].bit
         });
         let fields: Vec<_> = fields.into_values().collect();
         let short_index = RecordShortIndex::compile(&fields);
         self.record = Some(RecordObject {
-            identity_hint: self.properties.first().map_or(0, |&(key, _)| key),
+            identity_hint: self
+                .properties
+                .first()
+                .map_or(Value::default(), |&(key, _)| key),
             fields,
             short_index,
             required,
@@ -688,6 +621,7 @@ pub struct Roots {
     values: Vec<Value>,
     binding_names: Vec<Value>,
 }
+trace_fields!(Roots { values, binding_names ; });
 #[derive(Default)]
 pub struct Engine {
     nodes: Vec<Vec<Op>>,
@@ -718,7 +652,7 @@ pub struct Engine {
     indices: HashMap<Value, usize>,
     roots: *mut Roots,
     root: usize,
-    fixnum_flag: Value,
+    fixnum_flag: usize,
     compiler: Value,
     runtime_messages: bool,
     validate_format: bool,
@@ -733,9 +667,9 @@ impl Engine {
         unsafe { &mut *self.roots }.values.push(value);
         value
     }
-    fn field(&mut self, value: Value, name: i32) -> Result<Value, Value> {
-        let mut result = 0;
-        if unsafe { sn_field(value, name, &mut result) } != 0 {
+    fn field(&mut self, vm: &mut Ruby, value: Value, name: i32) -> Result<Value, Value> {
+        let mut result = Value::default();
+        if unsafe { vm.sn_field(value, name, &mut result) } != 0 {
             return Err(result);
         }
         Ok(self.retain(result))
@@ -769,12 +703,12 @@ impl Engine {
             })
             .collect()
     }
-    fn map(&mut self, value: Value) -> Result<Vec<(Value, Value)>, Value> {
+    fn map(&mut self, vm: &mut Ruby, value: Value) -> Result<Vec<(Value, Value)>, Value> {
         if unsafe { sn_same(value, sn_nil()) } != 0 {
             return Ok(vec![]);
         }
-        let mut pairs = 0;
-        if unsafe { sn_pairs(value, &mut pairs) } != 0 {
+        let mut pairs = Value::default();
+        if unsafe { vm.sn_pairs(value, &mut pairs) } != 0 {
             return Err(pairs);
         }
         self.retain(pairs);
@@ -786,8 +720,13 @@ impl Engine {
             .map(|p| (p[0], p[1]))
             .collect())
     }
-    fn size_field(&mut self, value: Value, name: i32) -> Result<Option<usize>, Value> {
-        let n = self.field(value, name)?;
+    fn size_field(
+        &mut self,
+        vm: &mut Ruby,
+        value: Value,
+        name: i32,
+    ) -> Result<Option<usize>, Value> {
+        let n = self.field(vm, value, name)?;
         Ok(if unsafe { sn_same(n, sn_nil()) } != 0 {
             None
         } else if unsafe { sn_fixnum(n) } != 0 {
@@ -802,22 +741,22 @@ impl Engine {
             None // The only non-integral bound is maxContains' +Infinity.
         })
     }
-    fn child(&mut self, value: Value, name: i32) -> Result<Option<usize>, Value> {
-        let child = self.field(value, name)?;
+    fn child(&mut self, vm: &mut Ruby, value: Value, name: i32) -> Result<Option<usize>, Value> {
+        let child = self.field(vm, value, name)?;
         if unsafe { sn_same(child, sn_nil()) } != 0 {
             Ok(None)
         } else {
-            self.compile(child).map(Some)
+            self.compile(vm, child).map(Some)
         }
     }
-    fn children(&mut self, value: Value) -> Result<Vec<usize>, Value> {
+    fn children(&mut self, vm: &mut Ruby, value: Value) -> Result<Vec<usize>, Value> {
         self.values(value)
             .into_iter()
-            .map(|c| self.compile(c))
+            .map(|c| self.compile(vm, c))
             .collect()
     }
-    fn branches(&mut self, value: Value) -> Result<Vec<(usize, usize)>, Value> {
-        let nodes = self.children(value)?;
+    fn branches(&mut self, vm: &mut Ruby, value: Value) -> Result<Vec<(usize, usize)>, Value> {
+        let nodes = self.children(vm, value)?;
         let mut groups: Vec<(usize, usize)> = Vec::with_capacity(nodes.len());
         for node in nodes {
             if let Some(group) = groups
@@ -867,13 +806,13 @@ impl Engine {
                         }
                 })
     }
-    fn compile_map(&mut self, value: Value) -> Result<Vec<(Value, usize)>, Value> {
-        self.map(value)?
+    fn compile_map(&mut self, vm: &mut Ruby, value: Value) -> Result<Vec<(Value, usize)>, Value> {
+        self.map(vm, value)?
             .into_iter()
-            .map(|(k, c)| Ok((k, self.compile(c)?)))
+            .map(|(k, c)| Ok((k, self.compile(vm, c)?)))
             .collect()
     }
-    fn compile(&mut self, program: Value) -> Result<usize, Value> {
+    fn compile(&mut self, vm: &mut Ruby, program: Value) -> Result<usize, Value> {
         if let Some(&i) = self.indices.get(&program) {
             return Ok(i);
         }
@@ -886,10 +825,10 @@ impl Engine {
         self.tracks.push(false);
         self.kind_demand.push(KindDemand::None);
         self.metadata.push(scope::Metadata::default());
-        let code = self.field(program, FIELD_CODE)?;
+        let code = self.field(vm, program, FIELD_CODE)?;
         let flags = unsafe { sn_integer(sn_entry(code, 0)) };
         self.tracks[index] = flags & i64::from(TRACKS_EVALUATION) != 0;
-        self.compile_scope(program, index, flags)?;
+        self.compile_scope(vm, program, index, flags)?;
         let mut ops = vec![];
         let mut error_operands = vec![];
         for i in (1..unsafe { sn_len(code) }).step_by(2) {
@@ -906,29 +845,30 @@ impl Engine {
                 OP_TYPE_INTEGER => Op::Type(TYPE_INTEGER, false),
                 OP_TYPE_STRING => Op::Type(TYPE_STRING, false),
                 OP_TYPES => {
-                    let mask = self.field(operand, FIELD_MASK)?;
+                    let mask = self.field(vm, operand, FIELD_MASK)?;
                     Op::Type(unsafe { sn_integer(mask) } as i32, true)
                 }
                 OP_CONST => Op::Const(operand),
                 OP_ENUM => Op::Enum(Box::new(enumeration::Enumeration::compile(
+                    vm,
                     operand,
                     self.values(operand),
                     self.fixnum_flag,
                 ))),
-                OP_ALL_OF => Op::All(self.children(operand)?),
-                OP_ANY_OF => Op::Any(self.branches(operand)?),
-                OP_ONE_OF => Op::One(self.branches(operand)?),
-                OP_NOT => Op::Not(self.compile(operand)?),
+                OP_ALL_OF => Op::All(self.children(vm, operand)?),
+                OP_ANY_OF => Op::Any(self.branches(vm, operand)?),
+                OP_ONE_OF => Op::One(self.branches(vm, operand)?),
+                OP_NOT => Op::Not(self.compile(vm, operand)?),
                 OP_CONDITIONAL => {
-                    let condition = self.field(operand, FIELD_CONDITION)?;
+                    let condition = self.field(vm, operand, FIELD_CONDITION)?;
                     Op::Conditional(
-                        self.compile(condition)?,
-                        self.child(operand, FIELD_THEN_BRANCH)?,
-                        self.child(operand, FIELD_ELSE_BRANCH)?,
+                        self.compile(vm, condition)?,
+                        self.child(vm, operand, FIELD_THEN_BRANCH)?,
+                        self.child(vm, operand, FIELD_ELSE_BRANCH)?,
                     )
                 }
                 OP_NUMBER | OP_TYPED_NUMBER | OP_TYPED_INTEGER => {
-                    if let Some(rules) = self.compile_number(operand)? {
+                    if let Some(rules) = self.compile_number(vm, operand)? {
                         Op::Number(
                             if opcode == OP_NUMBER {
                                 0
@@ -944,10 +884,10 @@ impl Engine {
                     }
                 }
                 OP_STRING | OP_TYPED_STRING => {
-                    let pattern = self.field(operand, FIELD_PATTERN)?;
-                    let format = self.field(operand, FIELD_FORMAT)?;
-                    let base64 = self.field(operand, FIELD_DECODE_BASE64)?;
-                    let json = self.field(operand, FIELD_PARSE_JSON)?;
+                    let pattern = self.field(vm, operand, FIELD_PATTERN)?;
+                    let format = self.field(vm, operand, FIELD_FORMAT)?;
+                    let base64 = self.field(vm, operand, FIELD_DECODE_BASE64)?;
+                    let json = self.field(vm, operand, FIELD_PARSE_JSON)?;
                     {
                         let content = if self.validate_content
                             && unsafe { sn_true(base64) | sn_true(json) } != 0
@@ -959,22 +899,22 @@ impl Engine {
                         } else {
                             None
                         };
-                        let assertion = self.field(operand, FIELD_FORMAT_ASSERTION)?;
+                        let assertion = self.field(vm, operand, FIELD_FORMAT_ASSERTION)?;
                         let runtime_format = (self.validate_format
                             || unsafe { sn_true(assertion) } != 0)
                             && unsafe { sn_same(format, sn_nil()) } == 0;
                         let format = if runtime_format {
-                            let name = self.field(format, FIELD_NAME)?;
+                            let name = self.field(vm, format, FIELD_NAME)?;
                             if unsafe { sn_same(name, sn_nil()) } != 0 {
                                 None
                             } else {
-                                Some(format::Format::compile(name))
+                                Some(format::Format::compile(vm, name))
                             }
                         } else {
                             None
                         };
-                        let max_length = self.field(operand, FIELD_MAX_LENGTH)?;
-                        let min_length = self.field(operand, FIELD_MIN_LENGTH)?;
+                        let max_length = self.field(vm, operand, FIELD_MAX_LENGTH)?;
+                        let min_length = self.field(vm, operand, FIELD_MIN_LENGTH)?;
                         let length_flags = (unsafe { sn_truthy(max_length) } << 2)
                             | (unsafe { sn_truthy(min_length) } << 3);
                         Op::String(
@@ -991,12 +931,13 @@ impl Engine {
                                 runtime_format,
                                 format,
                                 content,
-                                min: self.size_field(operand, FIELD_MIN_LENGTH)?,
-                                max: self.size_field(operand, FIELD_MAX_LENGTH)?,
+                                min: self.size_field(vm, operand, FIELD_MIN_LENGTH)?,
+                                max: self.size_field(vm, operand, FIELD_MAX_LENGTH)?,
                                 pattern: if unsafe { sn_truthy(pattern) } == 0 {
                                     None
                                 } else {
                                     Some(pattern::Pattern::compile(
+                                        vm,
                                         pattern,
                                         &mut self.pattern_cache_count,
                                     ))
@@ -1006,18 +947,18 @@ impl Engine {
                     }
                 }
                 OP_ARRAY | OP_TYPED_ARRAY => {
-                    let unique = self.field(operand, FIELD_UNIQUE)?;
-                    let prefix = self.field(operand, FIELD_PREFIX_ITEMS)?;
-                    let prefix = self.children(prefix)?;
-                    let items = self.field(operand, FIELD_ITEMS)?;
-                    let list = self.field(operand, FIELD_ITEMS_LIST)?;
+                    let unique = self.field(vm, operand, FIELD_UNIQUE)?;
+                    let prefix = self.field(vm, operand, FIELD_PREFIX_ITEMS)?;
+                    let prefix = self.children(vm, prefix)?;
+                    let items = self.field(vm, operand, FIELD_ITEMS)?;
+                    let list = self.field(vm, operand, FIELD_ITEMS_LIST)?;
                     let list = unsafe { sn_true(list) } != 0;
                     let items = if list {
-                        self.children(items)?
+                        self.children(vm, items)?
                     } else if unsafe { sn_same(items, sn_nil()) } != 0 {
                         vec![]
                     } else {
-                        vec![self.compile(items)?]
+                        vec![self.compile(vm, items)?]
                     };
                     Op::Array(
                         if opcode == OP_TYPED_ARRAY {
@@ -1027,6 +968,7 @@ impl Engine {
                         },
                         Box::new(Array {
                             header: self.container_header(
+                                vm,
                                 operand,
                                 FIELD_MAX_ITEMS,
                                 FIELD_MIN_ITEMS,
@@ -1038,42 +980,46 @@ impl Engine {
                                 }) | (if list { 8 } else { 0 }),
                             )?,
                             unique: unsafe { sn_truthy(unique) } != 0,
-                            min: self.size_field(operand, FIELD_MIN_ITEMS)?,
-                            max: self.size_field(operand, FIELD_MAX_ITEMS)?,
+                            min: self.size_field(vm, operand, FIELD_MIN_ITEMS)?,
+                            max: self.size_field(vm, operand, FIELD_MAX_ITEMS)?,
                             prefix,
                             items,
                             list,
-                            additional: self.child(operand, FIELD_ADDITIONAL)?,
-                            contains: self.child(operand, FIELD_CONTAINS)?,
+                            additional: self.child(vm, operand, FIELD_ADDITIONAL)?,
+                            contains: self.child(vm, operand, FIELD_CONTAINS)?,
                             min_contains: self
-                                .size_field(operand, FIELD_MIN_CONTAINS)?
+                                .size_field(vm, operand, FIELD_MIN_CONTAINS)?
                                 .unwrap_or(1),
-                            max_contains: self.size_field(operand, FIELD_MAX_CONTAINS)?,
+                            max_contains: self.size_field(vm, operand, FIELD_MAX_CONTAINS)?,
                             count_contains: unsafe {
-                                sn_true(self.field(operand, FIELD_COUNT_CONTAINS)?)
+                                sn_true(self.field(vm, operand, FIELD_COUNT_CONTAINS)?)
                             } != 0,
-                            unevaluated: self.child(operand, FIELD_UNEVALUATED)?,
+                            unevaluated: self.child(vm, operand, FIELD_UNEVALUATED)?,
                         }),
                     )
                 }
                 OP_OBJECT | OP_TYPED_OBJECT => {
-                    let patterns = self.field(operand, FIELD_PATTERNS)?;
-                    let dependencies = self.field(operand, FIELD_DEPENDENCIES)?;
+                    let patterns = self.field(vm, operand, FIELD_PATTERNS)?;
+                    let dependencies = self.field(vm, operand, FIELD_DEPENDENCIES)?;
                     {
-                        let patterns = self.compile_map(patterns)?;
+                        let patterns = self.compile_map(vm, patterns)?;
                         let pattern_names: Vec<_> = patterns.iter().map(|&(key, _)| key).collect();
                         let patterns: Vec<_> = patterns
                             .into_iter()
                             .map(|(key, child)| {
                                 (
-                                    pattern::Pattern::compile(key, &mut self.pattern_cache_count),
+                                    pattern::Pattern::compile(
+                                        vm,
+                                        key,
+                                        &mut self.pattern_cache_count,
+                                    ),
                                     child,
                                 )
                             })
                             .collect();
                         let pattern_group =
-                            pattern::PatternGroup::compile(&pattern_names, &patterns);
-                        let required = self.field(operand, FIELD_REQUIRED)?;
+                            pattern::PatternGroup::compile(vm, &pattern_names, &patterns);
+                        let required = self.field(vm, operand, FIELD_REQUIRED)?;
                         let inspect_required = unsafe { sn_truthy(required) } != 0
                             && !(unsafe { sn_kind(required) } == TYPE_ARRAY
                                 && unsafe { sn_len(required) } == 0);
@@ -1084,8 +1030,8 @@ impl Engine {
                             .filter(|key| key.ordinary_string)
                             .map(|key| key.name)
                             .collect();
-                        let properties = self.field(operand, FIELD_PROPERTIES)?;
-                        let properties = self.compile_map(properties)?;
+                        let properties = self.field(vm, operand, FIELD_PROPERTIES)?;
+                        let properties = self.compile_map(vm, properties)?;
                         if properties
                             .iter()
                             .any(|&(key, _)| unsafe { sn_kind(key) } != TYPE_STRING)
@@ -1099,14 +1045,14 @@ impl Engine {
                                 .enumerate()
                                 .map(|(index, &(name, child))| {
                                     (
-                                        tracking::JsonKey::new(name),
+                                        tracking::JsonKey::new(vm, name),
                                         PropertyTarget { name, child, index },
                                     )
                                 })
                                 .collect();
                         let property_locations: Vec<_> = properties
                             .iter()
-                            .map(|&(key, _)| tracking::JsonKey::new(key))
+                            .map(|&(key, _)| tracking::JsonKey::new(vm, key))
                             .collect();
                         let property_keys = property_locations.iter().copied().collect();
                         let property_indices = property_locations
@@ -1122,7 +1068,7 @@ impl Engine {
                         let required_keys: Option<tracking::KeySet> = indexed_required.then(|| {
                             required_strings
                                 .iter()
-                                .map(|&name| tracking::JsonKey::new(name))
+                                .map(|&name| tracking::JsonKey::new(vm, name))
                                 .collect()
                         });
                         let required_properties: Vec<bool> = property_locations
@@ -1151,7 +1097,8 @@ impl Engine {
                                 }
                                 let name = key.name;
                                 if indexed_required {
-                                    !property_targets.contains_key(&tracking::JsonKey::new(name))
+                                    !property_targets
+                                        .contains_key(&tracking::JsonKey::new(vm, name))
                                 } else {
                                     !properties
                                         .iter()
@@ -1159,7 +1106,7 @@ impl Engine {
                                 }
                             })
                             .collect();
-                        let dependent = self.field(operand, FIELD_DEPENDENT_REQUIRED)?;
+                        let dependent = self.field(vm, operand, FIELD_DEPENDENT_REQUIRED)?;
                         let mut dependent_required = vec![];
                         let mut dependent_schemas = vec![];
                         let mut diagnostic_dependencies = vec![];
@@ -1175,7 +1122,7 @@ impl Engine {
                                 ));
                                 dependent_required.push((name, names));
                             } else {
-                                let child = self.compile(dependency)?;
+                                let child = self.compile(vm, dependency)?;
                                 diagnostic_dependencies.push(DiagnosticDependency::Schema(
                                     name,
                                     child,
@@ -1194,8 +1141,8 @@ impl Engine {
                             ));
                             dependent_required.push((name, names));
                         }
-                        let dependent = self.field(operand, FIELD_DEPENDENT_SCHEMAS)?;
-                        let schemas = self.compile_map(dependent)?;
+                        let dependent = self.field(vm, operand, FIELD_DEPENDENT_SCHEMAS)?;
+                        let schemas = self.compile_map(vm, dependent)?;
                         diagnostic_dependencies.extend(schemas.iter().map(|&(name, child)| {
                             DiagnosticDependency::Schema(name, child, "dependentSchemas")
                         }));
@@ -1212,6 +1159,7 @@ impl Engine {
                         }
                         let mut object = Object {
                             header: self.container_header(
+                                vm,
                                 operand,
                                 FIELD_MAX_PROPERTIES,
                                 FIELD_MIN_PROPERTIES,
@@ -1220,8 +1168,8 @@ impl Engine {
                             )?,
                             inspect_required,
                             record: None,
-                            min: self.size_field(operand, FIELD_MIN_PROPERTIES)?,
-                            max: self.size_field(operand, FIELD_MAX_PROPERTIES)?,
+                            min: self.size_field(vm, operand, FIELD_MIN_PROPERTIES)?,
+                            max: self.size_field(vm, operand, FIELD_MAX_PROPERTIES)?,
                             required,
                             required_order,
                             properties,
@@ -1233,14 +1181,14 @@ impl Engine {
                             required_property_indices,
                             property_keys,
                             property_indices,
-                            additional: self.child(operand, FIELD_ADDITIONAL)?,
-                            names: self.child(operand, FIELD_PROPERTY_NAMES)?,
+                            additional: self.child(vm, operand, FIELD_ADDITIONAL)?,
+                            names: self.child(vm, operand, FIELD_PROPERTY_NAMES)?,
                             dependent_required,
                             dependent_schemas,
                             diagnostic_dependencies,
-                            unevaluated: self.child(operand, FIELD_UNEVALUATED)?,
+                            unevaluated: self.child(vm, operand, FIELD_UNEVALUATED)?,
                         }
-                        .with_record();
+                        .with_record(vm);
                         if let Some(record) = &mut object.record {
                             for field in &mut record.fields {
                                 field.check = field.child.and_then(|child| {
@@ -1271,8 +1219,8 @@ impl Engine {
                                         _ => None,
                                     }
                                 });
-                                let mut key = 0;
-                                if unsafe { sn_key_copy(field.name, &mut key) } != 0 {
+                                let mut key = Value::default();
+                                if unsafe { vm.sn_key_copy(field.name, &mut key) } != 0 {
                                     return Err(key);
                                 }
                                 // Distinct schema-only lookup handles also work
@@ -1291,19 +1239,34 @@ impl Engine {
                     }
                 }
                 OP_REF | OP_RECURSIVE_REF | OP_DYNAMIC_REF => {
-                    let reference = self.field(operand, FIELD_VALUE)?;
-                    let mut target = 0;
-                    if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
-                        if unsafe { sn_resolution_error(target) } != 0 {
-                            let message = self.field(target, FIELD_MESSAGE)?;
+                    let reference = self.field(vm, operand, FIELD_VALUE)?;
+                    let mut target = Value::default();
+                    if unsafe { vm.sn_resolve(self.compiler, program, reference, &mut target) } != 0
+                    {
+                        // Classification and message access can run Ruby. Root
+                        // the exception explicitly instead of relying on Rust
+                        // stack scanning. It is not an instruction operand.
+                        let temporary_root = unsafe { &*self.roots }.values.len();
+                        self.retain(target);
+                        let mut classified = Value::default();
+                        if unsafe { vm.sn_resolution_error(target, &mut classified) } != 0 {
+                            return Err(classified);
+                        }
+                        if unsafe { sn_true(classified) } != 0 {
+                            let message = self.field(vm, target, FIELD_MESSAGE)?;
+                            // Only the retained message survives compilation;
+                            // do not publish/freeze the exception's backtrace.
+                            unsafe { &mut *self.roots }
+                                .values
+                                .swap_remove(temporary_root);
                             Op::UnresolvedRef(message)
                         } else {
                             return Err(target);
                         }
                     } else {
                         self.retain(target);
-                        let target = self.compile(target)?;
-                        self.compile_reference(operand, opcode, target)?
+                        let target = self.compile(vm, target)?;
+                        self.compile_reference(vm, operand, opcode, target)?
                     }
                 }
                 _ => Op::Unsupported,
@@ -1359,6 +1322,7 @@ impl Engine {
 
 // A view of immutable compiled data and validator-owned runtime caches.
 struct Execution<'a> {
+    vm: &'a Ruby,
     engine: &'a Engine,
     caches: &'a runtime::Caches,
     memo: memo::Memo,
@@ -1450,7 +1414,7 @@ impl Execution<'_> {
             && rules.pattern.is_some()
             && !self.caches.scalar_callback()
         {
-            return rules.eval_guarded(self.caches, *required, value);
+            return rules.eval_guarded(self.vm, self.caches, *required, value);
         }
         let local_kind = InstanceKind::new(TYPE_UNCHECKED);
         let kind_state = known_kind.unwrap_or(&local_kind);
@@ -1646,7 +1610,7 @@ impl Execution<'_> {
                 let result = if kind == TYPE_UNSUPPORTED || self.caches.dynamic_calls() {
                     Unsupported
                 } else {
-                    values.eval(value, kind, depth, self.fixnum_flag, &self.budget)
+                    values.eval(self.vm, value, kind, depth, self.fixnum_flag, &self.budget)
                 };
                 if self.can_call_runtime(result) {
                     values.runtime(self.caches, value)
@@ -1675,7 +1639,7 @@ impl Execution<'_> {
                 } else if kind != TYPE_STRING {
                     Valid
                 } else {
-                    rules.eval(self.caches, value)
+                    rules.eval(self.vm, self.caches, value)
                 }
             }
             _ => unreachable!("applicators must be evaluated with their context"),
@@ -1688,7 +1652,7 @@ impl Execution<'_> {
         let result = if self.caches.dynamic_calls() {
             Unsupported
         } else {
-            unique(value, depth, self.fixnum_flag, &self.budget)
+            unique(self.vm, value, depth, self.fixnum_flag, &self.budget)
         };
         if self.can_call_runtime(result) {
             self.caches
@@ -1747,7 +1711,7 @@ impl Execution<'_> {
             let values = if len == 0 {
                 &[]
             } else {
-                unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
+                unsafe { self.vm.array(value) }
             };
             let primitive = match self.nodes[child].as_slice() {
                 [Op::Type(mask, _)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
@@ -1818,6 +1782,7 @@ impl Execution<'_> {
             });
             if let Some((required, pattern)) = pattern {
                 let result = pattern.visit_invalid_items(
+                    self.vm,
                     self.caches,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
@@ -1828,6 +1793,7 @@ impl Execution<'_> {
                 }
             } else if let Some((required, format)) = format {
                 let result = format.visit_invalid_items(
+                    self.vm,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
                     |_, item| self.eval(child, item, depth, active),
@@ -1837,6 +1803,7 @@ impl Execution<'_> {
                 }
             } else if let Some((required, content)) = content {
                 let result = content.visit_invalid_items(
+                    self.vm,
                     self.caches,
                     required,
                     values.get(r.prefix.len()..).unwrap_or(&[]),
@@ -1882,7 +1849,7 @@ impl Execution<'_> {
                         }
                     } else if let Some((required, rules)) = string {
                         if rules.pattern.is_some() {
-                            rules.eval_guarded(self.caches, required, item)
+                            rules.eval_guarded(self.vm, self.caches, required, item)
                         } else if rules.length_only() {
                             rules.eval_length_guarded(self.caches, required, item)
                         } else {
@@ -1892,7 +1859,7 @@ impl Execution<'_> {
                             } else if kind != TYPE_STRING {
                                 verdict(required == 0)
                             } else {
-                                rules.eval(self.caches, item)
+                                rules.eval(self.vm, self.caches, item)
                             }
                         }
                     } else {
@@ -1950,7 +1917,7 @@ impl Execution<'_> {
         };
         let total = match op {
             Op::Type(..) | Op::Boolean(_) => true,
-            Op::Const(expected) => expected & self.fixnum_flag != 0,
+            Op::Const(expected) => expected.has_fixnum_tag(self.fixnum_flag),
             Op::Number(_, rules) => rules.fast_limits.is_some(),
             _ => false,
         };
@@ -1960,12 +1927,15 @@ impl Execution<'_> {
         let values = if len == 0 {
             &[]
         } else {
-            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
+            unsafe { self.vm.array(value) }
         };
         // Preserve later Unsupported/fallback results: no predicate work may
         // be skipped until all values are proven to be supported Fixnums.
         // This guard stays linear, but is far cheaper than full node evaluation.
-        if !values.iter().all(|&item| item & self.fixnum_flag != 0) {
+        if !values
+            .iter()
+            .all(|&item| item.has_fixnum_tag(self.fixnum_flag))
+        {
             return None;
         }
         Some(evaluation::contains_validity(
@@ -2014,7 +1984,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let result = if value & self.fixnum_flag != 0 {
+            let result = if value.has_fixnum_tag(self.fixnum_flag) {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
@@ -2047,7 +2017,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let kind = if value & self.fixnum_flag != 0 {
+            let kind = if value.has_fixnum_tag(self.fixnum_flag) {
                 TYPE_INTEGRAL_NUMBER
             } else {
                 unsafe { sn_shallow_kind(value) }
@@ -2116,9 +2086,7 @@ impl Execution<'_> {
             }
             // Successful calls wrote exactly len pairs, bounded by eight;
             // no Ruby callback or allocation can change the Hash during C's walk.
-            let entries = unsafe {
-                std::slice::from_raw_parts(buffer.as_ptr().cast::<Value>(), 2 * len as usize)
-            };
+            let entries = unsafe { ruby::initialized_values(&buffer, 2 * len as usize) };
             let mut context = RecordContext {
                 engine: self,
                 rules: r,
@@ -2184,6 +2152,7 @@ impl Execution<'_> {
             0
         } else {
             match r.visit_properties(
+                self.vm,
                 value,
                 len,
                 self.undefined,
@@ -2272,7 +2241,7 @@ impl Execution<'_> {
         if self.caches.scalar_callback() && self.kind_demand[node] == KindDemand::Predicate {
             return TYPE_UNSUPPORTED;
         }
-        if value & self.fixnum_flag != 0 {
+        if value.has_fixnum_tag(self.fixnum_flag) {
             return TYPE_INTEGRAL_NUMBER;
         }
         if self.kind_demand[node] == KindDemand::None {
@@ -2295,7 +2264,7 @@ impl Execution<'_> {
         if known.get() != TYPE_UNCHECKED {
             return known.get();
         }
-        let kind = if value & self.fixnum_flag != 0 {
+        let kind = if value.has_fixnum_tag(self.fixnum_flag) {
             TYPE_INTEGRAL_NUMBER
         } else if self.kind_demand[node] == KindDemand::None {
             TYPE_UNCHECKED
@@ -2324,7 +2293,7 @@ impl Execution<'_> {
             [Op::String(required, rules)]
                 if depth <= MAX_EVALUATION_DEPTH && rules.pattern.is_some() =>
             {
-                rules.eval_guarded(self.caches, *required, value)
+                rules.eval_guarded(self.vm, self.caches, *required, value)
             }
             [
                 op @ (Op::Type(..)
@@ -2356,9 +2325,13 @@ struct RecordContext<'a, 'b> {
     probe: Option<Value>,
     status: Verdict,
 }
-fn indexed_record_field(record: &RecordObject, key: Value) -> Option<&RecordField> {
+fn indexed_record_field<'a>(
+    vm: &Ruby,
+    record: &'a RecordObject,
+    key: Value,
+) -> Option<&'a RecordField> {
     let index = record.short_index.as_ref()?;
-    let short = short_record_key(key);
+    let short = short_record_key(vm, key);
     if short.tag == 0 {
         return None;
     }
@@ -2374,7 +2347,7 @@ fn indexed_record_field(record: &RecordObject, key: Value) -> Option<&RecordFiel
 }
 fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verdict {
     let field = if c.indexed {
-        indexed_record_field(c.record, key)
+        indexed_record_field(c.engine.vm, c.record, key)
     } else {
         c.record
             .fields
@@ -2382,9 +2355,10 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
             .find(|field| field.key == key)
             .or_else(|| {
                 if c.record.short_index.is_some() {
-                    return indexed_record_field(c.record, key);
+                    return indexed_record_field(c.engine.vm, c.record, key);
                 }
-                let short = (c.record.fields.len() >= 4).then(|| short_record_key(key));
+                let short =
+                    (c.record.fields.len() >= 4).then(|| short_record_key(c.engine.vm, key));
                 c.record.fields.iter().find(|field| {
                     if let Some(short) = short.filter(|short| short.tag != 0) {
                         field.short_key.tag & 15 == short.tag & 15
@@ -2415,7 +2389,8 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
         c.status = if c.depth <= MAX_EVALUATION_DEPTH {
             match field.and_then(|field| field.check) {
                 Some(RecordCheck::IntegerBounds(min, max))
-                    if value & c.engine.fixnum_flag != 0 && !c.engine.caches.dynamic_calls() =>
+                    if value.has_fixnum_tag(c.engine.fixnum_flag)
+                        && !c.engine.caches.dynamic_calls() =>
                 {
                     let n = immediate_integer(value);
                     verdict(n >= min && n <= max)
@@ -2476,7 +2451,7 @@ fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<u
 // Call only after value & the header-validated fixnum_flag is nonzero.
 // Rust's signed shift is arithmetic; other encodings retain the C adapters.
 fn immediate_integer(value: Value) -> i64 {
-    (value as isize >> 1) as i64
+    (value.bits() as isize >> 1) as i64
 }
 fn equal_budgeted(a: Value, b: Value, depth: usize, budget: &budget::Budget) -> Verdict {
     equal_cached(a, b, depth, &mut structural::Cache::new(depth), budget)
@@ -2773,8 +2748,8 @@ fn mix(n: u64) -> u64 {
     let n = (n ^ (n >> 27)).wrapping_mul(0x94d049bb133111eb);
     n ^ (n >> 31)
 }
-fn string_fingerprint(value: Value) -> u64 {
-    bytes_fingerprint(unsafe { string_bytes(value) })
+fn string_fingerprint(vm: &Ruby, value: Value) -> u64 {
+    bytes_fingerprint(unsafe { vm.string(value) })
 }
 #[derive(Clone, Copy, Debug)]
 struct ShortRecordKey {
@@ -2783,34 +2758,17 @@ struct ShortRecordKey {
     // bits hold the public CRuby encoding index, not a borrowed pointer.
     tag: u64,
 }
-fn short_record_key(value: Value) -> ShortRecordKey {
+fn short_record_key(vm: &Ruby, value: Value) -> ShortRecordKey {
     let mut data = std::ptr::null();
     let mut len = 0;
     let encoding = unsafe { sn_record_key_view(value, &mut data, &mut len) };
     if len > 8 {
         return ShortRecordKey { word: 0, tag: 0 };
     }
-    let bytes = unsafe { byte_view(data, len) };
+    let bytes = unsafe { vm.bytes(data, len) };
     ShortRecordKey {
         word: short_word(bytes),
         tag: ((encoding as u64) << 4) | (len as u64 + 1),
-    }
-}
-// Borrow an already classified String under the GVL. The caller must not
-// allocate Ruby objects or run Ruby callbacks while the returned view is live.
-unsafe fn string_bytes<'a>(value: Value) -> &'a [u8] {
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    unsafe { sn_string_raw_view(value, &mut data, &mut len) };
-    unsafe { byte_view(data, len) }
-}
-// The caller must keep the original Ruby string alive and unchanged under
-// the GVL for the entire lifetime of the view, without allocating in Ruby.
-unsafe fn byte_view<'a>(data: *const u8, len: usize) -> &'a [u8] {
-    if len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(data, len) }
     }
 }
 // For at most eight bytes, the first/last scalar words cover every byte.
@@ -2843,25 +2801,28 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
     mix(result ^ TYPE_STRING as u64)
 }
 fn fingerprint_budgeted(
+    vm: &Ruby,
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: usize,
     big_hint: bool,
     budget: &budget::Budget,
 ) -> Option<u64> {
     fingerprint_cached(
+        vm,
         value,
-        depth,
         fixnum_flag,
+        depth,
         big_hint,
         &mut structural::Cache::new(depth),
         budget,
     )
 }
 fn fingerprint_cached(
+    vm: &Ruby,
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: usize,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &budget::Budget,
@@ -2872,7 +2833,7 @@ fn fingerprint_cached(
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
-    if value & fixnum_flag != 0 {
+    if value.has_fixnum_tag(fixnum_flag) {
         // sn_fixnum_flag enables this hint only after the C headers confirm
         // the signed immediate encoding. Rust's signed shift is arithmetic.
         let integer = immediate_integer(value);
@@ -2909,7 +2870,7 @@ fn fingerprint_cached(
     }
     let result = match kind {
         TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
-        TYPE_IDENTITY_SCALAR => Some(mix(value as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
+        TYPE_IDENTITY_SCALAR => Some(mix(value.bits() as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
         TYPE_NULL => Some(mix(TYPE_NULL as u64)),
         TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
             2
@@ -2917,7 +2878,7 @@ fn fingerprint_cached(
             3
         })),
         TYPE_STRING => Some(bytes_fingerprint(unsafe {
-            byte_view(data.assume_init().cast(), len.assume_init())
+            vm.bytes(data.assume_init().cast(), len.assume_init())
         })),
         TYPE_ARRAY => {
             let mut hash = mix(TYPE_ARRAY as u64);
@@ -2925,20 +2886,20 @@ fn fingerprint_cached(
             let values = if len == 0 {
                 &[]
             } else {
-                unsafe { std::slice::from_raw_parts(data.assume_init().cast::<Value>(), len) }
+                unsafe { vm.values(data.assume_init().cast::<Value>(), len) }
             };
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
-                hash =
-                    mix(hash
-                        ^ fingerprint_cached(item, depth + 1, fixnum_flag, false, memo, budget)?);
+                hash = mix(hash
+                    ^ fingerprint_cached(vm, item, depth + 1, fixnum_flag, false, memo, budget)?);
             }
             Some(hash)
         }
         TYPE_OBJECT => {
             let len = unsafe { len.assume_init() };
             let mut c = FingerprintContext {
+                vm,
                 hash: 0,
                 depth: depth + 1,
                 fixnum_flag,
@@ -2962,9 +2923,10 @@ fn fingerprint_cached(
     result
 }
 struct FingerprintContext<'a> {
+    vm: &'a Ruby,
     hash: u64,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: usize,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &'a budget::Budget,
 }
@@ -2979,11 +2941,12 @@ unsafe extern "C" fn fingerprint_entry(
         if !c.budget.checkpoint() {
             return Unsupported as i32;
         }
-        let Some(hash) = fingerprint_cached(value, c.depth, c.fixnum_flag, false, c.memo, c.budget)
+        let Some(hash) =
+            fingerprint_cached(c.vm, value, c.depth, c.fixnum_flag, false, c.memo, c.budget)
         else {
             return Unsupported as i32;
         };
-        c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));
+        c.hash ^= mix(bytes_fingerprint(unsafe { c.vm.bytes(data, len) }) ^ hash.rotate_left(17));
         Valid as i32
     }))
     .unwrap_or(Unsupported as i32)
@@ -3005,7 +2968,13 @@ impl Hasher for BucketHasher {
         }
     }
 }
-fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budget) -> Verdict {
+fn unique(
+    vm: &Ruby,
+    value: Value,
+    depth: usize,
+    fixnum_flag: usize,
+    budget: &budget::Budget,
+) -> Verdict {
     let len = unsafe { sn_len(value) };
     if !budget.checkpoint() {
         return Unsupported;
@@ -3013,7 +2982,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
     if len <= 16 {
         return unique_linear(value, depth, budget, false);
     }
-    let values = unsafe { std::slice::from_raw_parts(sn_array_data(value), len) };
+    let values = unsafe { vm.array(value) };
     // This is a checked optimization hint, not an instance shape assumption.
     let big_hint = unsafe { sn_is_bignum(values[0]) } != 0;
     if big_hint
@@ -3034,9 +3003,10 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
         values,
         |item| {
             fingerprint_cached(
+                vm,
                 item,
-                depth,
                 fixnum_flag,
+                depth,
                 big_hint,
                 &mut fingerprints,
                 budget,
@@ -3391,6 +3361,7 @@ fn allocate_unique_slots<S: UniqueSlot>(capacity: usize) -> Option<Vec<S>> {
     Some(slots)
 }
 struct PropertyCandidates<'a> {
+    vm: &'a Ruby,
     rules: &'a Object,
     indices: Vec<usize>,
     budget: &'a budget::Budget,
@@ -3404,7 +3375,11 @@ unsafe extern "C" fn property_candidate(context: *mut c_void, key: Value, _: Val
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
-        if let Some(target) = c.rules.property_targets.get(&tracking::JsonKey::new(key)) {
+        if let Some(target) = c
+            .rules
+            .property_targets
+            .get(&tracking::JsonKey::new(c.vm, key))
+        {
             c.indices.push(target.index);
         }
         Valid as i32
@@ -3444,11 +3419,11 @@ pub unsafe extern "C" fn sn_object_entry(context: *const c_void, key: Value, val
             return Valid as i32;
         }
         match c.rules.visit_value_rules(
+            c.engine.vm,
             c.engine.caches,
             &c.engine.budget,
             c.engine.caches.runtime_order(),
-            key,
-            None,
+            (key, None),
             |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
                 Valid => Ok(()),
                 status => Err(status),
@@ -3482,6 +3457,7 @@ pub unsafe extern "C" fn sn_compile(
     multiple: i32,
     error: *mut Value,
 ) -> i32 {
+    let mut vm = unsafe { Ruby::enter() };
     match catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &mut *engine };
         e.validate_format = format != 0;
@@ -3489,12 +3465,12 @@ pub unsafe extern "C" fn sn_compile(
         e.compiler = e.retain(compiler);
         if multiple != 0 {
             for program in e.values(program) {
-                e.compile(program)?;
+                e.compile(&mut vm, program)?;
             }
         } else {
-            e.root = e.compile(program)?;
+            e.root = e.compile(&mut vm, program)?;
         }
-        e.bind_dynamic_anchors()?;
+        e.bind_dynamic_anchors(&mut vm)?;
         e.simplify_dynamic_references();
         e.compile_memoization();
         e.compile_native_validity_support();
@@ -3586,12 +3562,14 @@ pub unsafe extern "C" fn sn_valid(
     value: Value,
     depth: usize,
 ) -> i32 {
+    let vm = unsafe { Ruby::enter() };
     catch_unwind(AssertUnwindSafe(|| {
         let e = unsafe { &*engine };
         let mut local = None;
         let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         caches.admit(e, root);
         let execution = Execution {
+            vm: &vm,
             engine: e,
             caches,
             memo: memo::Memo::default(),
@@ -3615,12 +3593,14 @@ pub unsafe extern "C" fn sn_valid_with_limits(
     limits: *const budget::Limits,
     outcome: *mut budget::Outcome,
 ) -> i32 {
+    let vm = unsafe { Ruby::enter() };
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut local = None;
         let caches = runtime::Caches::supplied_or_default(unsafe { caches.as_ref() }, &mut local);
         let e = unsafe { &*engine };
         caches.admit(e, root);
         let execution = Execution {
+            vm: &vm,
             engine: unsafe { &*engine },
             caches,
             memo: memo::Memo::default(),
@@ -3663,13 +3643,7 @@ pub unsafe extern "C" fn sn_roots(engine: *const Engine) -> *const Roots {
 /// No mutable root borrow can be live across a Ruby allocation/callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_roots_mark(roots: *const Roots) {
-    for &value in unsafe { &*roots }
-        .values
-        .iter()
-        .chain(&unsafe { &*roots }.binding_names)
-    {
-        unsafe { sn_pin(value) };
-    }
+    unsafe { (&*roots).mark() };
 }
 /// # Safety
 /// Roots must be live with no mutable root borrow active.
@@ -3755,20 +3729,23 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
             .sum::<usize>()
 }
 
+impl ruby_trace::NativeOnly for Verdict {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn falls_back_for_clustered_slots_without_comparing_distinct_fingerprints() {
-        let values: Vec<_> = (1..=4096).collect();
+        let values: Vec<_> = (1..=4096).map(v).collect();
         let mut hashes = 0;
         assert_eq!(
             indexed_unique(
                 &values,
                 |value| {
                     hashes += 1;
-                    Some((value as u64) << 32)
+                    Some((value.bits() as u64) << 32)
                 },
                 |_, _| panic!("distinct full fingerprints cannot require equality"),
             ),
@@ -3780,14 +3757,23 @@ mod tests {
 
     #[test]
     fn sorted_collisions_preserve_exact_equality_and_early_results() {
-        let hash = |value| (value != 99).then_some(value as u64 % 2);
+        let hash = |value: Value| (value != v(99)).then_some(value.bits() as u64 % 2);
         let equal = |a, b| verdict(a == b);
-        assert_eq!(sorted_unique(&[0, 2, 4, 1, 3, 5], hash, equal), Valid);
-        assert_eq!(sorted_unique(&[0, 2, 0, 99], hash, equal), Invalid);
-        assert_eq!(sorted_unique(&[0, 2, 99, 0], hash, equal), Unsupported);
         assert_eq!(
-            sorted_unique(&[0, 1, 1, 2], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(4), v(1), v(3), v(5)], hash, equal),
+            Valid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(0), v(99)], hash, equal),
+            Invalid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(99), v(0)], hash, equal),
+            Unsupported
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(1), v(1), v(2)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)
@@ -3796,8 +3782,8 @@ mod tests {
             Invalid
         );
         assert_eq!(
-            sorted_unique(&[0, 2, 1, 1], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(1), v(1)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)
