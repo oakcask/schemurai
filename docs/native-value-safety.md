@@ -146,8 +146,8 @@ Ruby (including `const_missing`/autoload), so it cannot be an unprotected leaf.
 The compiler temporarily roots an exception while classifying it and extracting
 its message, and removes that temporary root before publishing the Program.
 
-`script/native_safety/check.py` parses Clang's expanded, typed C AST. Run it
-with Python 3, Clang and the Ruby used to build the extension. Its checks cover:
+`script/native_safety/check.rb` parses Clang's expanded, typed C AST. Run it
+with Clang and the Ruby used to build the extension. Its checks cover:
 
 - The transitive call graph of every other Rust-imported adapter, including
   functions passed as callbacks and effects introduced by C macros. Unknown
@@ -164,7 +164,7 @@ with Python 3, Clang and the Ruby used to build the extension. Its checks cover:
   result publication into Rust. Report pointers must come from the rooted
   TypedData result; every handle copied from runtime locations is rooted.
 
-CI checks both portable and optimized Hash walks. `test/native_safety_test.py`
+CI checks both portable and optimized Hash walks. `test/native_safety_test.rb`
 compiles independent negative C fixtures to check rejection of hidden allocation,
 unreviewed indirect calls, missing mark fields, incorrect publication order,
 shareable mutable state, premature construction-guard removal, snapshot lifetime
