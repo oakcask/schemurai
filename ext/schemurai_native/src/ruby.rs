@@ -12,6 +12,8 @@ use std::rc::Rc;
 #[repr(transparent)]
 pub struct Value {
     bits: usize,
+    // Zero-sized !Send/!Sync marker; no Rc allocation or reference counting.
+    // PhantomData<*const ()> would impose the same thread restriction.
     affinity: PhantomData<Rc<()>>,
 }
 impl Value {
@@ -54,6 +56,7 @@ pub(crate) const fn test_fixnum_tag(bits: usize) -> FixnumTag {
 /// Access to one active CRuby invocation. No cloning, global storage or Send/Sync.
 /// Shared borrowing authorizes views; Ruby callbacks require exclusive access.
 pub(crate) struct Ruby {
+    // Same zero-sized !Send/!Sync marker as Value; no Rc is created.
     affinity: PhantomData<Rc<()>>,
 }
 impl Ruby {
