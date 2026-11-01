@@ -652,7 +652,7 @@ pub struct Engine {
     indices: HashMap<Value, usize>,
     roots: *mut Roots,
     root: usize,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     compiler: Value,
     runtime_messages: bool,
     validate_format: bool,
@@ -2804,15 +2804,15 @@ fn fingerprint_budgeted(
     vm: &Ruby,
     value: Value,
     depth: usize,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     budget: &budget::Budget,
 ) -> Option<u64> {
     fingerprint_cached(
         vm,
         value,
-        fixnum_flag,
         depth,
+        fixnum_flag,
         big_hint,
         &mut structural::Cache::new(depth),
         budget,
@@ -2822,7 +2822,7 @@ fn fingerprint_cached(
     vm: &Ruby,
     value: Value,
     depth: usize,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &budget::Budget,
@@ -2926,7 +2926,7 @@ struct FingerprintContext<'a> {
     vm: &'a Ruby,
     hash: u64,
     depth: usize,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &'a budget::Budget,
 }
@@ -2972,7 +2972,7 @@ fn unique(
     vm: &Ruby,
     value: Value,
     depth: usize,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     budget: &budget::Budget,
 ) -> Verdict {
     let len = unsafe { sn_len(value) };
@@ -3005,8 +3005,8 @@ fn unique(
             fingerprint_cached(
                 vm,
                 item,
-                fixnum_flag,
                 depth,
+                fixnum_flag,
                 big_hint,
                 &mut fingerprints,
                 budget,

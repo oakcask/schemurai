@@ -47,6 +47,25 @@ fn check(name: &str, body: &str, error: Option<&str>) {
 }
 
 #[test]
+fn integer_tags_cannot_be_confused_with_depths() {
+    check(
+        "tag_is_not_depth",
+        "fn depth(_: usize) {} unsafe fn bad() { depth(unsafe { ruby::sn_fixnum_flag() }); }",
+        Some("E0308"),
+    );
+    check(
+        "depth_is_not_tag",
+        "fn bad(value: Value, depth: usize) { value.has_fixnum_tag(depth); }",
+        Some("E0308"),
+    );
+    check(
+        "typed_tag",
+        "fn classify(value: Value, tag: ruby::FixnumTag) -> bool { value.has_fixnum_tag(tag) }",
+        None,
+    );
+}
+
+#[test]
 fn handles_reject_integer_and_thread_boundaries() {
     check("integer", "fn bad(x: usize) -> Value { x }", Some("E0308"));
     check(

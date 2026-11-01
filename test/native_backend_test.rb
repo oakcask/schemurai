@@ -3639,6 +3639,25 @@ RSpec.describe "native VALUE execution" do
     end
   end
 
+  it "preserves indexed numeric equality at different schema nesting depths" do # rubocop:disable RSpec/ExampleLength
+    cases = [[{"uniqueItems" => true}, (0...20).to_a + [0.0], false],
+      [{"enum" => (0...20).to_a}, 0.0, true]]
+    cases.each do |rule, instance, valid|
+      0.upto(4) do |depth|
+        schema = rule
+        value = instance
+        depth.times do
+          schema = {"items" => schema}
+          value = [value]
+        end
+        native = Schemurai.compile(schema, backend: :native)
+        vm = Schemurai.compile(schema, backend: :vm)
+        expect(native.valid?(value)).to eq(valid)
+        expect(native.validate(value).errors).to eq(vm.validate(value).errors)
+      end
+    end
+  end
+
   it "preserves schema-order enum comparisons and Ruby collection access methods" do # rubocop:disable RSpec/ExampleLength
     proxy = Class.new do
       attr_reader :calls

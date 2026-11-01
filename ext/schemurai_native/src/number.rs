@@ -399,7 +399,7 @@ pub(super) struct Rules {
     multiple: Option<Limit>,
     pub(super) fast_limits: Option<Vec<(i32, i64)>>,
     pub(super) fast_multiple: Option<FastMultiple>,
-    fixnum_flag: usize,
+    fixnum_flag: FixnumTag,
     bounds_view: bool,
     bounded_signs: Option<[bool; 2]>,
     runtime_operands: bool,
@@ -595,7 +595,7 @@ fn read_integer_status(value: Value) -> Result<i128, i32> {
 // Runtime numeric instructions have already rejected non-numeric instances.
 // Their non-Float branch contains only ordinary Integers; compilation uses
 // read_integer_status instead because schema metadata still needs checking.
-fn read_known_integer_status(value: Value, fixnum_flag: usize) -> Result<i128, i32> {
+fn read_known_integer_status(value: Value, fixnum_flag: FixnumTag) -> Result<i128, i32> {
     if value.has_fixnum_tag(fixnum_flag) {
         return Ok(immediate_integer(value) as i128);
     }

@@ -1,9 +1,9 @@
 //! Validate complete blocks of borrowed, header-verified immediate integers.
 //! Stop before any uncertain block so the ordinary evaluator retains ordering.
-use super::Value;
+use super::{FixnumTag, Value};
 
-pub(super) fn valid_prefix(values: &[Value], min: i64, max: i64, fixnum_flag: usize) -> usize {
-    if fixnum_flag != 1 || values.len() < 16 {
+pub(super) fn valid_prefix(values: &[Value], min: i64, max: i64, fixnum_flag: FixnumTag) -> usize {
+    if !fixnum_flag.is_low_bit() || values.len() < 16 {
         return 0;
     }
     // Comparing tagged values preserves signed integer order. Clamp the
@@ -90,6 +90,7 @@ fn neon_prefix(values: &[Value], min: i64, max: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_fixnum_tag;
 
     fn tag(value: i64) -> Value {
         super::super::ruby::test_value(((value << 1) | 1) as usize)
@@ -110,7 +111,7 @@ mod tests {
                 ] {
                     let mut values = original.clone();
                     values[at] = value;
-                    let prefix = valid_prefix(&values, -16, 16, 1);
+                    let prefix = valid_prefix(&values, -16, 16, test_fixnum_tag(1));
                     assert!(prefix <= at, "length {len}, position {at}, prefix {prefix}");
                     assert_eq!(&values[..prefix], &original[..prefix]);
                 }
@@ -121,7 +122,7 @@ mod tests {
     #[test]
     fn clamps_schema_limits_without_overflow_and_obeys_disabled_hints() {
         let values = [tag(-(1 << 62)), tag((1 << 62) - 1)].repeat(32);
-        let prefix = valid_prefix(&values, i64::MIN, i64::MAX, 1);
+        let prefix = valid_prefix(&values, i64::MIN, i64::MAX, test_fixnum_tag(1));
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2") {
             assert_eq!(prefix, values.len());
@@ -129,11 +130,26 @@ mod tests {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         assert_eq!(prefix, values.len());
         assert!(prefix <= values.len());
-        assert_eq!(valid_prefix(&values, i64::MIN, i64::MAX, 0), 0);
-        assert_eq!(valid_prefix(&values, 1 << 62, i64::MAX, 1), 0);
-        assert_eq!(valid_prefix(&values, i64::MIN, -(1 << 62) - 1, 1), 0);
-        assert_eq!(valid_prefix(&values, 1, 0, 1), 0);
-        assert_eq!(valid_prefix(&values, -(1 << 62) + 1, i64::MAX, 1), 0);
-        assert_eq!(valid_prefix(&values, i64::MIN, (1 << 62) - 2, 1), 0);
+        assert_eq!(
+            valid_prefix(&values, i64::MIN, i64::MAX, test_fixnum_tag(0)),
+            0
+        );
+        assert_eq!(
+            valid_prefix(&values, 1 << 62, i64::MAX, test_fixnum_tag(1)),
+            0
+        );
+        assert_eq!(
+            valid_prefix(&values, i64::MIN, -(1 << 62) - 1, test_fixnum_tag(1)),
+            0
+        );
+        assert_eq!(valid_prefix(&values, 1, 0, test_fixnum_tag(1)), 0);
+        assert_eq!(
+            valid_prefix(&values, -(1 << 62) + 1, i64::MAX, test_fixnum_tag(1)),
+            0
+        );
+        assert_eq!(
+            valid_prefix(&values, i64::MIN, (1 << 62) - 2, test_fixnum_tag(1)),
+            0
+        );
     }
 }

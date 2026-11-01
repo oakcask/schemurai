@@ -119,6 +119,10 @@ exhaustive check to native-only aggregates. Enum and tuple implementations use
 exhaustive patterns. The compiler checks roots, reports, paths, property
 locations and all runner snapshots with this scheme.
 
+The header-verified immediate-integer tag has its own `FixnumTag` type. It is
+native metadata, distinct from both Ruby handles and traversal depths, so the
+compiler rejects swapping the tag and depth when forwarding fingerprint calls.
+
 `tests/ruby_contract.rs` compiles positive and negative fixtures with `rustc`.
 It checks integer/handle separation, private representation, `Send`/`Sync`
 rejection, omitted fields and Ruby handles hidden in native-only fields. It also

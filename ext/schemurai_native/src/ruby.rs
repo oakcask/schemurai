@@ -25,12 +25,30 @@ impl Value {
             affinity: PhantomData,
         }
     }
-    pub(crate) const fn has_fixnum_tag(self, flag: usize) -> bool {
-        self.bits & flag != 0
+    pub(crate) const fn has_fixnum_tag(self, flag: FixnumTag) -> bool {
+        self.bits & flag.bits != 0
     }
     pub(crate) const fn bits(self) -> usize {
         self.bits
     }
+}
+
+/// Header-verified immediate-integer encoding, distinct from depths and sizes.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(transparent)]
+pub(crate) struct FixnumTag {
+    bits: usize,
+}
+impl FixnumTag {
+    pub(crate) const fn is_low_bit(self) -> bool {
+        self.bits == 1
+    }
+}
+crate::ruby_trace::native_fields!(FixnumTag { bits });
+
+#[cfg(test)]
+pub(crate) const fn test_fixnum_tag(bits: usize) -> FixnumTag {
+    FixnumTag { bits }
 }
 
 /// Access to one active CRuby invocation. No cloning, global storage or Send/Sync.
@@ -178,7 +196,7 @@ unsafe extern "C" {
     pub(super) fn sn_true(value: Value) -> i32;
     pub(super) fn sn_truthy(value: Value) -> i32;
     pub(super) fn sn_fixnum(value: Value) -> i32;
-    pub(super) fn sn_fixnum_flag() -> usize;
+    pub(super) fn sn_fixnum_flag() -> FixnumTag;
     fn sn_array_data(value: Value) -> *const Value;
     pub(super) fn sn_integer(value: Value) -> i64;
     pub(super) fn sn_integer128(value: Value, words: *mut u64) -> i32;

@@ -18,7 +18,7 @@ impl Enumeration {
         vm: &Ruby,
         source: Value,
         values: Vec<Value>,
-        fixnum_flag: usize,
+        fixnum_flag: FixnumTag,
     ) -> Self {
         let mut fingerprints = structural::Cache::batch(0);
         let budget = budget::Budget::default();
@@ -53,7 +53,7 @@ impl Enumeration {
         value: Value,
         kind: i32,
         depth: usize,
-        fixnum_flag: usize,
+        fixnum_flag: FixnumTag,
         budget: &budget::Budget,
     ) -> Verdict {
         if let Some(index) = &self.index {
