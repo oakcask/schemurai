@@ -3,13 +3,13 @@
   "schema": {
     "repository": "SchemaStore/schemastore",
     "branch": "master",
-    "revision": "f7c2f3bcb512651bd980ed6896639ea8ded9ddf0",
+    "revision": "1f9ebc8379f842319663f776f9767fdf6ca5e4a5",
     "path": "src/schemas/json/github-workflow.json"
   },
   "license": {
     "repository": "SchemaStore/schemastore",
     "branch": "master",
-    "revision": "f7c2f3bcb512651bd980ed6896639ea8ded9ddf0",
+    "revision": "1f9ebc8379f842319663f776f9767fdf6ca5e4a5",
     "path": "LICENSE",
     "spdx": "Apache-2.0",
     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
