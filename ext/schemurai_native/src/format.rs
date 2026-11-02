@@ -16,11 +16,11 @@ pub(super) enum Format {
     Unsupported,
 }
 impl Format {
-    pub(super) fn compile(name: Value) -> Self {
+    pub(super) fn compile(vm: &Ruby, name: Value) -> Self {
         if unsafe { sn_kind(name) } != TYPE_STRING {
             return Self::Unsupported;
         }
-        let bytes = unsafe { string_bytes(name) };
+        let bytes = unsafe { vm.string(name) };
         match bytes {
             b"date" => Self::Date,
             b"time" => Self::Time,
@@ -34,8 +34,8 @@ impl Format {
             _ => Self::Unsupported,
         }
     }
-    pub(super) fn eval(&self, value: Value) -> Verdict {
-        self.eval_bytes(unsafe { string_bytes(value) })
+    pub(super) fn eval(&self, vm: &Ruby, value: Value) -> Verdict {
+        self.eval_bytes(unsafe { vm.string(value) })
     }
     pub(super) fn eval_bytes(&self, bytes: &[u8]) -> Verdict {
         verdict(match self {
@@ -53,6 +53,7 @@ impl Format {
     }
     pub(super) fn visit_invalid_items(
         &self,
+        vm: &Ruby,
         required: i32,
         values: &[Value],
         invalid: impl FnMut(usize, Value) -> Verdict,
@@ -60,7 +61,9 @@ impl Format {
         // Each arm monomorphizes the scan with its parser selected once.
         macro_rules! scan {
             ($parser:ident) => {
-                scan_items(required, values, invalid, |bytes| verdict($parser(bytes)))
+                scan_items(vm, required, values, invalid, |bytes| {
+                    verdict($parser(bytes))
+                })
             };
         }
         match self {
@@ -73,12 +76,13 @@ impl Format {
             Self::Uuid => scan!(uuid),
             Self::Pointer => scan!(pointer),
             Self::RelativePointer => scan!(relative_pointer),
-            Self::Unsupported => scan_items(required, values, invalid, |_| Unsupported),
+            Self::Unsupported => scan_items(vm, required, values, invalid, |_| Unsupported),
         }
     }
 }
 
 fn scan_items(
+    vm: &Ruby,
     required: i32,
     values: &[Value],
     mut invalid: impl FnMut(usize, Value) -> Verdict,
@@ -98,7 +102,7 @@ fn scan_items(
         let result = if kind < 0 {
             verdict(required == 0)
         } else {
-            matches(unsafe { byte_view(data, len) })
+            matches(unsafe { vm.bytes(data, len) })
         };
         match result {
             Unsupported => return Unsupported,

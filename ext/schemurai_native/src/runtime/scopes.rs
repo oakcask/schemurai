@@ -214,53 +214,6 @@ impl Scopes {
                         .sum::<usize>()
             })
     }
-    pub(super) fn mark(&self) {
-        // A stopped native pass may hold a scope-vector borrow. Resources also
-        // belong to the compiled registry; C roots completed request keys.
-        for values in [&self.initial, &self.stack, &self.pending] {
-            if let Ok(values) = values.try_borrow() {
-                for &value in values.iter() {
-                    unsafe { sn_pin(value) };
-                }
-            }
-        }
-        for pairs in [
-            &self.initial_references,
-            &self.vm_references,
-            &self.pending_references,
-        ] {
-            if let Ok(pairs) = pairs.try_borrow() {
-                for &(program, instance) in pairs.iter() {
-                    unsafe {
-                        sn_pin(program);
-                        sn_pin(instance);
-                    }
-                }
-            }
-        }
-        if let Ok(effects) = self.effects.try_borrow() {
-            for (key, values) in effects.iter() {
-                match *key {
-                    Key::Value(source, value, _) => unsafe {
-                        sn_pin(source);
-                        sn_pin(value);
-                    },
-                    Key::Message(m) => unsafe {
-                        sn_pin(m.operand);
-                        sn_pin(m.instance);
-                        sn_pin(m.frame);
-                    },
-                    Key::Rescue((frame, _, _)) => unsafe {
-                        sn_pin(frame);
-                    },
-                    Key::Pointer(_) => {}
-                }
-                for &value in values {
-                    unsafe { sn_pin(value) };
-                }
-            }
-        }
-    }
 }
 fn values(array: Value) -> Vec<Value> {
     (0..unsafe { sn_len(array) })
@@ -293,9 +246,7 @@ pub unsafe extern "C" fn sn_scopes_inherit(
         }
     }
 }
-unsafe extern "C" {
-    fn sn_references_read(active: Value, pairs: *mut c_void);
-}
+
 /// # Safety
 /// Pairs must be an exclusively borrowed reference vector; called by C's
 /// allocation-free walk of library-owned identity Hashes.
@@ -361,25 +312,26 @@ pub unsafe extern "C" fn sn_scopes_unwind(caches: *const Caches) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn pending_scopes_survive_native_unwind_and_replay_ruby_clears() {
         let scopes = Scopes::default();
-        let key = Key::Value(2, 3, RUNTIME_TYPE);
-        scopes.inherit(vec![10], true);
+        let key = Key::Value(v(2), v(3), RUNTIME_TYPE);
+        scopes.inherit(vec![v(10)], true);
         {
-            let _outer = scopes.enter(20, true);
-            let _same = scopes.enter(20, true);
+            let _outer = scopes.enter(v(20), true);
+            let _same = scopes.enter(v(20), true);
             scopes.request(key);
             assert_eq!(scopes.unwind(), 1);
             assert_eq!(scopes.len(), 2);
         }
-        assert_eq!(scopes.at(0), Some(10));
-        assert_eq!(scopes.value(1), 20);
+        assert_eq!(scopes.at(0), Some(v(10)));
+        assert_eq!(scopes.value(1), v(20));
         scopes.accept(vec![]);
         scopes.reset();
         {
-            let _outer = scopes.enter(20, true);
+            let _outer = scopes.enter(v(20), true);
             scopes.apply(key);
             assert_eq!(scopes.at(0), None);
         }
@@ -390,41 +342,63 @@ mod tests {
     fn reference_requests_copy_live_guards_and_keep_vm_ancestors_separate() {
         let scopes = Scopes::default();
         scopes.inherit(vec![], true);
-        scopes.initial_references.borrow_mut().push((10, 11));
-        scopes.vm_references.borrow_mut().push((20, 21));
-        assert!(scopes.reference_active(10, 11));
-        assert!(scopes.reference_active(20, 21));
-        assert!(!scopes.reference_active(10, 21));
+        scopes.initial_references.borrow_mut().push((v(10), v(11)));
+        scopes.vm_references.borrow_mut().push((v(20), v(21)));
+        assert!(scopes.reference_active(v(10), v(11)));
+        assert!(scopes.reference_active(v(20), v(21)));
+        assert!(!scopes.reference_active(v(10), v(21)));
         {
-            let outer = scopes.reference_frame(30, 31);
+            let outer = scopes.reference_frame(v(30), v(31));
             let _outer = scopes.reference_guard(&outer);
             {
-                let inner = scopes.reference_frame(40, 41);
+                let inner = scopes.reference_frame(v(40), v(41));
                 let _inner = scopes.reference_guard(&inner);
-                scopes.request(Key::Value(2, 3, RUNTIME_TYPE));
+                scopes.request(Key::Value(v(2), v(3), RUNTIME_TYPE));
             }
             assert_eq!(
                 *scopes.references(false),
-                vec![(10, 11), (40, 41), (30, 31)]
+                vec![(v(10), v(11)), (v(40), v(41)), (v(30), v(31))]
             );
         }
         assert!(scopes.reference.get().is_null());
-        assert_eq!(*scopes.references(true), vec![(10, 11)]);
+        assert_eq!(*scopes.references(true), vec![(v(10), v(11))]);
         scopes.reset();
-        assert_eq!(*scopes.references(false), vec![(10, 11)]);
+        assert_eq!(*scopes.references(false), vec![(v(10), v(11))]);
         scopes.clear();
-        assert!(!scopes.reference_active(20, 21));
+        assert!(!scopes.reference_active(v(20), v(21)));
     }
 
     #[test]
     fn unchanged_requests_do_not_restore_a_later_mutated_scope() {
         let scopes = Scopes::default();
-        let key = Key::Value(2, 3, RUNTIME_TYPE);
-        scopes.inherit(vec![10], true);
+        let key = Key::Value(v(2), v(3), RUNTIME_TYPE);
+        scopes.inherit(vec![v(10)], true);
         scopes.request(key);
-        scopes.accept(vec![10]);
-        let _inner = scopes.enter(20, true);
+        scopes.accept(vec![v(10)]);
+        let _inner = scopes.enter(v(20), true);
         scopes.apply(key);
-        assert_eq!(scopes.at(1), Some(20));
+        assert_eq!(scopes.at(1), Some(v(20)));
     }
 }
+
+impl Trace for Key {
+    fn trace_with(&self, visit: &mut impl FnMut(Value), mode: crate::ruby_trace::TraceMode) {
+        match self {
+            Self::Value(source, value, operation) => {
+                source.trace_with(visit, mode);
+                value.trace_with(visit, mode);
+                ruby_trace::require_native(operation);
+            }
+            Self::Message(message) => message.trace_with(visit, mode),
+            Self::Pointer(index) => ruby_trace::require_native(index),
+            Self::Rescue(error) => error.trace_with(visit, mode),
+        }
+    }
+}
+// The live Reference chain points into native stack frames. Its program and
+// instance handles also belong to C's rooted registry/input; never follow the
+// chain from a stopped-Ractor mark callback.
+ruby_trace::trace_runner_fields!(Scopes {
+    key ; initial_references, vm_references, pending_references, initial, stack,
+    pending, effects ; enabled, entered, unwind ; reference
+});

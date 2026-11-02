@@ -13,6 +13,8 @@ on:
       - schemurai.gemspec
       - lib/**/*
       - ext/**/*
+      - script/native_safety/**/*
+      - test/native_safety_test.rb
       - test/native_backend_test.rb
       - oracle/**/*
       - test/evaluator_backend_test.rb
@@ -85,6 +87,11 @@ jobs:
         run: |
           cargo test --manifest-path ext/schemurai_native/Cargo.toml --locked
           cargo clippy --manifest-path ext/schemurai_native/Cargo.toml --locked -- -D warnings
+      - name: Check C ownership and adapter effects
+        run: |
+          bundle exec rspec test/native_safety_test.rb
+          ruby script/native_safety/check.rb
+          ruby script/native_safety/check.rb --define HAVE_RB_HASH_STLIKE_FOREACH --define SCHEMURAI_AR_HASH_PROOF
       - name: Compare native evaluator with the Ruby oracle and check GC safety
         run: bundle exec rspec -Ilib -Iext/schemurai_native test/evaluator_backend_test.rb test/native_backend_test.rb
         env:

@@ -74,25 +74,29 @@ pub(super) struct Content {
 impl Content {
     pub(super) fn visit_invalid_items(
         &self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         required: i32,
         values: &[Value],
         invalid: impl FnMut(usize, Value) -> Verdict,
     ) -> Verdict {
         match (self.base64, self.json) {
-            (true, true) => Self::visit_items_impl::<true, true>(caches, required, values, invalid),
+            (true, true) => {
+                Self::visit_items_impl::<true, true>(vm, caches, required, values, invalid)
+            }
             (true, false) => {
-                Self::visit_items_impl::<true, false>(caches, required, values, invalid)
+                Self::visit_items_impl::<true, false>(vm, caches, required, values, invalid)
             }
             (false, true) => {
-                Self::visit_items_impl::<false, true>(caches, required, values, invalid)
+                Self::visit_items_impl::<false, true>(vm, caches, required, values, invalid)
             }
             (false, false) => {
-                Self::visit_items_impl::<false, false>(caches, required, values, invalid)
+                Self::visit_items_impl::<false, false>(vm, caches, required, values, invalid)
             }
         }
     }
     fn visit_items_impl<const BASE64: bool, const JSON: bool>(
+        vm: &Ruby,
         caches: &runtime::Caches,
         required: i32,
         values: &[Value],
@@ -121,7 +125,7 @@ impl Content {
                 verdict(required == 0)
             } else {
                 // Only the successful String view initializes these outputs.
-                let bytes = unsafe { byte_view(data.assume_init(), len.assume_init()) };
+                let bytes = unsafe { vm.bytes(data.assume_init(), len.assume_init()) };
                 if JSON && !BASE64 {
                     if kind == ENCODING_ASCII && !bytes.is_ascii() {
                         caches.json(value)
@@ -129,7 +133,7 @@ impl Content {
                         json(bytes)
                     }
                 } else {
-                    Self::eval_impl::<true, BASE64, JSON>(caches, value, bytes, 0)
+                    Self::eval_impl::<true, BASE64, JSON>(vm, caches, value, bytes, 0)
                 }
             };
             match result {
@@ -145,39 +149,44 @@ impl Content {
         }
         Valid
     }
-    pub(super) fn eval(&self, caches: &runtime::Caches, value: Value) -> Verdict {
-        self.eval_selected::<false>(caches, value, &[], 0)
+    pub(super) fn eval(&self, vm: &Ruby, caches: &runtime::Caches, value: Value) -> Verdict {
+        self.eval_selected::<false>(vm, caches, value, &[], 0)
     }
     pub(super) fn eval_borrowed(
         &self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         value: Value,
         bytes: &[u8],
         encoding: i32,
     ) -> Verdict {
-        self.eval_selected::<true>(caches, value, bytes, encoding)
+        self.eval_selected::<true>(vm, caches, value, bytes, encoding)
     }
     fn eval_selected<const BORROWED: bool>(
         &self,
+        vm: &Ruby,
         caches: &runtime::Caches,
         value: Value,
         bytes: &[u8],
         encoding: i32,
     ) -> Verdict {
         match (self.base64, self.json) {
-            (true, true) => Self::eval_impl::<BORROWED, true, true>(caches, value, bytes, encoding),
+            (true, true) => {
+                Self::eval_impl::<BORROWED, true, true>(vm, caches, value, bytes, encoding)
+            }
             (true, false) => {
-                Self::eval_impl::<BORROWED, true, false>(caches, value, bytes, encoding)
+                Self::eval_impl::<BORROWED, true, false>(vm, caches, value, bytes, encoding)
             }
             (false, true) => {
-                Self::eval_impl::<BORROWED, false, true>(caches, value, bytes, encoding)
+                Self::eval_impl::<BORROWED, false, true>(vm, caches, value, bytes, encoding)
             }
             (false, false) => {
-                Self::eval_impl::<BORROWED, false, false>(caches, value, bytes, encoding)
+                Self::eval_impl::<BORROWED, false, false>(vm, caches, value, bytes, encoding)
             }
         }
     }
     fn eval_impl<const BORROWED: bool, const BASE64: bool, const JSON: bool>(
+        vm: &Ruby,
         caches: &runtime::Caches,
         value: Value,
         bytes: &[u8],
@@ -186,7 +195,7 @@ impl Content {
         let bytes = if BORROWED {
             bytes
         } else {
-            unsafe { byte_view(sn_string_data(value), sn_string_bytes(value)) }
+            unsafe { vm.string(value) }
         };
         if BASE64 {
             if !JSON {
@@ -651,3 +660,9 @@ impl<I: Input> Parser<I> {
         true
     }
 }
+
+impl crate::ruby_trace::NativeOnly for Scratch {}
+const _: fn(&Scratch) = |scratch| {
+    let Scratch(buffer) = scratch;
+    crate::ruby_trace::require_native(buffer);
+};

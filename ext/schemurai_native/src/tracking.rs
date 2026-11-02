@@ -8,8 +8,8 @@ use std::hash::Hash;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct JsonKey(pub Value, u64);
 impl JsonKey {
-    pub(super) fn new(value: Value) -> Self {
-        Self(value, string_fingerprint(value))
+    pub(super) fn new(vm: &Ruby, value: Value) -> Self {
+        Self(value, string_fingerprint(vm, value))
     }
 }
 impl PartialEq for JsonKey {
@@ -32,15 +32,7 @@ pub struct RuntimeLocations {
     pub(crate) properties: Value,
     pub(crate) items: Value,
 }
-impl RuntimeLocations {
-    pub(crate) fn mark(&self) {
-        for value in [self.buffer, self.properties, self.items] {
-            unsafe {
-                sn_pin(value);
-            }
-        }
-    }
-}
+impl RuntimeLocations {}
 
 // An owned export snapshot can be traversed by C across Ruby allocations.
 pub struct PropertyLocations {
@@ -54,13 +46,7 @@ impl PropertyLocations {
             keys: tracked.native_properties(engine),
         }
     }
-    pub(crate) fn mark(&self) {
-        for &value in self.set.iter().chain(&self.keys) {
-            unsafe {
-                sn_pin(value);
-            }
-        }
-    }
+
     pub(crate) fn memory_usage(&self) -> usize {
         self.keys.capacity() * std::mem::size_of::<Value>()
     }
@@ -196,16 +182,7 @@ impl Tracked {
                 }
             }
     }
-    pub(super) fn mark(&self) {
-        if let Some(runtime) = self.runtime {
-            runtime.mark();
-        }
-        for key in &self.properties {
-            unsafe {
-                sn_pin(key.0);
-            }
-        }
-    }
+
     // Bound retained annotation slots independently of the number of results.
     pub(super) fn memo_slots(&self) -> usize {
         self.runtime.map_or(0, |_| 3)
@@ -353,16 +330,16 @@ impl Tracked {
         self.runtime = Some(runtime);
         Valid
     }
-    pub(super) fn property(&mut self, engine: &Engine, value: Value) {
-        let key = JsonKey::new(value);
+    pub(super) fn property(&mut self, vm: &Ruby, engine: &Engine, value: Value) {
+        let key = JsonKey::new(vm, value);
         if let Some(&index) = engine.property_ids.get(&key) {
             self.known_property(index);
         } else {
             self.properties.insert(key);
         }
     }
-    pub(super) fn contains_property(&self, engine: &Engine, value: Value) -> bool {
-        let key = JsonKey::new(value);
+    pub(super) fn contains_property(&self, vm: &Ruby, engine: &Engine, value: Value) -> bool {
+        let key = JsonKey::new(vm, value);
         engine
             .property_ids
             .get(&key)
@@ -596,6 +573,7 @@ impl Execution<'_> {
             0
         } else {
             match r.visit_properties(
+                self.vm,
                 value,
                 len,
                 self.undefined,
@@ -698,7 +676,7 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
         if unsafe { sn_kind(key) } != TYPE_STRING {
             return Unsupported as i32;
         }
-        let key_location = JsonKey::new(key);
+        let key_location = JsonKey::new(c.engine.vm, key);
         let known = c.engine.property_ids.get(&key_location).copied();
         let child = if c.unevaluated {
             if known.map_or_else(
@@ -718,11 +696,11 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
                 }
             }
             let result = c.rules.visit_value_rules(
+                c.engine.vm,
                 c.engine.caches,
                 &c.engine.budget,
                 c.engine.caches.runtime_order(),
-                key,
-                Some(key_location),
+                (key, Some(key_location)),
                 |_, _, child| match c.engine.eval(child, value, c.depth, c.active) {
                     Valid => {
                         if let Some(index) = known {
@@ -754,4 +732,32 @@ unsafe extern "C" fn tracking_entry(context: *mut c_void, key: Value, value: Val
         Valid as i32
     }))
     .unwrap_or(Unsupported as i32)
+}
+
+trace_fields!(RuntimeLocations { buffer, properties, items ; });
+trace_fields!(PropertyLocations { set, keys ; });
+trace_fields!(Tracked { properties, runtime ; status, known_properties, items });
+crate::ruby_trace::native_fields!(PropertyBits { words, count });
+impl crate::ruby_trace::NativeOnly for PropertyWords {}
+const _: fn(&PropertyWords) = |words| {
+    use crate::ruby_trace::require_native;
+    match words {
+        PropertyWords::Empty => {}
+        PropertyWords::Single(at, word) => {
+            require_native(at);
+            require_native(word);
+        }
+        PropertyWords::Dense(at, words) => {
+            require_native(at);
+            require_native(words);
+        }
+        PropertyWords::Many(words) => require_native(words),
+    }
+};
+impl Trace for JsonKey {
+    fn trace_with(&self, visit: &mut impl FnMut(Value), mode: crate::ruby_trace::TraceMode) {
+        let Self(value, hash) = self;
+        value.trace_with(visit, mode);
+        crate::ruby_trace::require_native(hash);
+    }
 }

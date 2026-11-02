@@ -21,7 +21,7 @@ impl Path {
         use std::fmt::Write;
         write!(self.text, "/{index}").unwrap();
     }
-    pub(super) fn name(&mut self, value: Value) -> Result<(), Verdict> {
+    pub(super) fn name(&mut self, vm: &Ruby, value: Value) -> Result<(), Verdict> {
         if unsafe { sn_kind(value) } != TYPE_STRING {
             return Err(Unsupported);
         }
@@ -29,7 +29,7 @@ impl Path {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { vm.bytes(data, len) };
         if matches!(encoding, ENCODING_UTF8 | ENCODING_ASCII)
             && (encoding != ENCODING_ASCII || bytes.is_ascii())
             && let Some(name) = if bytes.len() < 64 {
@@ -105,6 +105,16 @@ impl Rendered {
         match self {
             Self::Native(text) => text.capacity(),
             Self::Ruby(_) => 0,
+        }
+    }
+}
+
+trace_fields!(Path { names ; text });
+impl Trace for Rendered {
+    fn trace_with(&self, visit: &mut impl FnMut(Value), mode: crate::ruby_trace::TraceMode) {
+        match self {
+            Self::Native(text) => ruby_trace::require_native(text),
+            Self::Ruby(value) => value.trace_with(visit, mode),
         }
     }
 }

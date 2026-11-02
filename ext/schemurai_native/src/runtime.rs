@@ -79,22 +79,14 @@ pub struct MessageArguments {
 }
 #[derive(Default)]
 struct Pointers {
-    indices: HashMap<std::sync::Arc<pointer::Path>, usize>,
+    indices: HashMap<std::rc::Rc<pointer::Path>, usize>,
     requests: Vec<PointerRequest>,
 }
 struct PointerRequest {
-    path: std::sync::Arc<pointer::Path>,
+    path: std::rc::Rc<pointer::Path>,
     result: Option<Value>,
 }
-unsafe extern "C" {
-    fn sn_runtime_ordinal(ordinal: usize) -> Value;
-    fn sn_cached_runtime(
-        matches: *const c_void,
-        operation: i32,
-        source: Value,
-        value: Value,
-    ) -> i32;
-}
+
 impl Caches {
     // FFI callers normally provide runner-owned state. Only null-cache calls
     // need a temporary owner, whose lifetime stays in the adapter's scope.
@@ -536,7 +528,7 @@ impl Caches {
         let index = if let Some(&index) = pointers.indices.get(path) {
             index
         } else {
-            let path = std::sync::Arc::new(path.clone());
+            let path = std::rc::Rc::new(path.clone());
             let index = pointers.requests.len();
             pointers.indices.insert(path.clone(), index);
             pointers
@@ -677,8 +669,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         .pointers
         .try_borrow()
         .map_or(0, |pointers| {
-            pointers.indices.capacity()
-                * std::mem::size_of::<(std::sync::Arc<pointer::Path>, usize)>()
+            pointers.indices.capacity() * std::mem::size_of::<(std::rc::Rc<pointer::Path>, usize)>()
                 + pointers.requests.capacity() * std::mem::size_of::<PointerRequest>()
                 + pointers
                     .requests
@@ -848,51 +839,21 @@ pub unsafe extern "C" fn sn_contains_arguments(
 /// Call from the owning runner's GC mark callback while caches are live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sn_caches_mark(caches: *const Caches) {
-    unsafe { &*caches }.scopes.mark();
-    unsafe { &*caches }.reports.mark();
-    unsafe { &*caches }.properties.mark();
-    if let Some(arguments) = unsafe { &*caches }.pending_contains.get() {
-        unsafe {
-            sn_pin(arguments.rules);
-            sn_pin(arguments.instance);
-        }
-    }
-    // All keys also belong to the live original instance/schema. C roots every
-    // completed result before recording it, including during stopped-Ractor GC.
-    if let Ok(pointers) = unsafe { &*caches }.pointers.try_borrow() {
-        for request in &pointers.requests {
-            for &(_, key) in &request.path.names {
-                unsafe { sn_pin(key) };
-            }
-            if let Some(value) = request.result {
-                unsafe { sn_pin(value) };
-            }
-        }
-    }
+    unsafe { (&*caches).mark() };
+}
 
-    if let Ok(messages) = unsafe { &*caches }.messages.try_borrow() {
-        for (message, result) in messages.iter() {
-            unsafe {
-                sn_pin(message.operand);
-                sn_pin(message.instance);
-                if let Some(value) = result {
-                    sn_pin(*value);
-                }
-            }
-        }
-    }
-    if let Some(scalar) = unsafe { &*caches }.pending_scalar.get() {
-        unsafe {
-            sn_pin(scalar.rules);
-            sn_pin(scalar.instance);
-        }
-    }
-    if let Some((source, value, _)) = unsafe { &*caches }.pending.get() {
-        unsafe {
-            sn_pin(source);
-            sn_pin(value);
-        }
-    }
+/// # Safety
+/// Caches must be live and idle between native passes. C must attach the owned
+/// snapshot to its runner before any Ruby callback/allocation, retaining the
+/// previous snapshot until replacement. Null reports an invalid live borrow.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sn_caches_snapshot(
+    caches: *const Caches,
+) -> *mut ruby_trace::RootSnapshot {
+    catch_unwind(AssertUnwindSafe(|| {
+        Box::into_raw(Box::new(unsafe { &*caches }.snapshot()))
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// # Safety
@@ -988,6 +949,58 @@ pub unsafe extern "C" fn sn_scalar_arguments(caches: *const Caches, output: *mut
 
 #[cfg(test)]
 mod tests {
+    use crate::ruby::test_value as v;
+
+    #[test]
+    fn snapshot_ffi_fails_closed_on_a_live_borrow_and_owns_complete_roots() {
+        let caches = Caches::default();
+        caches.pending.set(Some((v(1), v(3), RUNTIME_TYPE)));
+        let borrow = caches.messages.borrow_mut();
+        assert!(unsafe { sn_caches_snapshot(&caches) }.is_null());
+        drop(borrow);
+        let roots = unsafe { sn_caches_snapshot(&caches) };
+        assert!(!roots.is_null());
+        drop(caches);
+        let mut values = vec![];
+        unsafe { &*roots }.trace(&mut |value| values.push(value));
+        assert_eq!(values, [v(1), v(3)]);
+        assert!(
+            unsafe { ruby_trace::sn_root_snapshot_size(roots) } >= 2 * std::mem::size_of::<Value>()
+        );
+        unsafe { ruby_trace::sn_root_snapshot_free(roots) };
+    }
+
+    #[test]
+    fn readable_snapshots_trace_message_frames_and_borrow_conflicts_keep_pending_roots() {
+        let caches = Caches::default();
+        caches.pending.set(Some((v(1), v(3), RUNTIME_TYPE)));
+        caches.messages.borrow_mut().insert(
+            Message {
+                ordinal: 0,
+                keyword: "type",
+                opcode: OP_TYPES,
+                operand: v(5),
+                instance: v(7),
+                detail: 0,
+                frame: v(9),
+            },
+            Some(v(11)),
+        );
+        let mut values = HashSet::new();
+        caches.trace(&mut |value| {
+            values.insert(value);
+        });
+        assert_eq!(values, HashSet::from([v(1), v(3), v(5), v(7), v(9), v(11)]));
+        let _borrow = caches.messages.borrow_mut();
+        values.clear();
+        caches.trace(&mut |value| {
+            values.insert(value);
+        });
+        // The unavailable message snapshot is covered by the C runner's
+        // independent roots; visiting it must not alias or panic during GC.
+        assert_eq!(values, HashSet::from([v(1), v(3)]));
+    }
+
     use super::*;
     #[test]
     fn ffi_fallback_is_created_only_without_supplied_state() {
@@ -1045,3 +1058,21 @@ pub unsafe extern "C" fn sn_caches_reuse_buffers(caches: *const Caches) {
     caches.dynamic_calls.set(true);
     caches.runtime_order.set(true);
 }
+
+trace_fields!(ContainsArguments { rules, instance ; child, required, scalar_kind, scalar_flags });
+trace_fields!(ScalarArguments { ordinal, rules, instance ; });
+trace_fields!(Message { operand, instance, frame ; ordinal, keyword, opcode, detail });
+trace_fields!(Pointers { indices, requests ; });
+trace_fields!(PointerRequest { path, result ; });
+ruby_trace::trace_runner_fields!(Caches {
+    pending, pending_rescue, pending_message, pending_scalar, pending_contains,
+    scopes, reports, properties ;
+    rescued_strings, pointers, messages ;
+    searches, deadline, runtime_order, dynamic_calls, reorder, call_cursor,
+    pending_pointer, frame_error, scalar_callback, callback_checkpoints,
+    callbacks_allowed, continuations_allowed, report_continuations_allowed, content ;
+    matches
+});
+
+// Concrete third-party storage cannot contain this crate's private Value.
+impl ruby_trace::NativeOnly for Cache {}

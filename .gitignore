@@ -7,3 +7,5 @@
 /ext/**/target
 /benchmark/real_world/schemas/*/schema.json
 /benchmark/real_world/schemas/*/receipt.json
+
+__pycache__/

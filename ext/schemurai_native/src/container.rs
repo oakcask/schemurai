@@ -304,17 +304,18 @@ impl Engine {
     }
     pub(super) fn container_header(
         &mut self,
+        vm: &mut Ruby,
         source: Value,
         maximum: i32,
         minimum: i32,
         object: bool,
         tail: u8,
     ) -> Result<Header, Value> {
-        let maximum = self.field(source, maximum)?;
-        let minimum = self.field(source, minimum)?;
-        let native_bounds = self.native_count(maximum)? && self.native_count(minimum)?;
+        let maximum = self.field(vm, source, maximum)?;
+        let minimum = self.field(vm, source, minimum)?;
+        let native_bounds = self.native_count(vm, maximum)? && self.native_count(vm, minimum)?;
         let required = if object {
-            self.field(source, FIELD_REQUIRED)?
+            self.field(vm, source, FIELD_REQUIRED)?
         } else {
             unsafe { sn_nil() }
         };
@@ -327,7 +328,7 @@ impl Engine {
                 (FIELD_DEPENDENCIES, "dependencies"),
                 (FIELD_DEPENDENT_REQUIRED, "dependentRequired"),
             ] {
-                let entries = self.field(source, field)?;
+                let entries = self.field(vm, source, field)?;
                 for pair in self.values(entries) {
                     let names = unsafe { sn_entry(pair, 1) };
                     let kind = unsafe { sn_kind(names) };
@@ -362,7 +363,7 @@ impl Engine {
             object,
         })
     }
-    fn native_count(&mut self, value: Value) -> Result<bool, Value> {
+    fn native_count(&mut self, vm: &mut Ruby, value: Value) -> Result<bool, Value> {
         if unsafe { sn_truthy(value) } == 0 {
             return Ok(true);
         }
@@ -375,7 +376,7 @@ impl Engine {
         if unsafe { sn_is_float(value) } != 0 {
             return Ok(unsafe { sn_float(value) } >= 0.0);
         }
-        let negative = self.field(value, FIELD_NEGATIVE_P)?;
+        let negative = self.field(vm, value, FIELD_NEGATIVE_P)?;
         Ok(unsafe { sn_true(negative) } == 0)
     }
 }
@@ -437,12 +438,13 @@ impl Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn admits_unresolved_reports_but_propagates_unsupported_instructions() {
         let mut engine = Engine {
             nodes: vec![
-                vec![Op::UnresolvedRef(0)],
+                vec![Op::UnresolvedRef(v(0))],
                 vec![Op::All(vec![0, 1])],
                 vec![Op::Unsupported],
                 vec![Op::All(vec![1, 2])],

@@ -14,13 +14,18 @@ pub(super) struct Enumeration {
 }
 
 impl Enumeration {
-    pub(super) fn compile(source: Value, values: Vec<Value>, fixnum_flag: Value) -> Self {
+    pub(super) fn compile(
+        vm: &Ruby,
+        source: Value,
+        values: Vec<Value>,
+        fixnum_flag: FixnumTag,
+    ) -> Self {
         let mut fingerprints = structural::Cache::batch(0);
         let budget = budget::Budget::default();
         let index = (values.len() > LINEAR_LIMIT)
             .then(|| {
                 Index::compile(&values, |value| {
-                    fingerprint_cached(value, 0, fixnum_flag, false, &mut fingerprints, &budget)
+                    fingerprint_cached(vm, value, 0, fixnum_flag, false, &mut fingerprints, &budget)
                 })
             })
             .flatten();
@@ -44,10 +49,11 @@ impl Enumeration {
     }
     pub(super) fn eval(
         &self,
+        vm: &Ruby,
         value: Value,
         kind: i32,
         depth: usize,
-        fixnum_flag: Value,
+        fixnum_flag: FixnumTag,
         budget: &budget::Budget,
     ) -> Verdict {
         if let Some(index) = &self.index {
@@ -63,7 +69,7 @@ impl Enumeration {
             if first != Invalid {
                 return first;
             }
-            if let Some(hash) = fingerprint_budgeted(value, depth, fixnum_flag, false, budget) {
+            if let Some(hash) = fingerprint_budgeted(vm, value, depth, fixnum_flag, false, budget) {
                 return self.compare(
                     index.candidates(hash).filter(|&index| index != 0),
                     value,
@@ -142,10 +148,14 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn selects_all_collisions_in_schema_order() {
-        let index = Index::compile(&[3, 1, 3, 2, 3], |value| Some(value as u64)).unwrap();
+        let index = Index::compile(&[v(3), v(1), v(3), v(2), v(3)], |value| {
+            Some(value.bits() as u64)
+        })
+        .unwrap();
         assert_eq!(index.candidates(3).collect::<Vec<_>>(), [0, 2, 4]);
         assert_eq!(index.candidates(1).collect::<Vec<_>>(), [1]);
         assert_eq!(index.candidates(0).count(), 0);
@@ -154,6 +164,10 @@ mod tests {
 
     #[test]
     fn unavailable_fingerprint_discards_the_index() {
-        assert!(Index::compile(&[1, 2, 3], |value| (value != 2).then_some(value as u64)).is_none());
+        assert!(
+            Index::compile(&[v(1), v(2), v(3)], |value| (value != v(2))
+                .then_some(value.bits() as u64))
+            .is_none()
+        );
     }
 }

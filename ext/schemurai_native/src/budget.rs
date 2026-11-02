@@ -148,3 +148,9 @@ mod tests {
         );
     }
 }
+
+crate::ruby_trace::native_fields!(Limits {
+    max_errors,
+    enabled,
+    timeout
+});
