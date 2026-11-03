@@ -385,8 +385,8 @@ impl Report {
         }
 
         let reset = self.collection_reset;
-        let schema_len = self.schema_path.checkpoint();
-        let instance_len = self.instance_path.checkpoint();
+        let schema_checkpoint = self.schema_path.checkpoint();
+        let instance_checkpoint = self.instance_path.checkpoint();
         self.schema_path.push_str("/");
         self.schema_path.push_str(segment);
         if let Some(index) = instance {
@@ -399,8 +399,8 @@ impl Report {
             result,
             segment.split('/').count() + usize::from(instance.is_some()),
         );
-        self.schema_path.truncate(schema_len);
-        self.instance_path.truncate(instance_len);
+        self.schema_path.truncate(schema_checkpoint);
+        self.instance_path.truncate(instance_checkpoint);
         result
     }
     fn property<T>(
@@ -416,7 +416,7 @@ impl Report {
         }
 
         let reset = self.collection_reset;
-        let instance_len = self.instance_path.checkpoint();
+        let instance_checkpoint = self.instance_path.checkpoint();
         self.instance_path.name(key)?;
         let result = if let Some(key) = schema_key {
             self.schema_name(caches, segment, key, visit)
@@ -424,7 +424,7 @@ impl Report {
             self.scoped(caches, segment, None, visit)
         };
         let result = self.cleanup_reset_paths(caches, reset, result, 1);
-        self.instance_path.truncate(instance_len);
+        self.instance_path.truncate(instance_checkpoint);
         result
     }
 

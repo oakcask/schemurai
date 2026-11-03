@@ -1,18 +1,27 @@
 //! Native UTF-8 pointer text with deferred names that need Ruby string semantics.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct PathCheckpoint {
+    text_len: usize,
+    names_len: usize,
+}
+
 #[derive(Clone, Default, Eq, Hash, PartialEq)]
 pub(super) struct Path {
     pub(super) text: String,
     pub(super) names: Vec<(usize, Value)>,
 }
 impl Path {
-    pub(super) fn checkpoint(&self) -> (usize, usize) {
-        (self.text.len(), self.names.len())
+    pub(super) fn checkpoint(&self) -> PathCheckpoint {
+        PathCheckpoint {
+            text_len: self.text.len(),
+            names_len: self.names.len(),
+        }
     }
-    pub(super) fn truncate(&mut self, checkpoint: (usize, usize)) {
-        self.text.truncate(checkpoint.0);
-        self.names.truncate(checkpoint.1);
+    pub(super) fn truncate(&mut self, checkpoint: PathCheckpoint) {
+        self.text.truncate(checkpoint.text_len);
+        self.names.truncate(checkpoint.names_len);
     }
     pub(super) fn push_str(&mut self, text: &str) {
         self.text.push_str(text);
