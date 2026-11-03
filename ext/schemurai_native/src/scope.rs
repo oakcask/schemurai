@@ -34,9 +34,9 @@ mod tests {
             ..Engine::default()
         };
         engine.compile_memoization();
-        assert_eq!(engine.memoizable, [true, false, false, false]);
-        assert_eq!(engine.memo_guarded, [false; 4]);
-        assert_eq!(engine.memo_guard_sources, [false; 4]);
+        assert_eq!(engine.memoization.reusable, [true, false, false, false]);
+        assert_eq!(engine.memoization.guarded, [false; 4]);
+        assert_eq!(engine.memoization.guard_sources, [false; 4]);
     }
 
     #[test]
@@ -53,14 +53,14 @@ mod tests {
             ..Engine::default()
         };
         engine.compile_memoization();
-        assert!(engine.memo_guarded[0]);
-        assert!(engine.memo_scope_projection.memory_usage() > 0);
+        assert!(engine.memoization.guarded[0]);
+        assert!(engine.memoization.scope_projection.memory_usage() > 0);
         engine.nodes = vec![vec![Op::Boolean(true)], vec![Op::Boolean(false)]];
         engine.compile_memoization();
-        assert_eq!(engine.memoizable, [false, false]);
-        assert_eq!(engine.memo_guarded, [false, false]);
-        assert_eq!(engine.memo_guard_sources, [false, false]);
-        assert_eq!(engine.memo_scope_projection.memory_usage(), 0);
+        assert_eq!(engine.memoization.reusable, [false, false]);
+        assert_eq!(engine.memoization.guarded, [false, false]);
+        assert_eq!(engine.memoization.guard_sources, [false, false]);
+        assert_eq!(engine.memoization.scope_projection.memory_usage(), 0);
     }
 
     #[test]
@@ -78,16 +78,16 @@ mod tests {
             ..Engine::default()
         };
         engine.compile_memoization();
-        assert!(engine.memoizable[1]);
-        assert!(engine.memo_guarded[1]);
+        assert!(engine.memoization.reusable[1]);
+        assert!(engine.memoization.guarded[1]);
         engine.nodes.pop();
         engine.compile_memoization();
-        assert!(!engine.memoizable[1]);
-        assert!(engine.memo_guard_sources[1]);
+        assert!(!engine.memoization.reusable[1]);
+        assert!(engine.memoization.guard_sources[1]);
         engine.nodes.push(vec![reference(1, ReferenceKind::Static)]);
         engine.nodes[0] = vec![Op::Unsupported];
         engine.compile_memoization();
-        assert!(!engine.memoizable[1]);
+        assert!(!engine.memoization.reusable[1]);
     }
 
     #[test]
@@ -115,12 +115,12 @@ mod tests {
             ..Engine::default()
         };
         engine.compile_memoization();
-        assert!(engine.memoizable[3]);
-        assert!(engine.memo_contextual[3]);
+        assert!(engine.memoization.reusable[3]);
+        assert!(engine.memoization.contextual[3]);
         engine.simplify_dynamic_references();
         engine.compile_memoization();
-        assert!(engine.memoizable[3]);
-        assert!(!engine.memo_contextual[3]);
+        assert!(engine.memoization.reusable[3]);
+        assert!(!engine.memoization.contextual[3]);
         for node in [1, 2] {
             let Op::Ref(reference) = engine.nodes[node][0] else {
                 panic!()

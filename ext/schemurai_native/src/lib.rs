@@ -621,14 +621,7 @@ pub struct Engine {
     validity_supported: Vec<bool>,
     report_supported: Vec<bool>,
     has_references: bool,
-    memoizable: Vec<bool>,
-    memo_contextual: Vec<bool>,
-    memo_guarded: Vec<bool>,
-    memo_guard_sources: Vec<bool>,
-    memo_guard_same_sources: Vec<bool>,
-    memo_guard_scalar_sources: Vec<bool>,
-    memo_guard_scalar_amplification: Vec<bool>,
-    memo_scope_projection: memo_scope::Projection,
+    memoization: memo::MemoizationPlan,
     metadata: Vec<scope::Metadata>,
     resources: HashMap<Value, usize>,
     dynamic_bindings: HashMap<(Value, usize), usize>,
@@ -3574,28 +3567,15 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
     let nodes = unsafe { &*std::ptr::addr_of!((*engine).nodes) };
     let operands = unsafe { &*std::ptr::addr_of!((*engine).error_operands) };
     let programs = unsafe { &*std::ptr::addr_of!((*engine).programs) };
-    let contextual = unsafe { &*std::ptr::addr_of!((*engine).memo_contextual) };
+    let memoization = unsafe { &*std::ptr::addr_of!((*engine).memoization) };
     let kinds = unsafe { &*std::ptr::addr_of!((*engine).kind_demand) };
     let callback_roots = unsafe { &*std::ptr::addr_of!((*engine).callback_roots) };
     let validity_supported = unsafe { &*std::ptr::addr_of!((*engine).validity_supported) };
     let report_supported = unsafe { &*std::ptr::addr_of!((*engine).report_supported) };
-    let guarded = unsafe { &*std::ptr::addr_of!((*engine).memo_guarded) };
-    let sources = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_sources) };
-    let same = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_same_sources) };
-    let scalar = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_sources) };
-    let amplification = unsafe { &*std::ptr::addr_of!((*engine).memo_guard_scalar_amplification) };
-    let projection = unsafe { &*std::ptr::addr_of!((*engine).memo_scope_projection) };
     std::mem::size_of::<Engine>()
-        + projection.memory_usage()
+        + memoization.memory_usage()
         + kinds.capacity() * std::mem::size_of::<KindDemand>()
         + (callback_roots.capacity() + validity_supported.capacity() + report_supported.capacity())
-            * std::mem::size_of::<bool>()
-        + (contextual.capacity()
-            + guarded.capacity()
-            + sources.capacity()
-            + same.capacity()
-            + scalar.capacity()
-            + amplification.capacity())
             * std::mem::size_of::<bool>()
         + programs.capacity() * std::mem::size_of::<Value>()
         + nodes.capacity() * std::mem::size_of::<Vec<Op>>()
