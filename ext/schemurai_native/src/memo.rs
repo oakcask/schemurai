@@ -1,6 +1,7 @@
 //! Invocation-local results for shared reference targets and guard/scope contexts.
 use super::*;
 use std::cell::RefCell;
+use std::rc::Rc;
 use tracking::Tracked;
 
 pub(super) type Key = (usize, Value, usize);
@@ -50,8 +51,8 @@ impl<K: Copy + Eq + std::hash::Hash, T: Clone> Cache<K, T> {
 // never reused, so still-running evaluations can safely record older keys.
 #[derive(Default)]
 struct Scopes {
-    bindings: HashMap<std::sync::Arc<[Option<usize>]>, usize>,
-    order: std::collections::VecDeque<std::sync::Arc<[Option<usize>]>>,
+    bindings: HashMap<Rc<[Option<usize>]>, usize>,
+    order: std::collections::VecDeque<Rc<[Option<usize>]>>,
     slots: usize,
     next_id: usize,
 }
@@ -69,7 +70,7 @@ impl Scopes {
             self.bindings.remove(oldest.as_ref());
             self.slots -= oldest.len();
         }
-        let bindings: std::sync::Arc<[Option<usize>]> = bindings.into();
+        let bindings: Rc<[Option<usize>]> = bindings.into();
         self.slots += bindings.len();
         self.bindings.insert(bindings.clone(), id);
         self.order.push_back(bindings);
