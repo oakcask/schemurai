@@ -2,6 +2,14 @@
 use super::*;
 use tracking::Tracked;
 
+// One representative retains the number of original schema branches it covers.
+// Multiplicity counts matches even when pure evaluation can run only once.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BranchGroup {
+    pub node: usize,
+    pub multiplicity: usize,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum BranchKind {
     Any,
@@ -65,7 +73,7 @@ pub(super) struct BranchMatches<R> {
     pub coverage: R,
 }
 pub(super) fn scan_branches<R: BranchResult>(
-    nodes: &[(usize, usize)],
+    nodes: &[BranchGroup],
     policy: BranchPolicy,
     separate_calls: bool,
     mut evaluate: impl FnMut(usize) -> R,
@@ -75,7 +83,7 @@ pub(super) fn scan_branches<R: BranchResult>(
         matches: 0,
         coverage: R::valid(),
     };
-    'groups: for &(node, multiplicity) in nodes {
+    'groups: for &BranchGroup { node, multiplicity } in nodes {
         for _ in 0..if separate_calls { multiplicity } else { 1 } {
             let branch = evaluate(node);
             match branch.status() {
@@ -190,7 +198,16 @@ mod tests {
 
     #[test]
     fn termination_preserves_multiplicity_and_complete_scan_errors() {
-        let nodes = [(0, 2), (1, 1)];
+        let nodes = [
+            BranchGroup {
+                node: 0,
+                multiplicity: 2,
+            },
+            BranchGroup {
+                node: 1,
+                multiplicity: 1,
+            },
+        ];
         let evaluate = |node| if node == 0 { Valid } else { Unsupported };
         for kind in [BranchKind::Any, BranchKind::One] {
             let result = scan_branches(

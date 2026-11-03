@@ -222,7 +222,7 @@ impl Engine {
                     }
                     Op::All(children) => edges[node].extend(children),
                     Op::Any(children) | Op::One(children) => {
-                        edges[node].extend(children.iter().map(|&(child, _)| child))
+                        edges[node].extend(children.iter().map(|group| group.node))
                     }
                     Op::Not(child) => edges[node].push(*child),
                     Op::Conditional(condition, yes, no) => {

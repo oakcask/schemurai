@@ -896,7 +896,7 @@ impl Engine {
                     }
                     Op::All(nodes) => edges[index].extend(nodes),
                     Op::Any(nodes) | Op::One(nodes) => {
-                        edges[index].extend(nodes.iter().map(|&(node, _)| node))
+                        edges[index].extend(nodes.iter().map(|group| group.node))
                     }
                     Op::Not(node) => edges[index].push(*node),
                     Op::Conditional(condition, yes, no) => {
@@ -1096,7 +1096,7 @@ impl Engine {
                     }
                     Op::All(children) => same_edges[node].extend(children),
                     Op::Any(children) | Op::One(children) => {
-                        same_edges[node].extend(children.iter().map(|&(child, _)| child))
+                        same_edges[node].extend(children.iter().map(|group| group.node))
                     }
                     Op::Not(child) => same_edges[node].push(*child),
                     Op::Conditional(condition, yes, no) => {
@@ -1121,7 +1121,7 @@ impl Engine {
                     }
                     Op::Any(children) | Op::One(children) => children
                         .iter()
-                        .filter(|&&(child, _)| scalar_refs[child])
+                        .filter(|group| scalar_refs[group.node])
                         .count(),
                     Op::Conditional(condition, yes, no) => std::iter::once(*condition)
                         .chain(*yes)
