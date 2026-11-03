@@ -8,6 +8,7 @@ const MAX_NAMES: usize = 65536;
 
 #[derive(Default)]
 pub(super) struct Projection {
+    // Compiled Engine data is shared between Ractors through the C extension.
     names: Vec<Option<Arc<[usize]>>>,
     // If materialized closures exceed the budget, retain the linear dependency
     // graph and compute those exact projections on demand, never all names.
