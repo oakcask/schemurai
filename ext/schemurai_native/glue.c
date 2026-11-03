@@ -376,13 +376,19 @@ static VALUE runner_valid_with_budget(VALUE self, VALUE instance, VALUE budget) 
 static VALUE runner_valid(VALUE self, VALUE instance) {
     return evaluate_runner(self, instance, Qnil, 0);
 }
+static VALUE report_state_class(void) {
+    VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
+    VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
+    return rb_const_get(internal, rb_intern_const("NativeReportState"));
+}
 static VALUE runner_share_scalar_state(VALUE self, VALUE number_state, VALUE regexps, VALUE scopes, VALUE references, VALUE active, VALUE reports) {
     runner_holder *runner;
     TypedData_Get_Struct(self, runner_holder, &runner_type, runner);
     if (runner->busy) rb_raise(rb_eRuntimeError, "cannot replace active scalar state");
     Check_Type(scopes, T_ARRAY);
     runner->scope_state = scopes;
-    Check_Type(reports, T_ARRAY);
+    if (!rb_obj_is_kind_of(reports, report_state_class()))
+        rb_raise(rb_eTypeError, "expected NativeReportState");
     runner->report_state = reports;
     Check_Type(references, T_ARRAY);
     Check_Type(active, T_HASH);
@@ -1097,10 +1103,26 @@ static VALUE collector_contains(VALUE self, VALUE index, VALUE prior) {
     if (!NIL_P(set)) return rb_funcall(set, rb_intern_const("include?"), 1, index);
     return sn_array_report_contains(c->report, NUM2SIZET(index), RTEST(prior)) ? Qtrue : Qfalse;
 }
+static VALUE new_report_state(void) {
+    return rb_class_new_instance(0, NULL, report_state_class());
+}
+static VALUE report_state_current(VALUE state) {
+    return rb_funcall(state, rb_intern_const("current_collector"), 0);
+}
+static void report_state_set_current(VALUE state, VALUE collector) {
+    rb_funcall(state, rb_intern_const("current_collector="), 1, collector);
+}
+static VALUE collector_clear_collection(VALUE self, VALUE paths) {
+    report_collector *collector = get_report_collector(self);
+    collector->busy = 1;
+    sn_report_clear_collection(collector->report, !RTEST(paths));
+    collector->busy = 0;
+    return Qnil;
+}
 static VALUE collector_context(report_collector *c) {
     runner_holder *scope;
     TypedData_Get_Struct(c->scope, runner_holder, &runner_type, scope);
-    return NIL_P(scope->report_state) ? Qnil : rb_ary_entry(scope->report_state, 0);
+    return NIL_P(scope->report_state) ? Qnil : report_state_current(scope->report_state);
 }
 static VALUE collector_silent(VALUE self) {
     VALUE current = collector_context(get_report_collector(self));
@@ -1136,14 +1158,7 @@ static VALUE collector_evaluation_buffer(VALUE self) {
     report_collector *c = get_report_collector(self);
     runner_holder *scope;
     TypedData_Get_Struct(c->scope, runner_holder, &runner_type, scope);
-    VALUE pool = rb_ary_entry(scope->report_state, 1);
-    if (NIL_P(pool)) {
-        VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
-        VALUE internal = rb_const_get(schemurai, rb_intern_const("Internal"));
-        VALUE klass = rb_const_get(internal, rb_intern_const("EvaluationPool"));
-        pool = rb_class_new_instance(0, NULL, klass);
-        rb_ary_store(scope->report_state, 1, pool);
-    }
+    VALUE pool = rb_funcall(scope->report_state, rb_intern_const("evaluation_pool"), 0);
     VALUE result = rb_funcall(pool, rb_intern_const("acquire"), 0);
     RB_GC_GUARD(pool); RB_GC_GUARD(self);
     return result;
@@ -1312,8 +1327,8 @@ static VALUE restore_report_context(VALUE context) {
         collector_adopt(get_report_collector(call->previous), interrupted);
         RB_GC_GUARD(interrupted);
     }
-    if (call->trial || rb_ary_entry(call->state, 0) == call->collector)
-        rb_ary_store(call->state, 0, call->previous);
+    if (call->trial || report_state_current(call->state) == call->collector)
+        report_state_set_current(call->state, call->previous);
     return Qnil;
 }
 static VALUE make_report_collector(VALUE owner, VALUE scope, VALUE seed_object, VALUE instance, size_t node) {
@@ -1348,8 +1363,8 @@ static VALUE container_report_runtime(evaluation_call *call, int object) {
     VALUE frame_class = rb_const_get(checks, rb_intern(frame_name));
     VALUE args[] = {arguments.rules, arguments.instance, call->budget, INT2FIX(arguments.required), collector};
     VALUE frame = rb_class_new_instance(5, args, frame_class);
-    report_context_call context = {r->active_report_state, collector, rb_ary_entry(r->active_report_state, 0), frame, sn_report_silent(seed->report), 0};
-    rb_ary_store(context.state, 0, collector);
+    report_context_call context = {r->active_report_state, collector, report_state_current(r->active_report_state), frame, sn_report_silent(seed->report), 0};
+    report_state_set_current(context.state, collector);
     VALUE result = rb_ensure(collect_container_frame, (VALUE)&context, restore_report_context, (VALUE)&context);
     if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
     rb_ary_push(r->report_results, result);
@@ -1572,7 +1587,7 @@ static VALUE call_runtime(VALUE context) {
         child->callback_context = child->continuation = 1;
         child->scalar_mode = sn_caches_is_scalar(r->caches);
         child->report_seed = seed_object;
-        child->report_sink = rb_ary_entry(r->active_report_state, 0);
+        child->report_sink = report_state_current(r->active_report_state);
         VALUE result = evaluate_runner(callback, instance, call->budget, 2);
         if (NIL_P(result)) rb_raise(rb_eRuntimeError, "native report continuation lost its coverage proof");
         if (NIL_P(r->report_results)) r->report_results = rb_ary_new();
@@ -1710,8 +1725,8 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     if (seed->report) {
         report_context.trial = sn_report_silent(seed->report);
         report_context.collector = make_report_collector(runner->owner, callback_scope(call), seed_object, instance, runner->root);
-        report_context.previous = rb_ary_entry(report_context.state, 0);
-        rb_ary_store(report_context.state, 0, report_context.collector);
+        report_context.previous = report_state_current(report_context.state);
+        report_state_set_current(report_context.state, report_context.collector);
         if (NIL_P(runner->report_results)) runner->report_results = rb_ary_new();
         rb_ary_push(runner->report_results, report_context.collector);
     }
@@ -1866,22 +1881,9 @@ static VALUE evaluate_runner_body(VALUE context) {
         r->active_ref_state = scope->ref_state;
         r->active_vm_state = scope->vm_active;
     } else if (NIL_P(budget)) {
-        if (NIL_P(r->report_state)) r->report_state = rb_ary_new();
+        if (NIL_P(r->report_state)) r->report_state = new_report_state();
         r->active_report_state = r->report_state;
-        VALUE current_report = rb_ary_entry(r->active_report_state, 0);
-        if (!NIL_P(current_report)) {
-            if (rb_typeddata_is_kind_of(current_report, &report_collector_type)) {
-                report_collector *collector = get_report_collector(current_report);
-                collector->busy = 1;
-                sn_report_clear_collection(collector->report, !diagnostics);
-                collector->busy = 0;
-            } else {
-                rb_funcall(current_report, rb_intern_const("native_clear_collection"), 1, diagnostics ? Qtrue : Qfalse);
-            }
-        }
-        rb_ary_store(r->active_report_state, 0, Qnil);
-        VALUE pool = rb_ary_entry(r->active_report_state, 1);
-        if (!NIL_P(pool)) rb_funcall(pool, rb_intern_const("reset"), 0);
+        rb_funcall(r->active_report_state, rb_intern_const("reset"), 1, diagnostics ? Qtrue : Qfalse);
         if (scoped && NIL_P(r->scope_state)) r->scope_state = rb_ary_new();
         r->active_scope_state = r->scope_state;
         if (scoped && NIL_P(r->ref_state)) r->ref_state = rb_ary_new();
@@ -1889,14 +1891,13 @@ static VALUE evaluate_runner_body(VALUE context) {
         r->active_vm_state = r->vm_active;
         if (!NIL_P(r->active_scope_state)) rb_ary_clear(r->active_scope_state);
     } else {
-        r->active_report_state = rb_ary_new();
+        r->active_report_state = new_report_state();
         r->active_scope_state = scoped ? rb_ary_new() : Qnil;
         r->active_ref_state = scoped ? rb_ary_new() : Qnil;
         r->active_vm_state = Qnil;
     }
     sn_scopes_inherit(r->caches, r->active_scope_state, r->active_ref_state, r->active_vm_state, scoped);
-    VALUE pool = rb_ary_entry(r->active_report_state, 1);
-    if (!NIL_P(pool) && RTEST(rb_funcall(pool, rb_intern_const("used?"), 0)))
+    if (RTEST(rb_funcall(r->active_report_state, rb_intern_const("buffers_used?"), 0)))
         sn_caches_reuse_buffers(r->caches);
     evaluate_native(&call);
     VALUE source = Qnil, requested = Qnil;
@@ -1999,7 +2000,7 @@ typedef struct {
 } compatibility_report_call;
 static VALUE call_compatibility_report(VALUE context) {
     compatibility_report_call *call = (compatibility_report_call *)context;
-    rb_ary_store(call->state, 0, call->collector);
+    report_state_set_current(call->state, call->collector);
     if (!NIL_P(call->object_args)) {
         VALUE args[7];
         for (long i = 0; i < 7; i++) args[i] = rb_ary_entry(call->object_args, i + 1);
@@ -2082,7 +2083,7 @@ static VALUE scalar_callback(VALUE self, VALUE instance) {
         rb_funcall(budget, rb_intern_const("checkpoint"), 0);
     }
     VALUE result;
-    VALUE current = NIL_P(parent->report_state) ? Qnil : rb_ary_entry(parent->report_state, 0);
+    VALUE current = NIL_P(parent->report_state) ? Qnil : report_state_current(parent->report_state);
     if (!NIL_P(current) && recipe->callback_kind == SN_CALLBACK_RUNTIME
         && !rb_typeddata_is_kind_of(current, &report_collector_type)) {
         result = compatibility_report_callback(recipe, parent, current, instance);
@@ -2210,6 +2211,7 @@ void Init_schemurai_native(void) {
     rb_define_method(klass, "unresolved_references?", has_unresolved_references, 0);
     VALUE collector_class = rb_define_class_under(native, "ReportCollector", rb_cObject);
     rb_undef_alloc_func(collector_class);
+    rb_define_private_method(collector_class, "native_clear_collection", collector_clear_collection, 1);
     rb_define_method(collector_class, "evaluate", collector_evaluate, 5);
     rb_define_method(collector_class, "trial", collector_trial, 2);
     rb_define_method(collector_class, "error", collector_error, 2);
