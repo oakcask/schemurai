@@ -11,7 +11,8 @@ use std::rc::Rc;
 /// The marker prevents safe Rust from moving or sharing handles across threads;
 /// C remains responsible for rooting, GVL ownership and Ruby publication.
 /// This type does not enforce GC reachability or borrowed-view lifetimes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(not(test), derive(Debug))]
 #[repr(transparent)]
 pub struct Value {
     bits: usize,
@@ -20,16 +21,6 @@ pub struct Value {
     affinity: PhantomData<Rc<()>>,
 }
 impl Value {
-    /// Only for CRuby's zero sentinel and synthetic immediate test values.
-    /// # Safety
-    /// Bits must be a valid VALUE, or an unset output never passed to Ruby.
-    #[cfg(test)]
-    pub(crate) const unsafe fn from_raw(bits: usize) -> Self {
-        Self {
-            bits,
-            affinity: PhantomData,
-        }
-    }
     pub(crate) const fn has_fixnum_tag(self, flag: FixnumTag) -> bool {
         self.bits & flag.bits != 0
     }
@@ -55,15 +46,70 @@ pub(crate) const fn test_fixnum_tag(bits: usize) -> FixnumTag {
     FixnumTag { bits }
 }
 
+// A stable prefix makes synthetic identities recognizable in crash dumps.
+// Reserve the high 16 bits on both 32- and 64-bit hosts; the remaining bits
+// encode the caller's sequence number without changing parity or ordering.
 #[cfg(test)]
-pub(crate) fn test_value(bits: usize) -> Value {
-    // Synthetic identity only; tests must never dereference it through CRuby.
-    unsafe { Value::from_raw(bits) }
+const TEST_VALUE_MASK: usize = 0xffff << (usize::BITS - 16);
+#[cfg(test)]
+const TEST_VALUE_MAGIC: usize = 0xdead << (usize::BITS - 16);
+
+/// Deterministic synthetic identity; never pass it to CRuby or dereference it.
+/// Equal sequence numbers produce equal handles regardless of test ordering.
+#[cfg(test)]
+pub(crate) fn test_value(sequence: usize) -> Value {
+    assert!(sequence <= !TEST_VALUE_MASK, "test VALUE sequence overflow");
+    Value {
+        bits: TEST_VALUE_MAGIC | sequence,
+        affinity: PhantomData,
+    }
+}
+
+/// Actual immediate encoding for tests that inspect Fixnum representation.
+#[cfg(test)]
+pub(crate) fn test_fixnum(integer: i64) -> Value {
+    let limit = 1_i64 << (usize::BITS - 2);
+    assert!((-limit..limit).contains(&integer));
+    Value {
+        bits: ((integer as usize) << 1) | 1,
+        affinity: PhantomData,
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for Value {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Value({:#x})", self.bits)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn synthetic_identities_preserve_the_magic_prefix_and_sequence() {
+        for sequence in 0..=4096 * 3 {
+            let value = test_value(sequence);
+            assert_eq!(value.bits() & TEST_VALUE_MASK, TEST_VALUE_MAGIC);
+            assert_eq!(value.bits() & !TEST_VALUE_MASK, sequence);
+            assert_eq!(value, test_value(sequence));
+            if sequence != 0 {
+                assert!(test_value(sequence - 1) < value);
+            }
+        }
+        assert_eq!(
+            test_value(!TEST_VALUE_MASK).bits(),
+            TEST_VALUE_MAGIC | !TEST_VALUE_MASK
+        );
+        assert!(format!("{:?}", test_value(42)).starts_with("Value(0xdead"));
+    }
+
+    #[test]
+    #[should_panic(expected = "test VALUE sequence overflow")]
+    fn synthetic_identity_rejects_sequence_overflow() {
+        test_value(!TEST_VALUE_MASK + 1);
+    }
+
     #[test]
     fn classified_views_read_outputs_only_for_strings() {
         unsafe extern "C" fn non_string(_: Value, _: *mut *const u8, _: *mut usize) -> i32 {

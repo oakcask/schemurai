@@ -90,11 +90,7 @@ fn neon_prefix(values: &[Value], min: i64, max: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ruby::test_fixnum_tag;
-
-    fn tag(value: i64) -> Value {
-        super::super::ruby::test_value(((value << 1) | 1) as usize)
-    }
+    use crate::ruby::{test_fixnum as tag, test_fixnum_tag, test_value as v};
 
     #[test]
     fn skips_only_valid_fixnums_before_the_first_uncertain_block() {
@@ -102,8 +98,8 @@ mod tests {
             let original: Vec<_> = (0..len).map(|at| tag((at % 33) as i64 - 16)).collect();
             for at in 0..len {
                 for value in [
-                    super::super::ruby::test_value(0),
-                    super::super::ruby::test_value(2),
+                    v(0),
+                    v(2),
                     tag(-17),
                     tag(17),
                     tag(-(1 << 62)),

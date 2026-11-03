@@ -150,10 +150,16 @@ mod tests {
             Some(value.bits() as u64)
         })
         .unwrap();
-        assert_eq!(index.candidates(3).collect::<Vec<_>>(), [0, 2, 4]);
-        assert_eq!(index.candidates(1).collect::<Vec<_>>(), [1]);
-        assert_eq!(index.candidates(0).count(), 0);
-        assert_eq!(index.candidates(4).count(), 0);
+        assert_eq!(
+            index.candidates(v(3).bits() as u64).collect::<Vec<_>>(),
+            [0, 2, 4]
+        );
+        assert_eq!(
+            index.candidates(v(1).bits() as u64).collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(index.candidates(v(0).bits() as u64).count(), 0);
+        assert_eq!(index.candidates(v(4).bits() as u64).count(), 0);
     }
 
     #[test]
