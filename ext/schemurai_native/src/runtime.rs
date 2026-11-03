@@ -86,15 +86,7 @@ struct PointerRequest {
     path: std::rc::Rc<pointer::Path>,
     result: Option<Value>,
 }
-unsafe extern "C" {
-    fn sn_runtime_ordinal(ordinal: usize) -> Value;
-    fn sn_cached_runtime(
-        matches: *const c_void,
-        operation: i32,
-        source: Value,
-        value: Value,
-    ) -> i32;
-}
+
 impl Caches {
     // FFI callers normally provide runner-owned state. Only null-cache calls
     // need a temporary owner, whose lifetime stays in the adapter's scope.

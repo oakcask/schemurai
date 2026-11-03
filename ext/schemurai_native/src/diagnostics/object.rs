@@ -24,7 +24,7 @@ pub unsafe extern "C" fn sn_object_report_child(
         }
         seed.schema_path.push_str("/");
         seed.schema_path.push_str(
-            std::str::from_utf8(unsafe { byte_view(keyword, len) }).expect("object keyword"),
+            std::str::from_utf8(unsafe { Ruby::bytes(keyword, len) }).expect("object keyword"),
         );
         if flags & 2 != 0 {
             seed.schema_path.text.push('/');

@@ -293,9 +293,7 @@ pub unsafe extern "C" fn sn_scopes_inherit(
         }
     }
 }
-unsafe extern "C" {
-    fn sn_references_read(active: Value, pairs: *mut c_void);
-}
+
 /// # Safety
 /// Pairs must be an exclusively borrowed reference vector; called by C's
 /// allocation-free walk of library-owned identity Hashes.

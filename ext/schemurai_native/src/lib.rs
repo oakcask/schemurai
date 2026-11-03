@@ -32,89 +32,9 @@ mod ruby;
 mod scope;
 mod structural;
 mod tracking;
-use ruby::{FixnumTag, Value};
-unsafe extern "C" {
-    fn sn_pin(value: Value);
-    fn sn_nil() -> Value;
-    fn sn_undefined() -> Value;
-    fn sn_kind(value: Value) -> i32;
-    fn sn_shallow_kind(value: Value) -> i32;
-    fn sn_fingerprint_view(
-        value: Value,
-        data: *mut *const c_void,
-        length: *mut usize,
-        number: *mut f64,
-    ) -> i32;
-    fn sn_small_hash(value: Value, entries: *mut Value) -> i32;
-    fn sn_true(value: Value) -> i32;
-    fn sn_truthy(value: Value) -> i32;
-    fn sn_fixnum(value: Value) -> i32;
-    fn sn_fixnum_flag() -> FixnumTag;
-    fn sn_array_data(value: Value) -> *const Value;
-    fn sn_integer(value: Value) -> i64;
-    fn sn_integer128(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_bounds128(value: Value, words: *mut u64) -> i32;
-    fn sn_number_bounds_view(
-        value: Value,
-        words: *mut u64,
-        kind: *mut i32,
-        floating: *mut f64,
-        required: i32,
-    ) -> i32;
-    fn sn_integer1024(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_word_count(value: Value) -> usize;
-    fn sn_integer_words(value: Value, words: *mut u64, count: usize) -> i32;
-    fn sn_is_bignum(value: Value) -> i32;
-    fn sn_big256(value: Value, words: *mut u64) -> i32;
-    fn sn_big_hash(value: Value, hash: *mut u64) -> i32;
-    fn sn_big_low_word(value: Value) -> u64;
-    fn sn_big_low64_word(value: Value, word: *mut u64) -> i32;
-    fn sn_big_equal(big: Value, other: Value) -> i32;
-    fn sn_big_order(left: Value, right: Value) -> i32;
-    fn sn_wide_integer_compare(value: Value, bound: Value) -> i32;
-    fn sn_float(value: Value) -> f64;
-    fn sn_is_float(value: Value) -> i32;
-    fn sn_is_rational(value: Value) -> i32;
-    fn sn_len(value: Value) -> usize;
-    fn sn_entry(value: Value, index: usize) -> Value;
-    fn sn_lookup(hash: Value, key: Value) -> Value;
-    fn sn_missing(value: Value) -> i32;
-    fn sn_same(a: Value, b: Value) -> i32;
-    fn sn_same_class(a: Value, b: Value) -> i32;
-    fn sn_string_data(value: Value) -> *const u8;
-    fn sn_string_bytes(value: Value) -> usize;
-    fn sn_string_equal(a: Value, b: Value) -> i32;
-    fn sn_string_length_guarded(value: Value, length: *mut usize) -> i32;
-    fn sn_record_key_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_string_raw_view(value: Value, data: *mut *const u8, length: *mut usize);
-    fn sn_string_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_format_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_json_encoding(value: Value) -> i32;
-    fn sn_json_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_resolve(compiler: Value, program: Value, reference: Value, result: *mut Value) -> i32;
-    fn sn_resolution_error(error: Value) -> i32;
-    fn sn_resource_program(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_count(resource: Value) -> usize;
-    fn sn_anchor_names(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_program(compiler: Value, resource: Value, name: Value, result: *mut Value) -> i32;
-    fn sn_hash_each(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, Value, Value) -> i32,
-    ) -> i32;
-    fn sn_hash_each_key_view(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, Value) -> i32,
-    ) -> i32;
-    fn sn_field(object: Value, name: i32, value: *mut Value) -> i32;
-    fn sn_pairs(hash: Value, value: *mut Value) -> i32;
-    fn sn_key_copy(key: Value, value: *mut Value) -> i32;
-    fn sn_opcode(symbol: Value) -> i32;
-    fn sn_object_each(value: Value, context: *mut c_void) -> i32;
-}
+use ruby::*;
+use ruby::{FixnumTag, Ruby, Value};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(i32)]
 enum Verdict {
@@ -249,7 +169,7 @@ impl StringRules {
         } else if encoding < 0 {
             verdict(required == 0)
         } else {
-            let bytes = unsafe { byte_view(data, len) };
+            let bytes = unsafe { Ruby::bytes(data, len) };
             self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
         }
     }
@@ -1748,11 +1668,7 @@ impl Execution<'_> {
         } else if let Some(&child) = r.items.first() {
             // Borrow CRuby's storage only for this Ruby-allocation-free traversal.
             // No Ruby callback or Ruby allocation occurs while it is live.
-            let values = if len == 0 {
-                &[]
-            } else {
-                unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-            };
+            let values = unsafe { Ruby::array(value) };
             let primitive = match self.nodes[child].as_slice() {
                 [Op::Type(mask, _)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
                     Some(&[][..])
@@ -1961,11 +1877,7 @@ impl Execution<'_> {
         if !total {
             return None;
         }
-        let values = if len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-        };
+        let values = unsafe { Ruby::array(value) };
         // Preserve later Unsupported/fallback results: no predicate work may
         // be skipped until all values are proven to be supported Fixnums.
         // This guard stays linear, but is far cheaper than full node evaluation.
@@ -2123,9 +2035,7 @@ impl Execution<'_> {
             }
             // Successful calls wrote exactly len pairs, bounded by eight;
             // no Ruby callback or allocation can change the Hash during C's walk.
-            let entries = unsafe {
-                std::slice::from_raw_parts(buffer.as_ptr().cast::<Value>(), 2 * len as usize)
-            };
+            let entries = unsafe { ruby::initialized_values(&buffer, 2 * len as usize) };
             let mut context = RecordContext {
                 engine: self,
                 rules: r,
@@ -2782,7 +2692,7 @@ fn mix(n: u64) -> u64 {
     n ^ (n >> 31)
 }
 fn string_fingerprint(value: Value) -> u64 {
-    bytes_fingerprint(unsafe { string_bytes(value) })
+    bytes_fingerprint(unsafe { Ruby::string(value) })
 }
 #[derive(Clone, Copy, Debug)]
 struct ShortRecordKey {
@@ -2798,27 +2708,10 @@ fn short_record_key(value: Value) -> ShortRecordKey {
     if len > 8 {
         return ShortRecordKey { word: 0, tag: 0 };
     }
-    let bytes = unsafe { byte_view(data, len) };
+    let bytes = unsafe { Ruby::bytes(data, len) };
     ShortRecordKey {
         word: short_word(bytes),
         tag: ((encoding as u64) << 4) | (len as u64 + 1),
-    }
-}
-// Borrow an already classified String under the GVL. The caller must not
-// allocate Ruby objects or run Ruby callbacks while the returned view is live.
-unsafe fn string_bytes<'a>(value: Value) -> &'a [u8] {
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    unsafe { sn_string_raw_view(value, &mut data, &mut len) };
-    unsafe { byte_view(data, len) }
-}
-// The caller must keep the original Ruby string alive and unchanged under
-// the GVL for the entire lifetime of the view, without allocating in Ruby.
-unsafe fn byte_view<'a>(data: *const u8, len: usize) -> &'a [u8] {
-    if len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(data, len) }
     }
 }
 // For at most eight bytes, the first/last scalar words cover every byte.
@@ -2925,7 +2818,7 @@ fn fingerprint_cached(
             3
         })),
         TYPE_STRING => Some(bytes_fingerprint(unsafe {
-            byte_view(data.assume_init().cast(), len.assume_init())
+            Ruby::bytes(data.assume_init().cast(), len.assume_init())
         })),
         TYPE_ARRAY => {
             let mut hash = mix(TYPE_ARRAY as u64);
@@ -2933,7 +2826,7 @@ fn fingerprint_cached(
             let values = if len == 0 {
                 &[]
             } else {
-                unsafe { std::slice::from_raw_parts(data.assume_init().cast::<Value>(), len) }
+                unsafe { Ruby::values(data.assume_init().cast::<Value>(), len) }
             };
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
@@ -2991,7 +2884,7 @@ unsafe extern "C" fn fingerprint_entry(
         else {
             return Unsupported as i32;
         };
-        c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));
+        c.hash ^= mix(bytes_fingerprint(unsafe { Ruby::bytes(data, len) }) ^ hash.rotate_left(17));
         Valid as i32
     }))
     .unwrap_or(Unsupported as i32)
@@ -3021,7 +2914,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: FixnumTag, budget: &budget::B
     if len <= 16 {
         return unique_linear(value, depth, budget, false);
     }
-    let values = unsafe { std::slice::from_raw_parts(sn_array_data(value), len) };
+    let values = unsafe { Ruby::array(value) };
     // This is a checked optimization hint, not an instance shape assumption.
     let big_hint = unsafe { sn_is_bignum(values[0]) } != 0;
     if big_hint

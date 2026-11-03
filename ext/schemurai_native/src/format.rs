@@ -20,7 +20,7 @@ impl Format {
         if unsafe { sn_kind(name) } != TYPE_STRING {
             return Self::Unsupported;
         }
-        let bytes = unsafe { string_bytes(name) };
+        let bytes = unsafe { Ruby::string(name) };
         match bytes {
             b"date" => Self::Date,
             b"time" => Self::Time,
@@ -35,7 +35,7 @@ impl Format {
         }
     }
     pub(super) fn eval(&self, value: Value) -> Verdict {
-        self.eval_bytes(unsafe { string_bytes(value) })
+        self.eval_bytes(unsafe { Ruby::string(value) })
     }
     pub(super) fn eval_bytes(&self, bytes: &[u8]) -> Verdict {
         verdict(match self {
@@ -98,7 +98,7 @@ fn scan_items(
         let result = if kind < 0 {
             verdict(required == 0)
         } else {
-            matches(unsafe { byte_view(data, len) })
+            matches(unsafe { Ruby::bytes(data, len) })
         };
         match result {
             Unsupported => return Unsupported,

@@ -88,3 +88,31 @@ fn handles_reject_integer_and_thread_boundaries() {
         Some("E0277"),
     );
 }
+
+#[test]
+fn borrowed_views_require_unsafe_and_buffer_loans_cannot_escape() {
+    check(
+        "string_requires_unsafe",
+        "fn bad(value: Value) { ruby::Ruby::string(value); }",
+        Some("E0133"),
+    );
+    check(
+        "array_requires_unsafe",
+        "fn bad(value: Value) { ruby::Ruby::array(value); }",
+        Some("E0133"),
+    );
+    check(
+        "bytes_require_unsafe",
+        "fn bad() { ruby::Ruby::bytes(std::ptr::null(), 0); }",
+        Some("E0133"),
+    );
+    check(
+        "initialized_prefix_cannot_escape",
+        "fn bad() -> &'static [Value] {
+\
+         let buffer = std::mem::MaybeUninit::<[Value; 16]>::uninit();
+\
+         unsafe { ruby::initialized_values(&buffer, 0) } }",
+        Some("E0515"),
+    );
+}

@@ -38,7 +38,7 @@ pub unsafe extern "C" fn sn_array_report_child(
         seed.instance_path.index(index);
         seed.schema_path.push_str("/");
         seed.schema_path.push_str(
-            std::str::from_utf8(unsafe { byte_view(keyword, len) }).expect("array keyword"),
+            std::str::from_utf8(unsafe { Ruby::bytes(keyword, len) }).expect("array keyword"),
         );
         if child != usize::MAX {
             seed.schema_path.index(child);

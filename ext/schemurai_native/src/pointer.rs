@@ -29,7 +29,7 @@ impl Path {
         let mut data = std::ptr::null();
         let mut len = 0;
         let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { Ruby::bytes(data, len) };
         if matches!(encoding, ENCODING_UTF8 | ENCODING_ASCII)
             && (encoding != ENCODING_ASCII || bytes.is_ascii())
             && let Some(name) = if bytes.len() < 64 {

@@ -121,7 +121,7 @@ impl Content {
                 verdict(required == 0)
             } else {
                 // Only the successful String view initializes these outputs.
-                let bytes = unsafe { byte_view(data.assume_init(), len.assume_init()) };
+                let bytes = unsafe { Ruby::bytes(data.assume_init(), len.assume_init()) };
                 if JSON && !BASE64 {
                     if kind == ENCODING_ASCII && !bytes.is_ascii() {
                         caches.json(value)
@@ -186,7 +186,7 @@ impl Content {
         let bytes = if BORROWED {
             bytes
         } else {
-            unsafe { byte_view(sn_string_data(value), sn_string_bytes(value)) }
+            unsafe { Ruby::string(value) }
         };
         if BASE64 {
             if !JSON {

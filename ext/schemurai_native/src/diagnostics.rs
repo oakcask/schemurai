@@ -1007,11 +1007,7 @@ impl Execution<'_> {
                             _ => None,
                         };
                         let primitive = primitive.filter(|_| !self.caches.dynamic_calls());
-                        let values = if len == 0 {
-                            &[]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-                        };
+                        let values = unsafe { Ruby::array(value) };
                         let pattern = match self.nodes[child].as_slice() {
                             [Op::String(required, string)] if depth < MAX_EVALUATION_DEPTH => {
                                 string.pattern_only().map(|pattern| (*required, pattern))
@@ -1136,11 +1132,7 @@ impl Execution<'_> {
                         }
                     }
                     if let Some(child) = rules.contains {
-                        let values = if len == 0 {
-                            &[]
-                        } else {
-                            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-                        };
+                        let values = unsafe { Ruby::array(value) };
                         let matches = evaluation::scan_contains(
                             len,
                             evaluation::ContainsPolicy::AllMatches,

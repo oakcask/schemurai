@@ -265,7 +265,7 @@ impl Engine {
                 Some(anchor)
                     if unsafe { sn_same(fragment, sn_nil()) } == 0
                         && unsafe { sn_string_bytes(fragment) } != 0
-                        && unsafe { *sn_string_data(fragment) } != b'/'
+                        && unsafe { Ruby::string(fragment)[0] } != b'/'
                         && unsafe { sn_string_equal(fragment, anchor) } != 0 =>
                 {
                     let name = JsonKey::new(fragment);

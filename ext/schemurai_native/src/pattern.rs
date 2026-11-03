@@ -46,7 +46,7 @@ impl PatternGroup {
         let sources: Option<Vec<_>> = names
             .iter()
             .map(|&name| {
-                std::str::from_utf8(unsafe { string_bytes(name) })
+                std::str::from_utf8(unsafe { Ruby::string(name) })
                     .ok()
                     .and_then(translate)
             })
@@ -72,7 +72,7 @@ impl PatternGroup {
         if encoding == ENCODING_OTHER {
             return None;
         }
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { Ruby::bytes(data, len) };
         if !valid_encoding(bytes, encoding) {
             return None;
         }
@@ -170,7 +170,7 @@ impl Pattern {
         if encoding == ENCODING_OTHER {
             return caches.ruby_match(self.source, value, assertion);
         }
-        let bytes = unsafe { byte_view(data, len) };
+        let bytes = unsafe { Ruby::bytes(data, len) };
         let result = self.matcher.eval_bytes(caches, bytes, encoding);
         if result == Unsupported {
             caches.ruby_match(self.source, value, assertion)
@@ -209,7 +209,7 @@ impl Matcher {
         if encoding == ENCODING_OTHER {
             return Self::Unsupported;
         }
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let bytes = unsafe { Ruby::bytes(data, len) };
         if encoding == ENCODING_ASCII && !bytes.is_ascii() {
             return Self::Unsupported;
         }
@@ -323,7 +323,7 @@ fn scan_items(
         let result = if encoding == ENCODING_OTHER {
             Unsupported
         } else {
-            let bytes = unsafe { byte_view(data, len) };
+            let bytes = unsafe { Ruby::bytes(data, len) };
             if valid_encoding(bytes, encoding) {
                 matches(bytes)
             } else {
