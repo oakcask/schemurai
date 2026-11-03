@@ -98,6 +98,86 @@ impl<K: Copy + Eq + std::hash::Hash, T: Clone> Cache<K, T> {
     }
 }
 
+// Compact exact signature: optional canonical guard membership, then projected
+// bindings. Construction owns the layout; Scopes only interns the encoded slots.
+struct ScopeSignature {
+    slots: Vec<Option<usize>>,
+    first_binding: usize,
+}
+impl ScopeSignature {
+    fn from_bindings(slots: Vec<Option<usize>>) -> Self {
+        Self {
+            slots,
+            first_binding: 0,
+        }
+    }
+
+    fn bindings(names: usize, budget: &budget::Budget) -> Option<Self> {
+        if names > MAX_SCOPE_SLOTS || !budget.checkpoint() {
+            return None;
+        }
+        Some(Self::from_bindings(vec![None; names]))
+    }
+
+    fn guard_limit(names: usize) -> Option<usize> {
+        (MAX_SCOPE_SLOTS - 2)
+            .checked_sub(names)
+            .map(|remaining| remaining / 2)
+    }
+
+    fn guarded(
+        mut pairs: Vec<(usize, Value)>,
+        names: usize,
+        budget: &budget::Budget,
+    ) -> Option<Self> {
+        if pairs.len() > Self::guard_limit(names)? || !budget.checkpoint() {
+            return None;
+        }
+        // RefFrame::contains tests membership, independently of order.
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut slots = Vec::with_capacity(1 + 2 * pairs.len() + names);
+        slots.push(Some(pairs.len()));
+        for (source, value) in pairs {
+            slots.extend([Some(source), Some(value.bits())]);
+        }
+        let first_binding = slots.len();
+        slots.resize(first_binding + names, None);
+        Some(Self {
+            slots,
+            first_binding,
+        })
+    }
+
+    fn bind(
+        &mut self,
+        engine: &Engine,
+        relevant: &[usize],
+        mut current: Option<&scope::ScopeFrame<'_>>,
+        recursive: bool,
+        budget: &budget::Budget,
+    ) -> Option<()> {
+        while let Some(frame) = current {
+            if !budget.checkpoint() {
+                return None;
+            }
+            for (&name, binding) in relevant.iter().zip(&mut self.slots[self.first_binding..]) {
+                if recursive && name == engine.anchor_tables.len() {
+                    if let Some(&root) = engine.resources.get(&frame.resource)
+                        && engine.metadata[root].recursive_anchor
+                    {
+                        *binding = Some(root);
+                    }
+                } else if let Some(&target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
+                    *binding = Some(target);
+                }
+            }
+            current = frame.parent;
+        }
+        Some(())
+    }
+}
+
 // Exact effective bindings identify a scope, rather than its stack address or
 // a probabilistic digest. FIFO eviction bounds the signature buffers; IDs are
 // never reused, so still-running evaluations can safely record older keys.
@@ -109,7 +189,8 @@ struct Scopes {
     next_id: usize,
 }
 impl Scopes {
-    fn intern(&mut self, bindings: Vec<Option<usize>>) -> Option<usize> {
+    fn intern(&mut self, signature: ScopeSignature) -> Option<usize> {
+        let bindings = signature.slots;
         if let Some(&id) = self.bindings.get(bindings.as_slice()) {
             return Some(id);
         }
@@ -271,9 +352,7 @@ impl Memo {
                 budget,
             )?;
             let names = relevant.len();
-            if names > MAX_SCOPE_SLOTS - 2 {
-                return None;
-            }
+            let guard_limit = ScopeSignature::guard_limit(names)?;
             if !budget.checkpoint() {
                 return None;
             }
@@ -286,7 +365,7 @@ impl Memo {
                 // A source outside every schema cycle cannot be revisited from
                 // its own descendant evaluation, even under dynamic dispatch.
                 if engine.memoization.guard_sources[frame.source] {
-                    if pairs.len() == (MAX_SCOPE_SLOTS - names - 2) / 2 {
+                    if pairs.len() == guard_limit {
                         return None;
                     }
                     pairs.push((frame.source, frame.value));
@@ -303,39 +382,8 @@ impl Memo {
                 };
                 pairs.retain(|&(source, ancestor)| ancestor == value && same[source]);
             }
-            // RefFrame::contains tests membership, independently of order.
-            if !budget.checkpoint() {
-                return None;
-            }
-            pairs.sort_unstable();
-            pairs.dedup();
-            let mut signature = Vec::with_capacity(1 + 2 * pairs.len() + names);
-            signature.push(Some(pairs.len()));
-            for (source, value) in pairs {
-                signature.extend([Some(source), Some(value.bits())]);
-            }
-            let first_binding = signature.len();
-            signature.resize(first_binding + names, None);
-            let mut current = context.scope;
-            while let Some(frame) = current {
-                if !budget.checkpoint() {
-                    return None;
-                }
-                for (slot, &name) in relevant.iter().enumerate() {
-                    if name == engine.anchor_tables.len() {
-                        if let Some(&root) = engine.resources.get(&frame.resource)
-                            && engine.metadata[root].recursive_anchor
-                        {
-                            signature[first_binding + slot] = Some(root);
-                        }
-                    } else if let Some(&target) =
-                        engine.dynamic_bindings.get(&(frame.resource, name))
-                    {
-                        signature[first_binding + slot] = Some(target);
-                    }
-                }
-                current = frame.parent;
-            }
+            let mut signature = ScopeSignature::guarded(pairs, names, budget)?;
+            signature.bind(engine, &relevant, context.scope, true, budget)?;
             if !budget.checkpoint() {
                 return None;
             }
@@ -361,27 +409,9 @@ impl Memo {
                 false,
                 budget,
             )?;
-            let names = relevant.len();
-            if names > MAX_SCOPE_SLOTS {
-                return None;
-            }
-            if !budget.checkpoint() {
-                return None;
-            }
-            let mut bindings = vec![None; names];
-            let mut current = context.scope;
-            while let Some(frame) = current {
-                if !budget.checkpoint() {
-                    return None;
-                }
-                for (&name, binding) in relevant.iter().zip(&mut bindings) {
-                    if let Some(target) = engine.dynamic_bindings.get(&(frame.resource, name)) {
-                        *binding = Some(*target);
-                    }
-                }
-                current = frame.parent;
-            }
-            self.scopes.borrow_mut().intern(bindings)?
+            let mut signature = ScopeSignature::bindings(relevant.len(), budget)?;
+            signature.bind(engine, &relevant, context.scope, false, budget)?;
+            self.scopes.borrow_mut().intern(signature)?
         };
         // Each scope gets a disjoint block of native node IDs. Checked
         // arithmetic keeps compact three-word result keys without aliasing
@@ -795,16 +825,25 @@ mod tests {
     #[test]
     fn scope_turnover_never_reassigns_ids_still_used_by_results() {
         let mut scopes = Scopes::default();
-        let old = scopes.intern(vec![Some(0)]).unwrap();
+        let old = scopes
+            .intern(ScopeSignature::from_bindings(vec![Some(0)]))
+            .unwrap();
         for binding in 1..MAX_ENTRIES * 2 {
-            scopes.intern(vec![Some(binding)]).unwrap();
+            scopes
+                .intern(ScopeSignature::from_bindings(vec![Some(binding)]))
+                .unwrap();
         }
         assert_eq!(scopes.bindings.len(), MAX_ENTRIES);
         assert_eq!(scopes.order.len(), MAX_ENTRIES);
         assert_eq!(scopes.slots, MAX_ENTRIES);
-        let new = scopes.intern(vec![Some(0)]).unwrap();
+        let new = scopes
+            .intern(ScopeSignature::from_bindings(vec![Some(0)]))
+            .unwrap();
         assert_ne!(old, new);
-        assert_eq!(scopes.intern(vec![Some(0)]), Some(new));
+        assert_eq!(
+            scopes.intern(ScopeSignature::from_bindings(vec![Some(0)])),
+            Some(new)
+        );
         let memo = Memo::default();
         memo.record_verdict((old, v(2), 3), Invalid);
         assert_eq!(memo.verdict((new, v(2), 3)), None);
@@ -814,14 +853,30 @@ mod tests {
     fn bounds_scope_buffers_and_skips_oversized_signatures_without_eviction() {
         let mut scopes = Scopes::default();
         let bindings = vec![Some(0); MAX_SCOPE_SLOTS / 2];
-        let first = scopes.intern(bindings.clone()).unwrap();
-        scopes.intern(vec![Some(1); bindings.len()]).unwrap();
-        scopes.intern(vec![Some(2); bindings.len()]).unwrap();
+        let first = scopes
+            .intern(ScopeSignature::from_bindings(bindings.clone()))
+            .unwrap();
+        scopes
+            .intern(ScopeSignature::from_bindings(vec![Some(1); bindings.len()]))
+            .unwrap();
+        scopes
+            .intern(ScopeSignature::from_bindings(vec![Some(2); bindings.len()]))
+            .unwrap();
         assert_eq!(scopes.slots, MAX_SCOPE_SLOTS);
         assert_eq!(scopes.bindings.len(), 2);
-        assert!(scopes.intern(vec![None; MAX_SCOPE_SLOTS + 1]).is_none());
+        assert!(
+            scopes
+                .intern(ScopeSignature::from_bindings(vec![
+                    None;
+                    MAX_SCOPE_SLOTS + 1
+                ]))
+                .is_none()
+        );
         assert_eq!(scopes.slots, MAX_SCOPE_SLOTS);
-        assert_ne!(scopes.intern(bindings), Some(first));
+        assert_ne!(
+            scopes.intern(ScopeSignature::from_bindings(bindings)),
+            Some(first)
+        );
     }
 
     #[test]
