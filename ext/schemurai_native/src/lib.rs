@@ -1317,12 +1317,12 @@ impl Execution<'_> {
             .memo
             .key(self, node, value, depth, active, &self.budget)
         else {
-            if self.budget.hit.get().0 != 0 {
+            if self.budget.hit.get().is_hit() {
                 return Unsupported;
             }
             return self.eval_uncached(node, value, depth, active, known_kind);
         };
-        if self.budget.hit.get().0 != 0 {
+        if self.budget.hit.get().is_hit() {
             return Unsupported;
         }
         if let Some(status) = self.memo.verdict(key) {
@@ -1603,7 +1603,7 @@ impl Execution<'_> {
         }
     }
     fn can_call_runtime(&self, result: Verdict) -> bool {
-        result == Unsupported && self.budget.failure.get() == 0 && self.budget.hit.get().0 == 0
+        result == Unsupported && self.budget.failure.get() == 0 && !self.budget.hit.get().is_hit()
     }
     fn unique_values(&self, value: Value, depth: usize) -> Verdict {
         let result = if self.caches.dynamic_calls() {
@@ -3518,7 +3518,7 @@ pub unsafe extern "C" fn sn_valid_with_limits(
             Unsupported
         };
         unsafe {
-            ((*outcome).kind, (*outcome).attempted) = execution.budget.hit.get();
+            *outcome = execution.budget.hit.get().into();
         }
         caches.finish_callback_report(result);
         execution.budget.status(result)

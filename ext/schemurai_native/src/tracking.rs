@@ -463,12 +463,12 @@ impl Execution<'_> {
             .memo
             .key(self, node, value, depth, active, &self.budget)
         else {
-            if self.budget.hit.get().0 != 0 {
+            if self.budget.hit.get().is_hit() {
                 return Tracked::new(Unsupported);
             }
             return self.eval_tracked_uncached(node, value, depth, active, kind_state);
         };
-        if self.budget.hit.get().0 != 0 || !self.budget.checkpoint() {
+        if self.budget.hit.get().is_hit() || !self.budget.checkpoint() {
             return Tracked::new(Unsupported);
         }
         if let Some(result) = self.memo.tracked(key) {
