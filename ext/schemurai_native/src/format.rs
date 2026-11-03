@@ -85,9 +85,7 @@ fn scan_items(
     mut matches: impl FnMut(&[u8]) -> Verdict,
 ) -> Verdict {
     for (index, &value) in values.iter().enumerate() {
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let kind = unsafe { sn_format_item_view(value, &mut data, &mut len) };
+        let (bytes, kind) = unsafe { Ruby::format_item_view(value) };
         if kind == -TYPE_UNSUPPORTED {
             let status = invalid(index, value);
             if status != Valid {
@@ -98,7 +96,7 @@ fn scan_items(
         let result = if kind < 0 {
             verdict(required == 0)
         } else {
-            matches(unsafe { Ruby::bytes(data, len) })
+            matches(bytes)
         };
         match result {
             Unsupported => return Unsupported,

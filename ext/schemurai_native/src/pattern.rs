@@ -66,13 +66,10 @@ impl PatternGroup {
         Some(Self { dfa, all })
     }
     pub(super) fn matches(&self, value: Value) -> Option<u64> {
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::pattern_view(value) };
         if encoding == ENCODING_OTHER {
             return None;
         }
-        let bytes = unsafe { Ruby::bytes(data, len) };
         if !valid_encoding(bytes, encoding) {
             return None;
         }
@@ -164,13 +161,10 @@ impl Pattern {
         if matches!(self.matcher, Matcher::Unsupported) {
             return caches.ruby_match(self.source, value, assertion);
         }
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::pattern_view(value) };
         if encoding == ENCODING_OTHER {
             return caches.ruby_match(self.source, value, assertion);
         }
-        let bytes = unsafe { Ruby::bytes(data, len) };
         let result = self.matcher.eval_bytes(caches, bytes, encoding);
         if result == Unsupported {
             caches.ruby_match(self.source, value, assertion)
@@ -203,13 +197,10 @@ impl Matcher {
         if unsafe { sn_kind(value) } != TYPE_STRING {
             return Self::Unsupported;
         }
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_string_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::string_view(value) };
         if encoding == ENCODING_OTHER {
             return Self::Unsupported;
         }
-        let bytes = unsafe { Ruby::bytes(data, len) };
         if encoding == ENCODING_ASCII && !bytes.is_ascii() {
             return Self::Unsupported;
         }
@@ -301,9 +292,7 @@ fn scan_items(
     mut fallback: impl FnMut(Value) -> Verdict,
 ) -> Verdict {
     for (index, &value) in values.iter().enumerate() {
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::pattern_item_view(value) };
         if encoding == -TYPE_UNSUPPORTED {
             let result = invalid(index, value);
             if result != Valid {
@@ -323,7 +312,6 @@ fn scan_items(
         let result = if encoding == ENCODING_OTHER {
             Unsupported
         } else {
-            let bytes = unsafe { Ruby::bytes(data, len) };
             if valid_encoding(bytes, encoding) {
                 matches(bytes)
             } else {

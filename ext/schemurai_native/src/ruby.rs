@@ -1,4 +1,5 @@
 //! CRuby boundary. Handles are neither roots nor permission to call Ruby.
+use crate::protocol::*;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -64,6 +65,39 @@ pub(crate) fn test_value(bits: usize) -> Value {
 mod tests {
     use super::*;
     #[test]
+    fn classified_views_read_outputs_only_for_strings() {
+        unsafe extern "C" fn non_string(_: Value, _: *mut *const u8, _: *mut usize) -> i32 {
+            // The C classifier deliberately leaves these outputs uninitialized.
+            -7
+        }
+        unsafe extern "C" fn string(_: Value, data: *mut *const u8, len: *mut usize) -> i32 {
+            unsafe {
+                *data = b"view".as_ptr();
+                *len = 4;
+            }
+            2
+        }
+        unsafe extern "C" fn empty(_: Value, data: *mut *const u8, len: *mut usize) -> i32 {
+            unsafe {
+                *data = std::ptr::null();
+                *len = 0;
+            }
+            0
+        }
+        unsafe {
+            assert_eq!(
+                Ruby::classified_bytes(test_value(0), non_string),
+                (&[][..], -7)
+            );
+            assert_eq!(
+                Ruby::classified_bytes(test_value(0), string),
+                (&b"view"[..], 2)
+            );
+            assert_eq!(Ruby::classified_bytes(test_value(0), empty), (&[][..], 0));
+        }
+    }
+
+    #[test]
     fn value_keeps_the_c_word_layout() {
         assert_eq!(std::mem::size_of::<Value>(), std::mem::size_of::<usize>());
         assert_eq!(std::mem::align_of::<Value>(), std::mem::align_of::<usize>());
@@ -76,6 +110,17 @@ mod tests {
             std::mem::align_of::<usize>()
         );
     }
+}
+
+/// The initialized output selected by the fingerprint adapter's classification.
+#[derive(Clone, Copy)]
+pub(crate) enum FingerprintView<'a> {
+    Number(f64),
+    Boolean(bool),
+    String(&'a [u8]),
+    Array(&'a [Value]),
+    Object(usize),
+    Scalar(i32),
 }
 
 /// Borrowed CRuby views for synchronous native execution in the calling Ractor.
@@ -123,6 +168,113 @@ impl Ruby {
         }
     }
 
+    /// String bytes and UTF-8/ASCII encoding metadata.
+    /// # Safety
+    /// Value must already be a classified, rooted String.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    pub(crate) unsafe fn string_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_string_view) }
+    }
+
+    /// String bytes and encoding metadata, including the cached seven-bit hint.
+    /// # Safety
+    /// Value must already be a classified, rooted String.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    pub(crate) unsafe fn pattern_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_pattern_view) }
+    }
+
+    /// Exact String key bytes and its CRuby encoding index.
+    /// # Safety
+    /// Value must already be a classified, rooted String.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    pub(crate) unsafe fn record_key_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_record_key_view) }
+    }
+
+    /// Classified pattern operand bytes and encoding, or a negative kind.
+    /// # Safety
+    /// Value must be live and rooted in the calling Ractor.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    /// Negative classifications return an empty slice without reading outputs.
+    pub(crate) unsafe fn pattern_item_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_pattern_item_view) }
+    }
+
+    /// Classified format operand bytes, or a negative kind.
+    /// # Safety
+    /// Value must be live and rooted in the calling Ractor.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    /// Negative classifications return an empty slice without reading outputs.
+    pub(crate) unsafe fn format_item_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_format_item_view) }
+    }
+
+    /// Classified JSON operand bytes and encoding, or a negative kind.
+    /// # Safety
+    /// Value must be live and rooted in the calling Ractor.
+    /// Keep the owner unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while the bytes remain in use.
+    /// Negative classifications return an empty slice without reading outputs.
+    pub(crate) unsafe fn json_item_view<'a>(value: Value) -> (&'a [u8], i32) {
+        unsafe { Self::classified_bytes(value, sn_json_item_view) }
+    }
+
+    // Only nonnegative adapter results initialize the pointer and length.
+    // Keep this rule here so callers never interpret uninitialized C outputs.
+    unsafe fn classified_bytes<'a>(
+        value: Value,
+        adapter: unsafe extern "C" fn(Value, *mut *const u8, *mut usize) -> i32,
+    ) -> (&'a [u8], i32) {
+        let mut data = std::mem::MaybeUninit::uninit();
+        let mut len = std::mem::MaybeUninit::uninit();
+        let kind = unsafe { adapter(value, data.as_mut_ptr(), len.as_mut_ptr()) };
+        let bytes = if kind < 0 {
+            &[]
+        } else {
+            unsafe { Self::bytes(data.assume_init(), len.assume_init()) }
+        };
+        (bytes, kind)
+    }
+
+    /// Classify a fingerprint operand and borrow only its initialized output.
+    /// # Safety
+    /// Value must be live and rooted in the calling Ractor. Keep its owner and
+    /// descendants unchanged under the GVL for the entire chosen lifetime,
+    /// with no Ruby allocation or callbacks while a returned view is in use.
+    pub(crate) unsafe fn fingerprint_view<'a>(value: Value) -> FingerprintView<'a> {
+        use std::mem::MaybeUninit;
+        let mut data = MaybeUninit::<*const c_void>::uninit();
+        let mut len = MaybeUninit::uninit();
+        let mut number = MaybeUninit::uninit();
+        let kind = unsafe {
+            sn_fingerprint_view(
+                value,
+                data.as_mut_ptr(),
+                len.as_mut_ptr(),
+                number.as_mut_ptr(),
+            )
+        };
+        // The C adapter initializes only the outputs selected by its kind.
+        match kind {
+            TYPE_NUMBER => FingerprintView::Number(unsafe { number.assume_init() }),
+            TYPE_BOOLEAN => FingerprintView::Boolean(unsafe { len.assume_init() } != 0),
+            TYPE_STRING => FingerprintView::String(unsafe {
+                Self::bytes(data.assume_init().cast(), len.assume_init())
+            }),
+            TYPE_ARRAY => FingerprintView::Array(unsafe {
+                Self::values(data.assume_init().cast(), len.assume_init())
+            }),
+            TYPE_OBJECT => FingerprintView::Object(unsafe { len.assume_init() }),
+            _ => FingerprintView::Scalar(kind),
+        }
+    }
+
     /// # Safety
     /// Value must be a classified Array, rooted and unchanged under the GVL
     /// for the entire chosen lifetime, with no Ruby allocation or callbacks.
@@ -148,7 +300,7 @@ unsafe extern "C" {
     pub(super) fn sn_undefined() -> Value;
     pub(super) fn sn_kind(value: Value) -> i32;
     pub(super) fn sn_shallow_kind(value: Value) -> i32;
-    pub(super) fn sn_fingerprint_view(
+    fn sn_fingerprint_view(
         value: Value,
         data: *mut *const c_void,
         length: *mut usize,
@@ -193,23 +345,14 @@ unsafe extern "C" {
     pub(super) fn sn_string_bytes(value: Value) -> usize;
     pub(super) fn sn_string_equal(a: Value, b: Value) -> i32;
     pub(super) fn sn_string_length_guarded(value: Value, length: *mut usize) -> i32;
-    pub(super) fn sn_record_key_view(value: Value, data: *mut *const u8, length: *mut usize)
-    -> i32;
+    fn sn_record_key_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
     fn sn_string_raw_view(value: Value, data: *mut *const u8, length: *mut usize);
-    pub(super) fn sn_string_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    pub(super) fn sn_pattern_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    pub(super) fn sn_pattern_item_view(
-        value: Value,
-        data: *mut *const u8,
-        length: *mut usize,
-    ) -> i32;
-    pub(super) fn sn_format_item_view(
-        value: Value,
-        data: *mut *const u8,
-        length: *mut usize,
-    ) -> i32;
+    fn sn_string_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
+    fn sn_pattern_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
+    fn sn_pattern_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
+    fn sn_format_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
     pub(super) fn sn_json_encoding(value: Value) -> i32;
-    pub(super) fn sn_json_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
+    fn sn_json_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
     pub(super) fn sn_resolve(
         compiler: Value,
         program: Value,

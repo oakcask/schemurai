@@ -161,15 +161,12 @@ impl StringRules {
         if caches.dynamic_calls() {
             return self.runtime_valid(caches, required, value);
         }
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::pattern_item_view(value) };
         if encoding == -TYPE_UNSUPPORTED {
             self.runtime_valid(caches, required, value)
         } else if encoding < 0 {
             verdict(required == 0)
         } else {
-            let bytes = unsafe { Ruby::bytes(data, len) };
             self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
         }
     }
@@ -2702,16 +2699,13 @@ struct ShortRecordKey {
     tag: u64,
 }
 fn short_record_key(value: Value) -> ShortRecordKey {
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    let encoding = unsafe { sn_record_key_view(value, &mut data, &mut len) };
-    if len > 8 {
+    let (bytes, encoding) = unsafe { Ruby::record_key_view(value) };
+    if bytes.len() > 8 {
         return ShortRecordKey { word: 0, tag: 0 };
     }
-    let bytes = unsafe { Ruby::bytes(data, len) };
     ShortRecordKey {
         word: short_word(bytes),
-        tag: ((encoding as u64) << 4) | (len as u64 + 1),
+        tag: ((encoding as u64) << 4) | (bytes.len() as u64 + 1),
     }
 }
 // For at most eight bytes, the first/last scalar words cover every byte.
@@ -2784,14 +2778,8 @@ fn fingerprint_cached(
     }
     // The C key-view iterator validates every key without Ruby lookup.
     // Avoid a separate preliminary walk of the same keys.
-    let mut data = std::mem::MaybeUninit::<*const c_void>::uninit();
-    let mut len = std::mem::MaybeUninit::<usize>::uninit();
-    let mut n = std::mem::MaybeUninit::<f64>::uninit();
-    // Read only the fields the C adapter initialized for the returned kind.
-    let kind =
-        unsafe { sn_fingerprint_view(value, data.as_mut_ptr(), len.as_mut_ptr(), n.as_mut_ptr()) };
-    if kind == TYPE_NUMBER {
-        let n = unsafe { n.assume_init() };
+    let view = unsafe { Ruby::fingerprint_view(value) };
+    if let FingerprintView::Number(n) = view {
         // Normalize integral floats without rounding distinct integers. Exact
         // JSON equality still resolves every collision before declaring duplicates.
         if n.is_finite() && n.trunc() == n && n >= i64::MIN as f64 && n < i64::MAX as f64 {
@@ -2799,35 +2787,28 @@ fn fingerprint_cached(
         }
         return Some(mix(n.to_bits() ^ TYPE_NUMBER as u64));
     }
-    let container = kind == TYPE_ARRAY || kind == TYPE_OBJECT;
     // Batch reuse pays for wide shared containers immediately. Small shallow
     // records keep the original cheap traversal, expanding at most four levels
     // before the depth-based cache handles deeper shared graphs.
-    let cacheable = container && memo.eligible_container(depth, unsafe { len.assume_init() });
+    let cacheable = match view {
+        FingerprintView::Array(values) => memo.eligible_container(depth, values.len()),
+        FingerprintView::Object(len) => memo.eligible_container(depth, len),
+        _ => false,
+    };
     let key = (value, depth);
     if cacheable && let Some(result) = memo.get(key) {
         return result;
     }
-    let result = match kind {
-        TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
-        TYPE_IDENTITY_SCALAR => Some(mix(value.bits() as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
-        TYPE_NULL => Some(mix(TYPE_NULL as u64)),
-        TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
-            2
-        } else {
-            3
-        })),
-        TYPE_STRING => Some(bytes_fingerprint(unsafe {
-            Ruby::bytes(data.assume_init().cast(), len.assume_init())
-        })),
-        TYPE_ARRAY => {
+    let result = match view {
+        FingerprintView::Scalar(TYPE_INTEGRAL_NUMBER) => Some(number::integer_fingerprint(value)),
+        FingerprintView::Scalar(TYPE_IDENTITY_SCALAR) => {
+            Some(mix(value.bits() as u64 ^ TYPE_IDENTITY_SCALAR as u64))
+        }
+        FingerprintView::Scalar(TYPE_NULL) => Some(mix(TYPE_NULL as u64)),
+        FingerprintView::Boolean(value) => Some(mix(if value { 2 } else { 3 })),
+        FingerprintView::String(bytes) => Some(bytes_fingerprint(bytes)),
+        FingerprintView::Array(values) => {
             let mut hash = mix(TYPE_ARRAY as u64);
-            let len = unsafe { len.assume_init() };
-            let values = if len == 0 {
-                &[]
-            } else {
-                unsafe { Ruby::values(data.assume_init().cast::<Value>(), len) }
-            };
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
@@ -2837,8 +2818,7 @@ fn fingerprint_cached(
             }
             Some(hash)
         }
-        TYPE_OBJECT => {
-            let len = unsafe { len.assume_init() };
+        FingerprintView::Object(len) => {
             let mut c = FingerprintContext {
                 hash: 0,
                 depth: depth + 1,

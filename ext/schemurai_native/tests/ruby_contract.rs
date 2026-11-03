@@ -10,10 +10,12 @@ fn check(name: &str, body: &str, error: Option<&str>) {
     let source = format!(
         "#![allow(dead_code, unused_imports)]\n\
          #[path = \"src/ruby.rs\"] mod ruby;\n\
+         mod protocol {{ include!(concat!(env!(\"OUT_DIR\"), \"/protocol.rs\")); }}\n\
          use ruby::Value;\n{body}\nfn main() {{}}"
     );
     let mut child = Command::new("rustc")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("OUT_DIR", env!("OUT_DIR"))
         .args([
             "--edition=2024",
             "--crate-name",
@@ -105,6 +107,16 @@ fn borrowed_views_require_unsafe_and_buffer_loans_cannot_escape() {
         "bytes_require_unsafe",
         "fn bad() { ruby::Ruby::bytes(std::ptr::null(), 0); }",
         Some("E0133"),
+    );
+    check(
+        "string_view_requires_unsafe",
+        "fn bad(value: Value) { ruby::Ruby::string_view(value); }",
+        Some("E0133"),
+    );
+    check(
+        "raw_string_view_is_private",
+        "fn bad(value: Value) { unsafe { ruby::sn_string_view(value, std::ptr::null_mut(), std::ptr::null_mut()); } }",
+        Some("E0603"),
     );
     check(
         "initialized_prefix_cannot_escape",
