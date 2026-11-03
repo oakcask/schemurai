@@ -79,11 +79,11 @@ pub struct MessageArguments {
 }
 #[derive(Default)]
 struct Pointers {
-    indices: HashMap<std::sync::Arc<pointer::Path>, usize>,
+    indices: HashMap<std::rc::Rc<pointer::Path>, usize>,
     requests: Vec<PointerRequest>,
 }
 struct PointerRequest {
-    path: std::sync::Arc<pointer::Path>,
+    path: std::rc::Rc<pointer::Path>,
     result: Option<Value>,
 }
 unsafe extern "C" {
@@ -536,7 +536,7 @@ impl Caches {
         let index = if let Some(&index) = pointers.indices.get(path) {
             index
         } else {
-            let path = std::sync::Arc::new(path.clone());
+            let path = std::rc::Rc::new(path.clone());
             let index = pointers.requests.len();
             pointers.indices.insert(path.clone(), index);
             pointers
@@ -677,8 +677,7 @@ pub unsafe extern "C" fn sn_caches_size(caches_ptr: *const Caches) -> usize {
         .pointers
         .try_borrow()
         .map_or(0, |pointers| {
-            pointers.indices.capacity()
-                * std::mem::size_of::<(std::sync::Arc<pointer::Path>, usize)>()
+            pointers.indices.capacity() * std::mem::size_of::<(std::rc::Rc<pointer::Path>, usize)>()
                 + pointers.requests.capacity() * std::mem::size_of::<PointerRequest>()
                 + pointers
                     .requests

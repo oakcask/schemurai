@@ -149,6 +149,7 @@ pub unsafe extern "C" fn sn_array_report_finish(report: *mut Report, valid: i32)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn runtime_effects_keep_the_receiving_path_and_detect_silent_failure() {
@@ -167,10 +168,10 @@ mod tests {
             instance_path: pointer::Rendered::Native("/7/0".into()),
             schema_path: pointer::Rendered::Native("/items/items/type".into()),
             opcode: OP_TYPE_INTEGER,
-            operand: 0,
-            instance: 0,
+            operand: v(0),
+            instance: v(0),
             detail: 0,
-            message: 0,
+            message: v(0),
         });
         let effect = completed.effect_since(&before).unwrap();
         report.apply_effect(effect);

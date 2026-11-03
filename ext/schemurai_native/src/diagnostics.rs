@@ -1096,7 +1096,8 @@ impl Execution<'_> {
                                     coverage.item(index);
                                 }
                                 let needs = if let Some(limits) = primitive.filter(|_| {
-                                    item & self.fixnum_flag != 0 && depth < MAX_EVALUATION_DEPTH
+                                    item.has_fixnum_tag(self.fixnum_flag)
+                                        && depth < MAX_EVALUATION_DEPTH
                                 }) {
                                     let n = if limits.is_empty() {
                                         0
@@ -1819,6 +1820,7 @@ pub unsafe extern "C" fn sn_report_free(report: *mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn report_seeds_and_results_own_error_paths_limits_and_locations() {
@@ -1839,10 +1841,10 @@ mod tests {
             instance_path: pointer::Rendered::Native("/item".into()),
             schema_path: pointer::Rendered::Native("/allOf/0/type".into()),
             opcode: OP_TYPE_INTEGER,
-            operand: 0,
-            instance: 0,
+            operand: v(0),
+            instance: v(0),
             detail: 0,
-            message: 0,
+            message: v(0),
         });
         let mut locations = Tracked::new(Valid);
         locations.item(4);

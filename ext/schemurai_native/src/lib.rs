@@ -28,10 +28,11 @@ mod protocol {
     include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 use protocol::*;
+mod ruby;
 mod scope;
 mod structural;
 mod tracking;
-type Value = usize;
+use ruby::{FixnumTag, Value};
 unsafe extern "C" {
     fn sn_pin(value: Value);
     fn sn_nil() -> Value;
@@ -48,7 +49,7 @@ unsafe extern "C" {
     fn sn_true(value: Value) -> i32;
     fn sn_truthy(value: Value) -> i32;
     fn sn_fixnum(value: Value) -> i32;
-    fn sn_fixnum_flag() -> Value;
+    fn sn_fixnum_flag() -> FixnumTag;
     fn sn_array_data(value: Value) -> *const Value;
     fn sn_integer(value: Value) -> i64;
     fn sn_integer128(value: Value, words: *mut u64) -> i32;
@@ -675,7 +676,10 @@ impl Object {
         let fields: Vec<_> = fields.into_values().collect();
         let short_index = RecordShortIndex::compile(&fields);
         self.record = Some(RecordObject {
-            identity_hint: self.properties.first().map_or(0, |&(key, _)| key),
+            identity_hint: self
+                .properties
+                .first()
+                .map_or(Value::default(), |&(key, _)| key),
             fields,
             short_index,
             required,
@@ -718,7 +722,7 @@ pub struct Engine {
     indices: HashMap<Value, usize>,
     roots: *mut Roots,
     root: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     compiler: Value,
     runtime_messages: bool,
     validate_format: bool,
@@ -734,7 +738,7 @@ impl Engine {
         value
     }
     fn field(&mut self, value: Value, name: i32) -> Result<Value, Value> {
-        let mut result = 0;
+        let mut result = Value::default();
         if unsafe { sn_field(value, name, &mut result) } != 0 {
             return Err(result);
         }
@@ -773,7 +777,7 @@ impl Engine {
         if unsafe { sn_same(value, sn_nil()) } != 0 {
             return Ok(vec![]);
         }
-        let mut pairs = 0;
+        let mut pairs = Value::default();
         if unsafe { sn_pairs(value, &mut pairs) } != 0 {
             return Err(pairs);
         }
@@ -1271,7 +1275,7 @@ impl Engine {
                                         _ => None,
                                     }
                                 });
-                                let mut key = 0;
+                                let mut key = Value::default();
                                 if unsafe { sn_key_copy(field.name, &mut key) } != 0 {
                                     return Err(key);
                                 }
@@ -1292,7 +1296,7 @@ impl Engine {
                 }
                 OP_REF | OP_RECURSIVE_REF | OP_DYNAMIC_REF => {
                     let reference = self.field(operand, FIELD_VALUE)?;
-                    let mut target = 0;
+                    let mut target = Value::default();
                     if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
                         if unsafe { sn_resolution_error(target) } != 0 {
                             let message = self.field(target, FIELD_MESSAGE)?;
@@ -1950,7 +1954,7 @@ impl Execution<'_> {
         };
         let total = match op {
             Op::Type(..) | Op::Boolean(_) => true,
-            Op::Const(expected) => expected & self.fixnum_flag != 0,
+            Op::Const(expected) => expected.has_fixnum_tag(self.fixnum_flag),
             Op::Number(_, rules) => rules.fast_limits.is_some(),
             _ => false,
         };
@@ -1965,7 +1969,10 @@ impl Execution<'_> {
         // Preserve later Unsupported/fallback results: no predicate work may
         // be skipped until all values are proven to be supported Fixnums.
         // This guard stays linear, but is far cheaper than full node evaluation.
-        if !values.iter().all(|&item| item & self.fixnum_flag != 0) {
+        if !values
+            .iter()
+            .all(|&item| item.has_fixnum_tag(self.fixnum_flag))
+        {
             return None;
         }
         Some(evaluation::contains_validity(
@@ -2014,7 +2021,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let result = if value & self.fixnum_flag != 0 {
+            let result = if value.has_fixnum_tag(self.fixnum_flag) {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
@@ -2047,7 +2054,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let kind = if value & self.fixnum_flag != 0 {
+            let kind = if value.has_fixnum_tag(self.fixnum_flag) {
                 TYPE_INTEGRAL_NUMBER
             } else {
                 unsafe { sn_shallow_kind(value) }
@@ -2272,7 +2279,7 @@ impl Execution<'_> {
         if self.caches.scalar_callback() && self.kind_demand[node] == KindDemand::Predicate {
             return TYPE_UNSUPPORTED;
         }
-        if value & self.fixnum_flag != 0 {
+        if value.has_fixnum_tag(self.fixnum_flag) {
             return TYPE_INTEGRAL_NUMBER;
         }
         if self.kind_demand[node] == KindDemand::None {
@@ -2295,7 +2302,7 @@ impl Execution<'_> {
         if known.get() != TYPE_UNCHECKED {
             return known.get();
         }
-        let kind = if value & self.fixnum_flag != 0 {
+        let kind = if value.has_fixnum_tag(self.fixnum_flag) {
             TYPE_INTEGRAL_NUMBER
         } else if self.kind_demand[node] == KindDemand::None {
             TYPE_UNCHECKED
@@ -2415,7 +2422,8 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
         c.status = if c.depth <= MAX_EVALUATION_DEPTH {
             match field.and_then(|field| field.check) {
                 Some(RecordCheck::IntegerBounds(min, max))
-                    if value & c.engine.fixnum_flag != 0 && !c.engine.caches.dynamic_calls() =>
+                    if value.has_fixnum_tag(c.engine.fixnum_flag)
+                        && !c.engine.caches.dynamic_calls() =>
                 {
                     let n = immediate_integer(value);
                     verdict(n >= min && n <= max)
@@ -2476,7 +2484,7 @@ fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<u
 // Call only after value & the header-validated fixnum_flag is nonzero.
 // Rust's signed shift is arithmetic; other encodings retain the C adapters.
 fn immediate_integer(value: Value) -> i64 {
-    (value as isize >> 1) as i64
+    (value.bits() as isize >> 1) as i64
 }
 fn equal_budgeted(a: Value, b: Value, depth: usize, budget: &budget::Budget) -> Verdict {
     equal_cached(a, b, depth, &mut structural::Cache::new(depth), budget)
@@ -2845,7 +2853,7 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
 fn fingerprint_budgeted(
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     budget: &budget::Budget,
 ) -> Option<u64> {
@@ -2861,7 +2869,7 @@ fn fingerprint_budgeted(
 fn fingerprint_cached(
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &budget::Budget,
@@ -2872,7 +2880,7 @@ fn fingerprint_cached(
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
-    if value & fixnum_flag != 0 {
+    if value.has_fixnum_tag(fixnum_flag) {
         // sn_fixnum_flag enables this hint only after the C headers confirm
         // the signed immediate encoding. Rust's signed shift is arithmetic.
         let integer = immediate_integer(value);
@@ -2909,7 +2917,7 @@ fn fingerprint_cached(
     }
     let result = match kind {
         TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
-        TYPE_IDENTITY_SCALAR => Some(mix(value as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
+        TYPE_IDENTITY_SCALAR => Some(mix(value.bits() as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
         TYPE_NULL => Some(mix(TYPE_NULL as u64)),
         TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
             2
@@ -2964,7 +2972,7 @@ fn fingerprint_cached(
 struct FingerprintContext<'a> {
     hash: u64,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &'a budget::Budget,
 }
@@ -3005,7 +3013,7 @@ impl Hasher for BucketHasher {
         }
     }
 }
-fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budget) -> Verdict {
+fn unique(value: Value, depth: usize, fixnum_flag: FixnumTag, budget: &budget::Budget) -> Verdict {
     let len = unsafe { sn_len(value) };
     if !budget.checkpoint() {
         return Unsupported;
@@ -3758,17 +3766,18 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn falls_back_for_clustered_slots_without_comparing_distinct_fingerprints() {
-        let values: Vec<_> = (1..=4096).collect();
+        let values: Vec<_> = (1..=4096).map(v).collect();
         let mut hashes = 0;
         assert_eq!(
             indexed_unique(
                 &values,
                 |value| {
                     hashes += 1;
-                    Some((value as u64) << 32)
+                    Some((value.bits() as u64) << 32)
                 },
                 |_, _| panic!("distinct full fingerprints cannot require equality"),
             ),
@@ -3780,14 +3789,23 @@ mod tests {
 
     #[test]
     fn sorted_collisions_preserve_exact_equality_and_early_results() {
-        let hash = |value| (value != 99).then_some(value as u64 % 2);
+        let hash = |value: Value| (value != v(99)).then_some(value.bits() as u64 % 2);
         let equal = |a, b| verdict(a == b);
-        assert_eq!(sorted_unique(&[0, 2, 4, 1, 3, 5], hash, equal), Valid);
-        assert_eq!(sorted_unique(&[0, 2, 0, 99], hash, equal), Invalid);
-        assert_eq!(sorted_unique(&[0, 2, 99, 0], hash, equal), Unsupported);
         assert_eq!(
-            sorted_unique(&[0, 1, 1, 2], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(4), v(1), v(3), v(5)], hash, equal),
+            Valid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(0), v(99)], hash, equal),
+            Invalid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(99), v(0)], hash, equal),
+            Unsupported
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(1), v(1), v(2)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)
@@ -3796,8 +3814,8 @@ mod tests {
             Invalid
         );
         assert_eq!(
-            sorted_unique(&[0, 2, 1, 1], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(1), v(1)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)
