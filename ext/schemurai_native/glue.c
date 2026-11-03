@@ -387,7 +387,7 @@ static VALUE runner_share_scalar_state(VALUE self, VALUE number_state, VALUE reg
     if (runner->busy) rb_raise(rb_eRuntimeError, "cannot replace active scalar state");
     Check_Type(scopes, T_ARRAY);
     runner->scope_state = scopes;
-    if (!rb_obj_is_kind_of(reports, report_state_class()))
+    if (!RTEST(rb_obj_is_kind_of(reports, report_state_class())))
         rb_raise(rb_eTypeError, "expected NativeReportState");
     runner->report_state = reports;
     Check_Type(references, T_ARRAY);
@@ -1741,7 +1741,7 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
     int verdict;
     if (state) {
         VALUE error = rb_errinfo();
-        if (rb_obj_is_kind_of(error, rb_eRegexpError) && sn_caches_rescue_regexp(call->runner->caches)) {
+        if (RTEST(rb_obj_is_kind_of(error, rb_eRegexpError)) && sn_caches_rescue_regexp(call->runner->caches)) {
             rb_set_errinfo(previous);
             RB_GC_GUARD(previous);
             return;
@@ -1749,10 +1749,10 @@ static void evaluate_runtime(evaluation_call *call, VALUE source, VALUE instance
         if (kind == SN_RUNTIME_JSON) {
             VALUE json = rb_const_get(rb_cObject, rb_intern_const("JSON"));
             VALUE parser_error = rb_const_get(json, rb_intern_const("ParserError"));
-            if (!rb_obj_is_kind_of(error, rb_eArgError) && !rb_obj_is_kind_of(error, parser_error)) rb_jump_tag(state);
+            if (!RTEST(rb_obj_is_kind_of(error, rb_eArgError)) && !RTEST(rb_obj_is_kind_of(error, parser_error))) rb_jump_tag(state);
             verdict = SN_VERDICT_INVALID;
         } else {
-            if (kind != SN_RUNTIME_REGEXP_ASSERTION || !rb_obj_is_kind_of(error, rb_eRegexpError)) rb_jump_tag(state);
+            if (kind != SN_RUNTIME_REGEXP_ASSERTION || !RTEST(rb_obj_is_kind_of(error, rb_eRegexpError))) rb_jump_tag(state);
             verdict = SN_REGEXP_INVALID;
         }
         rb_set_errinfo(previous);
@@ -2271,7 +2271,7 @@ int sn_resolve(VALUE compiler, VALUE program, VALUE reference, VALUE *result) {
 int sn_resolution_error(VALUE error) {
     VALUE schemurai = rb_const_get(rb_cObject, id_schemurai);
     VALUE klass = rb_const_get(schemurai, id_resolution_error);
-    return rb_obj_is_kind_of(error, klass);
+    return RTEST(rb_obj_is_kind_of(error, klass));
 }
 
 typedef int (*hash_callback)(void *, VALUE, VALUE);
