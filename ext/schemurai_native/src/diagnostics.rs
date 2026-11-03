@@ -49,7 +49,7 @@ pub struct Report {
     silent: bool,
     render_messages: bool,
     limits: budget::Limits,
-    limit_hit: (u32, usize),
+    limit_hit: budget::LimitHit,
 }
 impl Report {
     pub(super) fn same_collection_policy(&self, other: &Self) -> bool {
@@ -294,7 +294,9 @@ impl Report {
     }
     fn reserve_error(&mut self) -> Result<(), Verdict> {
         if self.limits.enabled & 1 != 0 && self.attempts >= self.limits.max_errors {
-            self.limit_hit = (1, self.attempts.saturating_add(1));
+            self.limit_hit = budget::LimitHit::MaxErrors {
+                attempted: self.attempts.saturating_add(1),
+            };
             return Err(Unsupported);
         }
         self.attempts = self.attempts.saturating_add(1);
@@ -630,7 +632,7 @@ impl Execution<'_> {
         let key = self
             .memo
             .key(self, node, value, depth, active, &self.budget);
-        if self.budget.hit.get().0 != 0 {
+        if self.budget.hit.get().is_hit() {
             return Err(Unsupported);
         }
         if let Some(key) = key
@@ -1738,13 +1740,13 @@ pub unsafe extern "C" fn sn_diagnose_with_limits(
         } else {
             Err(Unsupported)
         };
-        let hit = if report.limit_hit.0 != 0 {
+        let hit = if report.limit_hit.is_hit() {
             report.limit_hit
         } else {
             execution.budget.hit.get()
         };
         unsafe {
-            ((*outcome).kind, (*outcome).attempted) = hit;
+            *outcome = hit.into();
         }
         result
             .map(|evaluation| {

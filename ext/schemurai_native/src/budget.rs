@@ -15,10 +15,37 @@ pub struct Outcome {
     pub kind: u32,
     pub attempted: usize,
 }
+// Internal exhaustion reasons are converted to numeric tags only at the C boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum LimitHit {
+    #[default]
+    None,
+    MaxErrors {
+        attempted: usize,
+    },
+    Timeout,
+}
+impl LimitHit {
+    pub(super) fn is_hit(self) -> bool {
+        self != Self::None
+    }
+}
+impl From<LimitHit> for Outcome {
+    fn from(hit: LimitHit) -> Self {
+        match hit {
+            LimitHit::None => Self::default(),
+            LimitHit::MaxErrors { attempted } => Self { kind: 1, attempted },
+            LimitHit::Timeout => Self {
+                kind: 2,
+                attempted: 0,
+            },
+        }
+    }
+}
 #[derive(Default)]
 pub(super) struct Budget {
     pub limits: Limits,
-    pub hit: Cell<(u32, usize)>,
+    pub hit: Cell<LimitHit>,
     pub failure: Cell<i32>,
     deadline: Option<Instant>,
     checks: Cell<usize>,
@@ -60,14 +87,14 @@ impl Budget {
         self.limits.enabled & 2 != 0
     }
     pub fn check_deadline(&self) -> bool {
-        if self.hit.get().0 != 0 {
+        if self.hit.get().is_hit() {
             return false;
         }
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            self.hit.set((2, 0));
+            self.hit.set(LimitHit::Timeout);
             return false;
         }
         true
@@ -81,7 +108,7 @@ impl Budget {
         if checks & 255 == 0 {
             self.check_deadline()
         } else {
-            self.hit.get().0 == 0
+            !self.hit.get().is_hit()
         }
     }
 }
@@ -103,7 +130,7 @@ mod tests {
             assert!(budget.checkpoint());
         }
         assert!(!budget.checkpoint());
-        assert_eq!(budget.hit.get(), (2, 0));
+        assert_eq!(budget.hit.get(), LimitHit::Timeout);
         assert!(!budget.checkpoint());
     }
 
@@ -132,7 +159,7 @@ mod tests {
             &deadline,
         );
         assert!(!budget.check_deadline());
-        assert_eq!(budget.hit.get(), (2, 0));
+        assert_eq!(budget.hit.get(), LimitHit::Timeout);
         assert_eq!(deadline.get(), Some(original));
         deadline.set(None);
         assert!(
