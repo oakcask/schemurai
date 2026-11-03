@@ -50,13 +50,13 @@ module Schemurai
         @dynamic_scope = dynamic_scope
         @instance_path_buffer = nil
         @schema_path_buffer = nil
-        @evaluation_pool = native_reports ? native_reports[1] : Internal::EvaluationPool.new
+        @evaluation_pool = native_reports ? native_reports.evaluation_pool : Internal::EvaluationPool.new
       end
 
       def validate(instance)
         @errors = []
         prepare_evaluation(paths: true)
-        @native_reports[0] = self if @native_reports
+        @native_reports.current_collector = self if @native_reports
         evaluate(@root, instance)
         Result.new(@errors)
       ensure
@@ -70,7 +70,7 @@ module Schemurai
         @instance_path = nil
         @schema_path = nil
         reset_evaluation_pool
-        @native_reports[0] = self if @native_reports
+        @native_reports.current_collector = self if @native_reports
         evaluate_valid(@root, instance)
       end
 
@@ -98,7 +98,7 @@ module Schemurai
         native_clear_collection(reset == 2) unless reset.zero?
         @error_count += count
         @errors.concat(errors) if @errors
-        @native_reports[0] = self
+        @native_reports.current_collector = self
       end
 
       private def prepare_evaluation(paths:)
@@ -594,7 +594,7 @@ module Schemurai
       ensure
         @errors = saved_errors
         @error_count = saved_count
-        @native_reports[0] = self if @native_reports
+        @native_reports.current_collector = self if @native_reports
         if saved_instance_path
           @instance_path = saved_instance_path
           @schema_path = saved_schema_path

@@ -7,7 +7,7 @@ require_relative "../value_equality"
 require_relative "../container_checks"
 require_relative "../type_checks"
 require_relative "../vm/compiler"
-require_relative "../evaluation_pool"
+require_relative "report_state"
 require_relative "../limit_budget"
 require_relative "../ecma_regexp"
 require_relative "../json_pointer"
@@ -31,7 +31,7 @@ module Schemurai
         @number_state = Internal::NumberChecks::State.new
         @regexps = {}
         @scope_state = []
-        @report_state = [nil, Internal::EvaluationPool.new]
+        @report_state = Internal::NativeReportState.new
         @reference_state = []
         @active_state = {}.compare_by_identity
         @program = @compiled.runner(root)
