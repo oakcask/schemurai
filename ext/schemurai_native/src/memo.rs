@@ -4,6 +4,58 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tracking::Tracked;
 
+// Compiled analysis is shared with the Engine; invocation results live in Memo.
+#[derive(Default)]
+pub(super) struct MemoizationPlan {
+    pub(super) reusable: Vec<bool>,
+    pub(super) contextual: Vec<bool>,
+    pub(super) guarded: Vec<bool>,
+    pub(super) guard_sources: Vec<bool>,
+    pub(super) guard_same_sources: Vec<bool>,
+    pub(super) guard_scalar_sources: Vec<bool>,
+    pub(super) guard_scalar_amplification: Vec<bool>,
+    pub(super) scope_projection: memo_scope::Projection,
+}
+impl MemoizationPlan {
+    fn disabled(nodes: usize) -> Self {
+        let mut plan = Self {
+            reusable: vec![false; nodes],
+            contextual: vec![false; nodes],
+            ..Self::default()
+        };
+        plan.clear_guards(nodes);
+        plan
+    }
+
+    fn clear_guards(&mut self, nodes: usize) {
+        for flags in [
+            &mut self.guarded,
+            &mut self.guard_sources,
+            &mut self.guard_same_sources,
+            &mut self.guard_scalar_sources,
+            &mut self.guard_scalar_amplification,
+        ] {
+            *flags = vec![false; nodes];
+        }
+    }
+
+    pub(super) fn memory_usage(&self) -> usize {
+        [
+            &self.reusable,
+            &self.contextual,
+            &self.guarded,
+            &self.guard_sources,
+            &self.guard_same_sources,
+            &self.guard_scalar_sources,
+            &self.guard_scalar_amplification,
+        ]
+        .iter()
+        .map(|flags| flags.capacity() * std::mem::size_of::<bool>())
+        .sum::<usize>()
+            + self.scope_projection.memory_usage()
+    }
+}
+
 pub(super) type Key = (usize, Value, usize);
 const MAX_SCOPE_SLOTS: usize = 65536;
 const MAX_ENTRIES: usize = 4096;
@@ -134,14 +186,21 @@ impl Memo {
     ) -> Option<Key> {
         // Dynamic Ruby predicates may be stateful. Replayed observations already
         // preserve reached calls; result memoization must not skip later calls.
-        if engine.caches.dynamic_calls() || !engine.memoizable[node] {
+        if engine.caches.dynamic_calls() || !engine.memoization.reusable[node] {
             return None;
         }
         let mut object = false;
-        if engine.memo_guarded.get(node).copied().unwrap_or(false) {
+        if engine
+            .memoization
+            .guarded
+            .get(node)
+            .copied()
+            .unwrap_or(false)
+        {
             let kind = unsafe { sn_shallow_kind(value) };
             object = kind == TYPE_OBJECT;
-            if kind != TYPE_ARRAY && !object && !engine.memo_guard_scalar_amplification[node] {
+            if kind != TYPE_ARRAY && !object && !engine.memoization.guard_scalar_amplification[node]
+            {
                 return None;
             }
             if !self.admit_guard_key((node, value, depth)) {
@@ -194,11 +253,17 @@ impl Memo {
         analysis: (bool, impl FnOnce(Value) -> bool, &budget::Budget),
     ) -> Option<Key> {
         let (object, prove_acyclic, budget) = analysis;
-        if !engine.memoizable[node] {
+        if !engine.memoization.reusable[node] {
             return None;
         }
-        if engine.memo_guarded.get(node).copied().unwrap_or(false) {
-            let relevant = engine.memo_scope_projection.names(
+        if engine
+            .memoization
+            .guarded
+            .get(node)
+            .copied()
+            .unwrap_or(false)
+        {
+            let relevant = engine.memoization.scope_projection.names(
                 node,
                 engine.nodes.len(),
                 engine.anchor_tables.len(),
@@ -220,7 +285,7 @@ impl Memo {
                 }
                 // A source outside every schema cycle cannot be revisited from
                 // its own descendant evaluation, even under dynamic dispatch.
-                if engine.memo_guard_sources[frame.source] {
+                if engine.memoization.guard_sources[frame.source] {
                     if pairs.len() == (MAX_SCOPE_SLOTS - names - 2) / 2 {
                         return None;
                     }
@@ -232,9 +297,9 @@ impl Memo {
                 // An acyclic input cannot revisit ancestors through position
                 // changes. Only same-instance schema cycles retain guards.
                 let same = if object {
-                    &engine.memo_guard_same_sources
+                    &engine.memoization.guard_same_sources
                 } else {
-                    &engine.memo_guard_scalar_sources
+                    &engine.memoization.guard_scalar_sources
                 };
                 pairs.retain(|&(source, ancestor)| ancestor == value && same[source]);
             }
@@ -278,7 +343,7 @@ impl Memo {
             let node = id.checked_mul(engine.nodes.len())?.checked_add(node)?;
             return Some((node, value, depth));
         }
-        if !engine.memo_contextual[node] {
+        if !engine.memoization.contextual[node] {
             return Some((node, value, depth));
         }
         let scope = if engine.anchor_tables.len() == 1 {
@@ -289,7 +354,7 @@ impl Memo {
                 .and_then(|frame| frame.primary_binding)
                 .map_or(0, |target| target + 1)
         } else {
-            let relevant = engine.memo_scope_projection.names(
+            let relevant = engine.memoization.scope_projection.names(
                 node,
                 engine.nodes.len(),
                 engine.anchor_tables.len(),
@@ -391,13 +456,16 @@ mod tests {
         let memo = Memo::default();
         let engine = Engine {
             nodes: (0..3).map(|_| vec![Op::Boolean(true)]).collect(),
-            memoizable: vec![true; 3],
-            memo_contextual: vec![false; 3],
-            memo_guarded: vec![true; 3],
-            memo_guard_sources: vec![true; 3],
-            memo_guard_same_sources: vec![true; 3],
-            memo_guard_scalar_sources: vec![true; 3],
-            memo_guard_scalar_amplification: vec![true; 3],
+            memoization: MemoizationPlan {
+                reusable: vec![true; 3],
+                contextual: vec![false; 3],
+                guarded: vec![true; 3],
+                guard_sources: vec![true; 3],
+                guard_same_sources: vec![true; 3],
+                guard_scalar_sources: vec![true; 3],
+                guard_scalar_amplification: vec![true; 3],
+                ..MemoizationPlan::default()
+            },
             metadata: vec![
                 scope::Metadata {
                     recursive_anchor: true,
@@ -562,8 +630,11 @@ mod tests {
         let memo = Memo::default();
         let engine = Engine {
             nodes: vec![vec![Op::Boolean(true)]],
-            memoizable: vec![true],
-            memo_contextual: vec![true],
+            memoization: MemoizationPlan {
+                reusable: vec![true],
+                contextual: vec![true],
+                ..MemoizationPlan::default()
+            },
             anchor_tables: vec![vec![], vec![]],
             dynamic_bindings: HashMap::from([
                 ((v(1), 0), 7),
@@ -611,11 +682,14 @@ mod tests {
         let parents = vec![vec![], vec![], vec![], vec![0], vec![1], vec![]];
         let mut engine = Engine {
             nodes: (0..3).map(|_| vec![Op::Boolean(true)]).collect(),
-            memoizable: vec![true; 3],
-            memo_contextual: vec![true; 3],
-            memo_guarded: vec![false, false, true],
-            memo_guard_sources: vec![false; 3],
-            memo_scope_projection: memo_scope::Projection::compile(&edges, &parents, 3),
+            memoization: MemoizationPlan {
+                reusable: vec![true; 3],
+                contextual: vec![true; 3],
+                guarded: vec![false, false, true],
+                guard_sources: vec![false; 3],
+                scope_projection: memo_scope::Projection::compile(&edges, &parents, 3),
+                ..MemoizationPlan::default()
+            },
             anchor_tables: vec![vec![], vec![]],
             dynamic_bindings: HashMap::from([
                 ((v(1), 0), 7),
@@ -666,8 +740,11 @@ mod tests {
     fn compact_scope_blocks_separate_nodes_and_decline_overflow() {
         let engine = Engine {
             nodes: vec![vec![], vec![], vec![]],
-            memoizable: vec![true; 3],
-            memo_contextual: vec![true, true, false],
+            memoization: MemoizationPlan {
+                reusable: vec![true; 3],
+                contextual: vec![true, true, false],
+                ..MemoizationPlan::default()
+            },
             anchor_tables: vec![vec![], vec![]],
             dynamic_bindings: HashMap::from([((v(1), 0), 0), ((v(2), 0), 1)]),
             ..Engine::default()
@@ -823,33 +900,20 @@ mod tests {
 }
 
 impl Engine {
-    fn clear_memo_guards(&mut self) {
-        for flags in [
-            &mut self.memo_guarded,
-            &mut self.memo_guard_sources,
-            &mut self.memo_guard_same_sources,
-            &mut self.memo_guard_scalar_sources,
-            &mut self.memo_guard_scalar_amplification,
-        ] {
-            *flags = vec![false; self.nodes.len()];
-        }
-    }
-
     fn clear_memo_analysis(&mut self) {
-        self.memoizable = vec![false; self.nodes.len()];
-        self.memo_contextual = vec![false; self.nodes.len()];
-        self.clear_memo_guards();
-        self.memo_scope_projection = memo_scope::Projection::default();
+        self.memoization = MemoizationPlan::disabled(self.nodes.len());
     }
 
     fn compile_memo_projection(&mut self, edges: &[Vec<usize>], parents: &[Vec<usize>]) {
-        self.memo_scope_projection = if self.memo_guarded.iter().any(|&guarded| guarded)
-            || self.anchor_tables.len() > 1 && self.memo_contextual.iter().any(|&scoped| scoped)
-        {
-            memo_scope::Projection::compile(edges, parents, self.nodes.len())
-        } else {
-            memo_scope::Projection::default()
-        };
+        self.memoization.scope_projection =
+            if self.memoization.guarded.iter().any(|&guarded| guarded)
+                || self.anchor_tables.len() > 1
+                    && self.memoization.contextual.iter().any(|&scoped| scoped)
+            {
+                memo_scope::Projection::compile(edges, parents, self.nodes.len())
+            } else {
+                memo_scope::Projection::default()
+            };
     }
 
     pub(super) fn compile_memoization(&mut self) {
@@ -1010,16 +1074,16 @@ impl Engine {
             safe
         }
         let mut states = vec![0; edges.len()];
-        self.memoizable = (0..self.nodes.len())
+        self.memoization.reusable = (0..self.nodes.len())
             .map(|node| {
                 candidates[node] && reusable(node, 0, &edges, &eligible, &mut states, count)
             })
             .collect();
-        self.memo_contextual = states[..count].iter().map(|&state| state == 4).collect();
+        self.memoization.contextual = states[..count].iter().map(|&state| state == 4).collect();
         // Proven acyclic candidates do not need any guard signatures, even if
         // unrelated non-candidates lie on cycles elsewhere in the program.
-        if (0..count).all(|node| !candidates[node] || self.memoizable[node]) {
-            self.clear_memo_guards();
+        if (0..count).all(|node| !candidates[node] || self.memoization.reusable[node]) {
+            self.memoization.clear_guards(self.nodes.len());
             self.compile_memo_projection(&edges, &parents);
             return;
         }
@@ -1109,7 +1173,7 @@ impl Engine {
             }
         }
         let scalar_parents = graph::parents(&same_edges);
-        self.memo_guard_scalar_sources =
+        self.memoization.guard_scalar_sources =
             cycle_nodes(&same_edges, &scalar_parents)[..count].to_vec();
         graph::propagate(&mut scalar_refs, &scalar_parents);
         let mut scalar_amplification = vec![false; edges.len()];
@@ -1134,7 +1198,7 @@ impl Engine {
             }
         }
         graph::propagate(&mut scalar_amplification, &scalar_parents);
-        self.memo_guard_scalar_amplification = scalar_amplification[..count].to_vec();
+        self.memoization.guard_scalar_amplification = scalar_amplification[..count].to_vec();
         // Object dependencies keep the same value; all other container child
         // edges change positions. Scalar/array inputs cannot take dependencies.
         let mut has_dependencies = false;
@@ -1147,16 +1211,16 @@ impl Engine {
                 }
             }
         }
-        self.memo_guard_same_sources = if has_dependencies {
+        self.memoization.guard_same_sources = if has_dependencies {
             cycle_nodes(&same_edges, &graph::parents(&same_edges))[..count].to_vec()
         } else {
-            self.memo_guard_scalar_sources.clone()
+            self.memoization.guard_scalar_sources.clone()
         };
-        self.memo_guard_sources = cyclic[..count].to_vec();
-        self.memo_guarded = vec![false; count];
+        self.memoization.guard_sources = cyclic[..count].to_vec();
+        self.memoization.guarded = vec![false; count];
         for node in 0..count {
             let amplified_cycle = incoming[node] > 2 || cyclic_incoming[node] > 1;
-            if !self.memoizable[node] && !unsupported[node]
+            if !self.memoization.reusable[node] && !unsupported[node]
                 && candidates[node]
                 // A linear recursive property chain has no amplification.
                 // Avoid signatures unless a cycle has repeated input positions
@@ -1166,8 +1230,8 @@ impl Engine {
                 // duplicate caching at its singly referenced recursive target.
                 && (!cyclic[node] || repeated_position[node] || amplified_cycle || scalar_amplification[node])
             {
-                self.memoizable[node] = true;
-                self.memo_guarded[node] = true;
+                self.memoization.reusable[node] = true;
+                self.memoization.guarded[node] = true;
             }
         }
         self.compile_memo_projection(&edges, &parents);
