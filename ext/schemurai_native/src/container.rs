@@ -437,12 +437,13 @@ impl Object {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn admits_unresolved_reports_but_propagates_unsupported_instructions() {
         let mut engine = Engine {
             nodes: vec![
-                vec![Op::UnresolvedRef(0)],
+                vec![Op::UnresolvedRef(v(0))],
                 vec![Op::All(vec![0, 1])],
                 vec![Op::Unsupported],
                 vec![Op::All(vec![1, 2])],

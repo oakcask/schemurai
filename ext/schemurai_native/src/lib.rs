@@ -28,92 +28,13 @@ mod protocol {
     include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 }
 use protocol::*;
+mod ruby;
 mod scope;
 mod structural;
 mod tracking;
-type Value = usize;
-unsafe extern "C" {
-    fn sn_pin(value: Value);
-    fn sn_nil() -> Value;
-    fn sn_undefined() -> Value;
-    fn sn_kind(value: Value) -> i32;
-    fn sn_shallow_kind(value: Value) -> i32;
-    fn sn_fingerprint_view(
-        value: Value,
-        data: *mut *const c_void,
-        length: *mut usize,
-        number: *mut f64,
-    ) -> i32;
-    fn sn_small_hash(value: Value, entries: *mut Value) -> i32;
-    fn sn_true(value: Value) -> i32;
-    fn sn_truthy(value: Value) -> i32;
-    fn sn_fixnum(value: Value) -> i32;
-    fn sn_fixnum_flag() -> Value;
-    fn sn_array_data(value: Value) -> *const Value;
-    fn sn_integer(value: Value) -> i64;
-    fn sn_integer128(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_bounds128(value: Value, words: *mut u64) -> i32;
-    fn sn_number_bounds_view(
-        value: Value,
-        words: *mut u64,
-        kind: *mut i32,
-        floating: *mut f64,
-        required: i32,
-    ) -> i32;
-    fn sn_integer1024(value: Value, words: *mut u64) -> i32;
-    fn sn_integer_word_count(value: Value) -> usize;
-    fn sn_integer_words(value: Value, words: *mut u64, count: usize) -> i32;
-    fn sn_is_bignum(value: Value) -> i32;
-    fn sn_big256(value: Value, words: *mut u64) -> i32;
-    fn sn_big_hash(value: Value, hash: *mut u64) -> i32;
-    fn sn_big_low_word(value: Value) -> u64;
-    fn sn_big_low64_word(value: Value, word: *mut u64) -> i32;
-    fn sn_big_equal(big: Value, other: Value) -> i32;
-    fn sn_big_order(left: Value, right: Value) -> i32;
-    fn sn_wide_integer_compare(value: Value, bound: Value) -> i32;
-    fn sn_float(value: Value) -> f64;
-    fn sn_is_float(value: Value) -> i32;
-    fn sn_is_rational(value: Value) -> i32;
-    fn sn_len(value: Value) -> usize;
-    fn sn_entry(value: Value, index: usize) -> Value;
-    fn sn_lookup(hash: Value, key: Value) -> Value;
-    fn sn_missing(value: Value) -> i32;
-    fn sn_same(a: Value, b: Value) -> i32;
-    fn sn_same_class(a: Value, b: Value) -> i32;
-    fn sn_string_data(value: Value) -> *const u8;
-    fn sn_string_bytes(value: Value) -> usize;
-    fn sn_string_equal(a: Value, b: Value) -> i32;
-    fn sn_string_length_guarded(value: Value, length: *mut usize) -> i32;
-    fn sn_record_key_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_string_raw_view(value: Value, data: *mut *const u8, length: *mut usize);
-    fn sn_string_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_pattern_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_format_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_json_encoding(value: Value) -> i32;
-    fn sn_json_item_view(value: Value, data: *mut *const u8, length: *mut usize) -> i32;
-    fn sn_resolve(compiler: Value, program: Value, reference: Value, result: *mut Value) -> i32;
-    fn sn_resolution_error(error: Value) -> i32;
-    fn sn_resource_program(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_count(resource: Value) -> usize;
-    fn sn_anchor_names(compiler: Value, resource: Value, result: *mut Value) -> i32;
-    fn sn_anchor_program(compiler: Value, resource: Value, name: Value, result: *mut Value) -> i32;
-    fn sn_hash_each(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, Value, Value) -> i32,
-    ) -> i32;
-    fn sn_hash_each_key_view(
-        value: Value,
-        context: *mut c_void,
-        callback: unsafe extern "C" fn(*mut c_void, *const u8, usize, Value) -> i32,
-    ) -> i32;
-    fn sn_field(object: Value, name: i32, value: *mut Value) -> i32;
-    fn sn_pairs(hash: Value, value: *mut Value) -> i32;
-    fn sn_key_copy(key: Value, value: *mut Value) -> i32;
-    fn sn_opcode(symbol: Value) -> i32;
-    fn sn_object_each(value: Value, context: *mut c_void) -> i32;
-}
+use ruby::*;
+use ruby::{FixnumTag, Ruby, Value};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(i32)]
 enum Verdict {
@@ -240,15 +161,12 @@ impl StringRules {
         if caches.dynamic_calls() {
             return self.runtime_valid(caches, required, value);
         }
-        let mut data = std::ptr::null();
-        let mut len = 0;
-        let encoding = unsafe { sn_pattern_item_view(value, &mut data, &mut len) };
+        let (bytes, encoding) = unsafe { Ruby::pattern_item_view(value) };
         if encoding == -TYPE_UNSUPPORTED {
             self.runtime_valid(caches, required, value)
         } else if encoding < 0 {
             verdict(required == 0)
         } else {
-            let bytes = unsafe { byte_view(data, len) };
             self.eval_with_view::<true>(caches, value, Some((bytes, encoding)))
         }
     }
@@ -675,7 +593,10 @@ impl Object {
         let fields: Vec<_> = fields.into_values().collect();
         let short_index = RecordShortIndex::compile(&fields);
         self.record = Some(RecordObject {
-            identity_hint: self.properties.first().map_or(0, |&(key, _)| key),
+            identity_hint: self
+                .properties
+                .first()
+                .map_or(Value::default(), |&(key, _)| key),
             fields,
             short_index,
             required,
@@ -718,7 +639,7 @@ pub struct Engine {
     indices: HashMap<Value, usize>,
     roots: *mut Roots,
     root: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     compiler: Value,
     runtime_messages: bool,
     validate_format: bool,
@@ -734,7 +655,7 @@ impl Engine {
         value
     }
     fn field(&mut self, value: Value, name: i32) -> Result<Value, Value> {
-        let mut result = 0;
+        let mut result = Value::default();
         if unsafe { sn_field(value, name, &mut result) } != 0 {
             return Err(result);
         }
@@ -773,7 +694,7 @@ impl Engine {
         if unsafe { sn_same(value, sn_nil()) } != 0 {
             return Ok(vec![]);
         }
-        let mut pairs = 0;
+        let mut pairs = Value::default();
         if unsafe { sn_pairs(value, &mut pairs) } != 0 {
             return Err(pairs);
         }
@@ -1271,7 +1192,7 @@ impl Engine {
                                         _ => None,
                                     }
                                 });
-                                let mut key = 0;
+                                let mut key = Value::default();
                                 if unsafe { sn_key_copy(field.name, &mut key) } != 0 {
                                     return Err(key);
                                 }
@@ -1292,7 +1213,7 @@ impl Engine {
                 }
                 OP_REF | OP_RECURSIVE_REF | OP_DYNAMIC_REF => {
                     let reference = self.field(operand, FIELD_VALUE)?;
-                    let mut target = 0;
+                    let mut target = Value::default();
                     if unsafe { sn_resolve(self.compiler, program, reference, &mut target) } != 0 {
                         if unsafe { sn_resolution_error(target) } != 0 {
                             let message = self.field(target, FIELD_MESSAGE)?;
@@ -1744,11 +1665,7 @@ impl Execution<'_> {
         } else if let Some(&child) = r.items.first() {
             // Borrow CRuby's storage only for this Ruby-allocation-free traversal.
             // No Ruby callback or Ruby allocation occurs while it is live.
-            let values = if len == 0 {
-                &[]
-            } else {
-                unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-            };
+            let values = unsafe { Ruby::array(value) };
             let primitive = match self.nodes[child].as_slice() {
                 [Op::Type(mask, _)] if mask & TYPE_NUMBER != 0 || mask & TYPE_INTEGER != 0 => {
                     Some(&[][..])
@@ -1950,22 +1867,21 @@ impl Execution<'_> {
         };
         let total = match op {
             Op::Type(..) | Op::Boolean(_) => true,
-            Op::Const(expected) => expected & self.fixnum_flag != 0,
+            Op::Const(expected) => expected.has_fixnum_tag(self.fixnum_flag),
             Op::Number(_, rules) => rules.fast_limits.is_some(),
             _ => false,
         };
         if !total {
             return None;
         }
-        let values = if len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(sn_array_data(value), len) }
-        };
+        let values = unsafe { Ruby::array(value) };
         // Preserve later Unsupported/fallback results: no predicate work may
         // be skipped until all values are proven to be supported Fixnums.
         // This guard stays linear, but is far cheaper than full node evaluation.
-        if !values.iter().all(|&item| item & self.fixnum_flag != 0) {
+        if !values
+            .iter()
+            .all(|&item| item.has_fixnum_tag(self.fixnum_flag))
+        {
             return None;
         }
         Some(evaluation::contains_validity(
@@ -2014,7 +1930,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let result = if value & self.fixnum_flag != 0 {
+            let result = if value.has_fixnum_tag(self.fixnum_flag) {
                 let n = immediate_integer(value);
                 verdict(n >= min && n <= max)
             } else if let Some((required, rules)) = number {
@@ -2047,7 +1963,7 @@ impl Execution<'_> {
             if !self.budget.checkpoint() {
                 return Unsupported;
             }
-            let kind = if value & self.fixnum_flag != 0 {
+            let kind = if value.has_fixnum_tag(self.fixnum_flag) {
                 TYPE_INTEGRAL_NUMBER
             } else {
                 unsafe { sn_shallow_kind(value) }
@@ -2116,9 +2032,7 @@ impl Execution<'_> {
             }
             // Successful calls wrote exactly len pairs, bounded by eight;
             // no Ruby callback or allocation can change the Hash during C's walk.
-            let entries = unsafe {
-                std::slice::from_raw_parts(buffer.as_ptr().cast::<Value>(), 2 * len as usize)
-            };
+            let entries = unsafe { ruby::initialized_values(&buffer, 2 * len as usize) };
             let mut context = RecordContext {
                 engine: self,
                 rules: r,
@@ -2272,7 +2186,7 @@ impl Execution<'_> {
         if self.caches.scalar_callback() && self.kind_demand[node] == KindDemand::Predicate {
             return TYPE_UNSUPPORTED;
         }
-        if value & self.fixnum_flag != 0 {
+        if value.has_fixnum_tag(self.fixnum_flag) {
             return TYPE_INTEGRAL_NUMBER;
         }
         if self.kind_demand[node] == KindDemand::None {
@@ -2295,7 +2209,7 @@ impl Execution<'_> {
         if known.get() != TYPE_UNCHECKED {
             return known.get();
         }
-        let kind = if value & self.fixnum_flag != 0 {
+        let kind = if value.has_fixnum_tag(self.fixnum_flag) {
             TYPE_INTEGRAL_NUMBER
         } else if self.kind_demand[node] == KindDemand::None {
             TYPE_UNCHECKED
@@ -2415,7 +2329,8 @@ fn record_entry(c: &mut RecordContext<'_, '_>, key: Value, value: Value) -> Verd
         c.status = if c.depth <= MAX_EVALUATION_DEPTH {
             match field.and_then(|field| field.check) {
                 Some(RecordCheck::IntegerBounds(min, max))
-                    if value & c.engine.fixnum_flag != 0 && !c.engine.caches.dynamic_calls() =>
+                    if value.has_fixnum_tag(c.engine.fixnum_flag)
+                        && !c.engine.caches.dynamic_calls() =>
                 {
                     let n = immediate_integer(value);
                     verdict(n >= min && n <= max)
@@ -2476,7 +2391,7 @@ fn length_guarded(value: Value, required: i32, min: Option<usize>, max: Option<u
 // Call only after value & the header-validated fixnum_flag is nonzero.
 // Rust's signed shift is arithmetic; other encodings retain the C adapters.
 fn immediate_integer(value: Value) -> i64 {
-    (value as isize >> 1) as i64
+    (value.bits() as isize >> 1) as i64
 }
 fn equal_budgeted(a: Value, b: Value, depth: usize, budget: &budget::Budget) -> Verdict {
     equal_cached(a, b, depth, &mut structural::Cache::new(depth), budget)
@@ -2774,7 +2689,7 @@ fn mix(n: u64) -> u64 {
     n ^ (n >> 31)
 }
 fn string_fingerprint(value: Value) -> u64 {
-    bytes_fingerprint(unsafe { string_bytes(value) })
+    bytes_fingerprint(unsafe { Ruby::string(value) })
 }
 #[derive(Clone, Copy, Debug)]
 struct ShortRecordKey {
@@ -2784,33 +2699,13 @@ struct ShortRecordKey {
     tag: u64,
 }
 fn short_record_key(value: Value) -> ShortRecordKey {
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    let encoding = unsafe { sn_record_key_view(value, &mut data, &mut len) };
-    if len > 8 {
+    let (bytes, encoding) = unsafe { Ruby::record_key_view(value) };
+    if bytes.len() > 8 {
         return ShortRecordKey { word: 0, tag: 0 };
     }
-    let bytes = unsafe { byte_view(data, len) };
     ShortRecordKey {
         word: short_word(bytes),
-        tag: ((encoding as u64) << 4) | (len as u64 + 1),
-    }
-}
-// Borrow an already classified String under the GVL. The caller must not
-// allocate Ruby objects or run Ruby callbacks while the returned view is live.
-unsafe fn string_bytes<'a>(value: Value) -> &'a [u8] {
-    let mut data = std::ptr::null();
-    let mut len = 0;
-    unsafe { sn_string_raw_view(value, &mut data, &mut len) };
-    unsafe { byte_view(data, len) }
-}
-// The caller must keep the original Ruby string alive and unchanged under
-// the GVL for the entire lifetime of the view, without allocating in Ruby.
-unsafe fn byte_view<'a>(data: *const u8, len: usize) -> &'a [u8] {
-    if len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(data, len) }
+        tag: ((encoding as u64) << 4) | (bytes.len() as u64 + 1),
     }
 }
 // For at most eight bytes, the first/last scalar words cover every byte.
@@ -2845,7 +2740,7 @@ fn bytes_fingerprint(bytes: &[u8]) -> u64 {
 fn fingerprint_budgeted(
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     budget: &budget::Budget,
 ) -> Option<u64> {
@@ -2861,7 +2756,7 @@ fn fingerprint_budgeted(
 fn fingerprint_cached(
     value: Value,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     big_hint: bool,
     memo: &mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &budget::Budget,
@@ -2872,7 +2767,7 @@ fn fingerprint_cached(
     if depth > MAX_EVALUATION_DEPTH {
         return None;
     }
-    if value & fixnum_flag != 0 {
+    if value.has_fixnum_tag(fixnum_flag) {
         // sn_fixnum_flag enables this hint only after the C headers confirm
         // the signed immediate encoding. Rust's signed shift is arithmetic.
         let integer = immediate_integer(value);
@@ -2883,14 +2778,8 @@ fn fingerprint_cached(
     }
     // The C key-view iterator validates every key without Ruby lookup.
     // Avoid a separate preliminary walk of the same keys.
-    let mut data = std::mem::MaybeUninit::<*const c_void>::uninit();
-    let mut len = std::mem::MaybeUninit::<usize>::uninit();
-    let mut n = std::mem::MaybeUninit::<f64>::uninit();
-    // Read only the fields the C adapter initialized for the returned kind.
-    let kind =
-        unsafe { sn_fingerprint_view(value, data.as_mut_ptr(), len.as_mut_ptr(), n.as_mut_ptr()) };
-    if kind == TYPE_NUMBER {
-        let n = unsafe { n.assume_init() };
+    let view = unsafe { Ruby::fingerprint_view(value) };
+    if let FingerprintView::Number(n) = view {
         // Normalize integral floats without rounding distinct integers. Exact
         // JSON equality still resolves every collision before declaring duplicates.
         if n.is_finite() && n.trunc() == n && n >= i64::MIN as f64 && n < i64::MAX as f64 {
@@ -2898,35 +2787,28 @@ fn fingerprint_cached(
         }
         return Some(mix(n.to_bits() ^ TYPE_NUMBER as u64));
     }
-    let container = kind == TYPE_ARRAY || kind == TYPE_OBJECT;
     // Batch reuse pays for wide shared containers immediately. Small shallow
     // records keep the original cheap traversal, expanding at most four levels
     // before the depth-based cache handles deeper shared graphs.
-    let cacheable = container && memo.eligible_container(depth, unsafe { len.assume_init() });
+    let cacheable = match view {
+        FingerprintView::Array(values) => memo.eligible_container(depth, values.len()),
+        FingerprintView::Object(len) => memo.eligible_container(depth, len),
+        _ => false,
+    };
     let key = (value, depth);
     if cacheable && let Some(result) = memo.get(key) {
         return result;
     }
-    let result = match kind {
-        TYPE_INTEGRAL_NUMBER => Some(number::integer_fingerprint(value)),
-        TYPE_IDENTITY_SCALAR => Some(mix(value as u64 ^ TYPE_IDENTITY_SCALAR as u64)),
-        TYPE_NULL => Some(mix(TYPE_NULL as u64)),
-        TYPE_BOOLEAN => Some(mix(if unsafe { len.assume_init() } != 0 {
-            2
-        } else {
-            3
-        })),
-        TYPE_STRING => Some(bytes_fingerprint(unsafe {
-            byte_view(data.assume_init().cast(), len.assume_init())
-        })),
-        TYPE_ARRAY => {
+    let result = match view {
+        FingerprintView::Scalar(TYPE_INTEGRAL_NUMBER) => Some(number::integer_fingerprint(value)),
+        FingerprintView::Scalar(TYPE_IDENTITY_SCALAR) => {
+            Some(mix(value.bits() as u64 ^ TYPE_IDENTITY_SCALAR as u64))
+        }
+        FingerprintView::Scalar(TYPE_NULL) => Some(mix(TYPE_NULL as u64)),
+        FingerprintView::Boolean(value) => Some(mix(if value { 2 } else { 3 })),
+        FingerprintView::String(bytes) => Some(bytes_fingerprint(bytes)),
+        FingerprintView::Array(values) => {
             let mut hash = mix(TYPE_ARRAY as u64);
-            let len = unsafe { len.assume_init() };
-            let values = if len == 0 {
-                &[]
-            } else {
-                unsafe { std::slice::from_raw_parts(data.assume_init().cast::<Value>(), len) }
-            };
             // All descendants are read under the GVL without allocating Ruby
             // objects or invoking Ruby callbacks, so the borrowed view is stable.
             for &item in values {
@@ -2936,8 +2818,7 @@ fn fingerprint_cached(
             }
             Some(hash)
         }
-        TYPE_OBJECT => {
-            let len = unsafe { len.assume_init() };
+        FingerprintView::Object(len) => {
             let mut c = FingerprintContext {
                 hash: 0,
                 depth: depth + 1,
@@ -2964,7 +2845,7 @@ fn fingerprint_cached(
 struct FingerprintContext<'a> {
     hash: u64,
     depth: usize,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     memo: &'a mut structural::Cache<(Value, usize), Option<u64>>,
     budget: &'a budget::Budget,
 }
@@ -2983,7 +2864,7 @@ unsafe extern "C" fn fingerprint_entry(
         else {
             return Unsupported as i32;
         };
-        c.hash ^= mix(bytes_fingerprint(unsafe { byte_view(data, len) }) ^ hash.rotate_left(17));
+        c.hash ^= mix(bytes_fingerprint(unsafe { Ruby::bytes(data, len) }) ^ hash.rotate_left(17));
         Valid as i32
     }))
     .unwrap_or(Unsupported as i32)
@@ -3005,7 +2886,7 @@ impl Hasher for BucketHasher {
         }
     }
 }
-fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budget) -> Verdict {
+fn unique(value: Value, depth: usize, fixnum_flag: FixnumTag, budget: &budget::Budget) -> Verdict {
     let len = unsafe { sn_len(value) };
     if !budget.checkpoint() {
         return Unsupported;
@@ -3013,7 +2894,7 @@ fn unique(value: Value, depth: usize, fixnum_flag: Value, budget: &budget::Budge
     if len <= 16 {
         return unique_linear(value, depth, budget, false);
     }
-    let values = unsafe { std::slice::from_raw_parts(sn_array_data(value), len) };
+    let values = unsafe { Ruby::array(value) };
     // This is a checked optimization hint, not an instance shape assumption.
     let big_hint = unsafe { sn_is_bignum(values[0]) } != 0;
     if big_hint
@@ -3758,17 +3639,18 @@ pub unsafe extern "C" fn sn_size(engine: *const Engine) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn falls_back_for_clustered_slots_without_comparing_distinct_fingerprints() {
-        let values: Vec<_> = (1..=4096).collect();
+        let values: Vec<_> = (1..=4096).map(v).collect();
         let mut hashes = 0;
         assert_eq!(
             indexed_unique(
                 &values,
                 |value| {
                     hashes += 1;
-                    Some((value as u64) << 32)
+                    Some((value.bits() as u64) << 32)
                 },
                 |_, _| panic!("distinct full fingerprints cannot require equality"),
             ),
@@ -3780,14 +3662,23 @@ mod tests {
 
     #[test]
     fn sorted_collisions_preserve_exact_equality_and_early_results() {
-        let hash = |value| (value != 99).then_some(value as u64 % 2);
+        let hash = |value: Value| (value != v(99)).then_some(value.bits() as u64 % 2);
         let equal = |a, b| verdict(a == b);
-        assert_eq!(sorted_unique(&[0, 2, 4, 1, 3, 5], hash, equal), Valid);
-        assert_eq!(sorted_unique(&[0, 2, 0, 99], hash, equal), Invalid);
-        assert_eq!(sorted_unique(&[0, 2, 99, 0], hash, equal), Unsupported);
         assert_eq!(
-            sorted_unique(&[0, 1, 1, 2], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(4), v(1), v(3), v(5)], hash, equal),
+            Valid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(0), v(99)], hash, equal),
+            Invalid
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(2), v(99), v(0)], hash, equal),
+            Unsupported
+        );
+        assert_eq!(
+            sorted_unique(&[v(0), v(1), v(1), v(2)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)
@@ -3796,8 +3687,8 @@ mod tests {
             Invalid
         );
         assert_eq!(
-            sorted_unique(&[0, 2, 1, 1], hash, |a, b| {
-                if (a, b) == (0, 2) {
+            sorted_unique(&[v(0), v(2), v(1), v(1)], hash, |a, b| {
+                if (a, b) == (v(0), v(2)) {
                     Unsupported
                 } else {
                     equal(a, b)

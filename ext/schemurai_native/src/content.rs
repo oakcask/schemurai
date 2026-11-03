@@ -99,14 +99,12 @@ impl Content {
         mut invalid: impl FnMut(usize, Value) -> Verdict,
     ) -> Verdict {
         for (index, &value) in values.iter().enumerate() {
-            let mut data = MaybeUninit::uninit();
-            let mut len = MaybeUninit::uninit();
             // Plain JSON combines its String guard, byte loan and encoding
             // check. Base64 remains independent of the source encoding.
-            let kind = if JSON && !BASE64 {
-                unsafe { sn_json_item_view(value, data.as_mut_ptr(), len.as_mut_ptr()) }
+            let (bytes, kind) = if JSON && !BASE64 {
+                unsafe { Ruby::json_item_view(value) }
             } else {
-                unsafe { sn_format_item_view(value, data.as_mut_ptr(), len.as_mut_ptr()) }
+                unsafe { Ruby::format_item_view(value) }
             };
             if kind == -TYPE_UNSUPPORTED {
                 let status = invalid(index, value);
@@ -120,8 +118,6 @@ impl Content {
             } else if kind < 0 {
                 verdict(required == 0)
             } else {
-                // Only the successful String view initializes these outputs.
-                let bytes = unsafe { byte_view(data.assume_init(), len.assume_init()) };
                 if JSON && !BASE64 {
                     if kind == ENCODING_ASCII && !bytes.is_ascii() {
                         caches.json(value)
@@ -186,7 +182,7 @@ impl Content {
         let bytes = if BORROWED {
             bytes
         } else {
-            unsafe { byte_view(sn_string_data(value), sn_string_bytes(value)) }
+            unsafe { Ruby::string(value) }
         };
         if BASE64 {
             if !JSON {

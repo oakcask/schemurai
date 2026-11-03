@@ -399,7 +399,7 @@ pub(super) struct Rules {
     multiple: Option<Limit>,
     pub(super) fast_limits: Option<Vec<(i32, i64)>>,
     pub(super) fast_multiple: Option<FastMultiple>,
-    fixnum_flag: Value,
+    fixnum_flag: FixnumTag,
     bounds_view: bool,
     bounded_signs: Option<[bool; 2]>,
     runtime_operands: bool,
@@ -591,8 +591,8 @@ fn read_integer_status(value: Value) -> Result<i128, i32> {
 // Runtime numeric instructions have already rejected non-numeric instances.
 // Their non-Float branch contains only ordinary Integers; compilation uses
 // read_integer_status instead because schema metadata still needs checking.
-fn read_known_integer_status(value: Value, fixnum_flag: Value) -> Result<i128, i32> {
-    if value & fixnum_flag != 0 {
+fn read_known_integer_status(value: Value, fixnum_flag: FixnumTag) -> Result<i128, i32> {
+    if value.has_fixnum_tag(fixnum_flag) {
         return Ok(immediate_integer(value) as i128);
     }
     let mut words = [0_u64; 2];
@@ -828,7 +828,7 @@ impl Rules {
         value: Value,
         budget: &budget::Budget,
     ) -> Verdict {
-        let fixnum = value & self.fixnum_flag != 0;
+        let fixnum = value.has_fixnum_tag(self.fixnum_flag);
         if fixnum {
             if required != 0 && required & TYPE_INTEGRAL_NUMBER == 0 {
                 return Invalid;
@@ -951,12 +951,12 @@ impl Rules {
                 .map_or(Unsupported, |bits| verdict(bits == 0));
         }
         if let Some(multiple) = &self.fast_multiple
-            && value & self.fixnum_flag != 0
+            && value.has_fixnum_tag(self.fixnum_flag)
         {
             return multiple.eval(immediate_integer(value));
         }
         if let Some(limits) = &self.fast_limits
-            && value & self.fixnum_flag != 0
+            && value.has_fixnum_tag(self.fixnum_flag)
         {
             return fixnum_bounds(immediate_integer(value), limits);
         }
@@ -976,12 +976,12 @@ impl Rules {
         budget: &budget::Budget,
     ) -> Result<i32, Verdict> {
         if let Some(multiple) = &self.fast_multiple
-            && value & self.fixnum_flag != 0
+            && value.has_fixnum_tag(self.fixnum_flag)
         {
             return Ok(multiple.failures(immediate_integer(value)));
         }
         if let Some(limits) = &self.fast_limits
-            && value & self.fixnum_flag != 0
+            && value.has_fixnum_tag(self.fixnum_flag)
         {
             let n = immediate_integer(value);
             return Ok(limits.iter().fold(0, |bits, &(bit, limit)| {
@@ -1127,7 +1127,7 @@ impl Rules {
         let mut invalid = false;
         let float = unsafe { sn_is_float(value) } != 0;
         if !float
-            && value & self.fixnum_flag == 0
+            && !value.has_fixnum_tag(self.fixnum_flag)
             && let Some(limit) = &self.multiple
             && let Some(exact) = limit.exact
             && exact.numerator > 1

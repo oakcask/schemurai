@@ -14,6 +14,7 @@ pub(super) struct Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ruby::test_value as v;
 
     #[test]
     fn acyclic_candidates_do_not_require_guards_for_unrelated_cycles() {
@@ -73,7 +74,7 @@ mod tests {
                 vec![reference(1, ReferenceKind::Static)],
                 vec![reference(1, ReferenceKind::Static)],
             ],
-            anchor_tables: vec![vec![(100, 0), (101, 1)]],
+            anchor_tables: vec![vec![(v(100), 0), (v(101), 1)]],
             ..Engine::default()
         };
         engine.compile_memoization();
@@ -106,9 +107,9 @@ mod tests {
                 vec![reference(0, ReferenceKind::Recursive)],
             ],
             anchor_tables: vec![
-                vec![(100, 0), (101, 0)],
-                vec![(100, 0), (101, 3)],
-                vec![(100, 3)],
+                vec![(v(100), 0), (v(101), 0)],
+                vec![(v(100), 0), (v(101), 3)],
+                vec![(v(100), 3)],
                 vec![],
             ],
             ..Engine::default()
@@ -235,7 +236,7 @@ impl Engine {
             // Reserve the resource before compiling its root: roots can reach
             // the current child through a recursive or dynamic reference.
             self.resources.insert(resource, usize::MAX);
-            let mut root = 0;
+            let mut root = Value::default();
             if unsafe { sn_resource_program(self.compiler, resource, &mut root) } != 0 {
                 return Err(root);
             }
@@ -264,7 +265,7 @@ impl Engine {
                 Some(anchor)
                     if unsafe { sn_same(fragment, sn_nil()) } == 0
                         && unsafe { sn_string_bytes(fragment) } != 0
-                        && unsafe { *sn_string_data(fragment) } != b'/'
+                        && unsafe { Ruby::string(fragment)[0] } != b'/'
                         && unsafe { sn_string_equal(fragment, anchor) } != 0 =>
                 {
                     let name = JsonKey::new(fragment);
@@ -311,7 +312,7 @@ impl Engine {
             for (resource, names) in pending {
                 let end = names.end;
                 for name in names {
-                    let mut target = 0;
+                    let mut target = Value::default();
                     if unsafe {
                         sn_anchor_program(
                             self.compiler,
@@ -369,7 +370,7 @@ impl Engine {
                 if unsafe { sn_anchor_count(resource) } == first {
                     continue;
                 }
-                let mut names = 0;
+                let mut names = Value::default();
                 if unsafe { sn_anchor_names(self.compiler, resource, &mut names) } != 0 {
                     return Err(names);
                 }
@@ -407,7 +408,7 @@ impl Engine {
                 if self.dynamic_bindings.contains_key(&(resource, name)) {
                     continue;
                 }
-                let mut target = 0;
+                let mut target = Value::default();
                 if unsafe {
                     sn_anchor_program(
                         self.compiler,
