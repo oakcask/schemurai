@@ -65,8 +65,8 @@ enum Op {
     Const(Value),
     Enum(Box<enumeration::Enumeration>),
     All(Vec<usize>),
-    Any(Vec<(usize, usize)>),
-    One(Vec<(usize, usize)>),
+    Any(Vec<evaluation::BranchGroup>),
+    One(Vec<evaluation::BranchGroup>),
     Not(usize),
     Conditional(usize, Option<usize>, Option<usize>),
     Number(i32, Box<number::Rules>),
@@ -737,17 +737,20 @@ impl Engine {
             .map(|c| self.compile(c))
             .collect()
     }
-    fn branches(&mut self, value: Value) -> Result<Vec<(usize, usize)>, Value> {
+    fn branches(&mut self, value: Value) -> Result<Vec<evaluation::BranchGroup>, Value> {
         let nodes = self.children(value)?;
-        let mut groups: Vec<(usize, usize)> = Vec::with_capacity(nodes.len());
+        let mut groups: Vec<evaluation::BranchGroup> = Vec::with_capacity(nodes.len());
         for node in nodes {
             if let Some(group) = groups
                 .last_mut()
-                .filter(|(prior, _)| *prior == node || self.same_simple_object(*prior, node))
+                .filter(|group| group.node == node || self.same_simple_object(group.node, node))
             {
-                group.1 += 1;
+                group.multiplicity += 1;
             } else {
-                groups.push((node, 1));
+                groups.push(evaluation::BranchGroup {
+                    node,
+                    multiplicity: 1,
+                });
             }
         }
         Ok(groups)
