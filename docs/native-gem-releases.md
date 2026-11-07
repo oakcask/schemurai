@@ -1,6 +1,6 @@
 # Native gem releases
 
-The release workflow publishes the source gem and six platform gems to
+The release workflow publishes the source gem and five platform gems to
 RubyGems.org with the existing trusted publisher credentials. The GitHub release
 becomes public only after all builds, installed-package smoke tests, and gem
 pushes succeed. No RubyGems API key is needed in the build jobs.
@@ -8,7 +8,7 @@ pushes succeed. No RubyGems API key is needed in the build jobs.
 The shared `shared--native-gems.yaml` workflow also runs for package-related
 pull requests. Linux binaries are built on native x64/arm64 runners inside
 official Ruby Docker images: Debian bookworm for glibc, Alpine 3.23 for musl.
-macOS binaries are built on Intel and Apple Silicon runners with a macOS 14
+macOS binaries are built on Apple Silicon runners with a macOS 14
 deployment target. Rust uses its default CPU target rather than the runner CPU.
 Distributed binaries use `--enable-portable-hash-walk` to avoid private Ruby Hash
 storage assumptions and private symbols across Ruby patch releases. They use
