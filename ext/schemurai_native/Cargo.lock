@@ -29,27 +29,9 @@ dependencies = [
 
 [[package]]
 name = "base64-turbo"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "865a269d8d8fc97f16122eae7a74e7e9dffa2df68d5f067cb1f494e9984528db"
-dependencies = [
- "cpufeatures",
-]
-
-[[package]]
-name = "cpufeatures"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "libc"
-version = "0.2.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "488211f02b1944ca9d57949a7bac44db4c19953e6078aff0c7048d02b212993e"
 
 [[package]]
 name = "memchr"

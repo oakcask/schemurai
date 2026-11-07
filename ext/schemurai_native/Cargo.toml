@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 base64-simd = "0.8.0"
-base64-turbo = "0.5.0"
+base64-turbo = "0.6.0"
 memchr = "2.8.3"
 num-bigint = "0.5.1"
 num-rational = { version = "0.4.2", default-features = false, features = ["std"] }
