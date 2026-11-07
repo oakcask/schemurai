@@ -297,7 +297,6 @@ include precompiled gems on RubyGems.org for CRuby 4.0 on these platforms:
 | Linux | arm64 | glibc 2.36+ | `aarch64-linux-gnu` |
 | Linux | x64 | musl (Alpine 3.23+) | `x86_64-linux-musl` |
 | Linux | arm64 | musl (Alpine 3.23+) | `aarch64-linux-musl` |
-| macOS 14+ | x64 | — | `x86_64-darwin` |
 | macOS 14+ | arm64 | — | `arm64-darwin` |
 
 RubyGems/Bundler selects the matching platform gem during normal installation;
