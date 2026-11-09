@@ -6,15 +6,19 @@ on:
       - main
     paths:
       - .github/workflows/lint--rbs.yaml
+      - .ruby-version
       - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - script/format-rbs
       - sig/**/*
   pull_request:
     paths:
       - .github/workflows/lint--rbs.yaml
+      - .ruby-version
       - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - script/format-rbs
       - sig/**/*
 

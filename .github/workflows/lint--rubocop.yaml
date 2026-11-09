@@ -7,13 +7,31 @@ on:
     paths:
       - .github/workflows/lint--rubocop.yaml
       - .rubocop.yml
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - Rakefile
+      - schemurai.gemspec
+      - script/benchmark-compare
+      - script/fetch-real-world-schemas
+      - script/format-rbs
+      - script/oracle-*
+      - script/real-world-fuzz
       - "**/*.rb"
   pull_request:
     paths:
       - .github/workflows/lint--rubocop.yaml
       - .rubocop.yml
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - Rakefile
+      - schemurai.gemspec
+      - script/benchmark-compare
+      - script/fetch-real-world-schemas
+      - script/format-rbs
+      - script/oracle-*
+      - script/real-world-fuzz
       - "**/*.rb"
 
 permissions:

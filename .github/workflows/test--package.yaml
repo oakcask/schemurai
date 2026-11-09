@@ -7,13 +7,14 @@ on:
     paths:
       - .github/workflows/test--package.yaml
       - .github/workflows/shared--native-gems.yaml
-      - .github/workflows/release--gem.yaml
       - .ruby-version
+      - rust-toolchain.toml
       - schemurai.gemspec
       - lib/**/*
       - ext/**/*
       - sig/**/*
       - README.md
+      - LICENSE
       - test/package_smoke_test.rb
       - script/install-without-cargo
       - script/build-native-extension
@@ -21,18 +22,18 @@ on:
       - script/build-native-linux
       - script/native-gem-loader.rb
       - script/test-native-gem
-      - script/push-gems
   pull_request:
     paths:
       - .github/workflows/test--package.yaml
       - .github/workflows/shared--native-gems.yaml
-      - .github/workflows/release--gem.yaml
       - .ruby-version
+      - rust-toolchain.toml
       - schemurai.gemspec
       - lib/**/*
       - ext/**/*
       - sig/**/*
       - README.md
+      - LICENSE
       - test/package_smoke_test.rb
       - script/install-without-cargo
       - script/build-native-extension
@@ -40,7 +41,6 @@ on:
       - script/build-native-linux
       - script/native-gem-loader.rb
       - script/test-native-gem
-      - script/push-gems
 
 permissions:
   contents: read

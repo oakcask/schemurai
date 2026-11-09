@@ -8,11 +8,12 @@ on:
       - .ruby-version
       - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - rust-toolchain.toml
       - lib/**/*
       - ext/**/*
-      - benchmark/real_world/run.rb
-      - benchmark/real_world/**/*
+      - benchmark/real_world/**/*.rb
+      - benchmark/real_world/schemas/**/*
       - script/fetch-real-world-schemas
       - script/real-world-fuzz
       - test/real_world_schema_test.rb
