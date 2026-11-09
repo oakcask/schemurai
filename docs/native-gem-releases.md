@@ -5,6 +5,20 @@ RubyGems.org with the existing trusted publisher credentials. The GitHub release
 becomes public only after all builds, installed-package smoke tests, and gem
 pushes succeed. No RubyGems API key is needed in the build jobs.
 
+Release PRs are prepared by `workflow-script/release-please/release-pr.mjs`.
+Its release-please plugin applies the proposed changes in a temporary Git
+worktree, runs Bundler to regenerate the lockfile (including its CHECKSUMS
+entry), and synchronizes the native crate version and Cargo lockfile before
+release-please creates or updates the PR. A synchronization failure stops the
+PR update. CI therefore sees the complete release change in one update, without
+a second generated-files commit. The official release-please action still
+creates tags and draft GitHub releases. The script's dependency is pinned
+separately in `workflow-script/release-please/package.json`.
+
+The `workflow / release please` workflow tests PR creation, PR updates, and
+synchronization failures using `node --test` with actual Bundler and Cargo
+commands against temporary fixture repositories. GitHub writes are simulated.
+
 The shared `shared--native-gems.yaml` workflow also runs for package-related
 pull requests. Linux binaries are built on native x64/arm64 runners inside
 official Ruby Docker images: Debian bookworm for glibc, Alpine 3.23 for musl.

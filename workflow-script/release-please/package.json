@@ -1,0 +1,11 @@
+{
+  "name": "schemurai-release-please",
+  "private": true,
+  "packageManager": "pnpm@11.1.2",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "release-please": "17.6.0"
+  }
+}

@@ -1,0 +1,37 @@
+name: workflow / release please
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/workflow--release-please.yaml
+      - .github/workflows/release--gem.yaml
+      - workflow-script/release-please/**
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          package_json_file: workflow-script/release-please/package.json
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "26"
+          cache: pnpm
+          cache-dependency-path: workflow-script/release-please/pnpm-lock.yaml
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Install dependencies
+        working-directory: workflow-script/release-please
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Test release PR generation
+        working-directory: workflow-script/release-please
+        run: node --test

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-gem
+  cancel-in-progress: false
+
 jobs:
   release:
     permissions:
@@ -15,7 +19,7 @@ jobs:
       issues: write
       pull-requests: write
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -26,11 +30,34 @@ jobs:
         with:
           app-id: ${{ secrets.TOKEN_GEN_APP_ID }}
           private-key: ${{ secrets.TOKEN_GEN_PRIVATE_KEY }}
-      - name: Create release pull request or draft release
+      - name: Create draft release
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ steps.gh-token-gen.outputs.token }}
+          skip-github-pull-request: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          package_json_file: workflow-script/release-please/package.json
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "26"
+          cache: pnpm
+          cache-dependency-path: workflow-script/release-please/pnpm-lock.yaml
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Install release PR dependencies
+        working-directory: workflow-script/release-please
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Create release PR with synchronized versions and lockfiles
+        run: node workflow-script/release-please/release-pr.mjs
+        env:
+          GH_TOKEN: ${{ steps.gh-token-gen.outputs.token }}
 
   build:
     needs: release
