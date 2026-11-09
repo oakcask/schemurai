@@ -1,4 +1,6 @@
 /vendor
+/.pnpm-store
+/workflow-script/release-please/node_modules
 /rdoc
 /ext/**/Makefile
 /ext/**/*.log
