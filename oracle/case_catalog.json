@@ -4,15 +4,15 @@
   "dialects": {
     "draft7": {
       "enabled_formats": ["date", "date-time", "ipv4", "ipv6", "json-pointer", "relative-json-pointer", "time"],
-      "expected_counts": {"selected": 1381, "skipped": 0, "pending": 426}
+      "expected_counts": {"selected": 1394, "skipped": 0, "pending": 483}
     },
     "draft2019-09": {
       "enabled_formats": ["date", "date-time", "duration", "ipv4", "ipv6", "json-pointer", "relative-json-pointer", "time", "uuid"],
-      "expected_counts": {"selected": 1833, "skipped": 0, "pending": 427}
+      "expected_counts": {"selected": 1846, "skipped": 0, "pending": 483}
     },
     "draft2020-12": {
       "enabled_formats": ["date", "date-time", "duration", "ipv4", "ipv6", "json-pointer", "relative-json-pointer", "time", "uuid"],
-      "expected_counts": {"selected": 1877, "skipped": 0, "pending": 434}
+      "expected_counts": {"selected": 1891, "skipped": 0, "pending": 483}
     }
   }
 }
