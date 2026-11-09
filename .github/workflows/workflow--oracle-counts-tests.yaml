@@ -1,0 +1,34 @@
+name: workflow / oracle counts tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/workflow--oracle-counts-tests.yaml
+      - .github/workflows/workflow--oracle-counts.yaml
+      - .ruby-version
+      - Gemfile
+      - Gemfile.lock
+      - schemurai.gemspec
+      - oracle/lib/case_catalog.rb
+      - script/oracle-cases
+      - workflow-script/oracle-counts/**
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_ONLY: default test
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+        with:
+          bundler-cache: true
+      - name: Test official suite count updates
+        run: bundle exec rspec workflow-script/oracle-counts/update_spec.rb --order random

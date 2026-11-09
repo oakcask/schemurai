@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
-require_relative "spec_helper"
-require_relative "../oracle/lib/case_catalog"
+require_relative "../../oracle/lib/case_catalog"
 require "fileutils"
 require "open3"
 require "tmpdir"
@@ -69,7 +68,7 @@ RSpec.describe "official suite count updates", :aggregate_failures do
   end
 
   context "when checking the scope of a PR" do
-    let(:check_script) { File.expand_path("../workflow-script/oracle-counts/check-update.rb", __dir__) }
+    let(:check_script) { File.expand_path("check-update.rb", __dir__) }
 
     before do
       git("init", "--initial-branch=main")

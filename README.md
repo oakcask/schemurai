@@ -387,6 +387,11 @@ and commits the generated counts only after the Ruby tests pass. It rejects
 changes outside the suite and counts, including changes to format selection.
 The generated commit triggers CI again using the repository's GitHub App token.
 
+The `workflow / oracle counts tests` workflow runs the count-update regression
+tests against temporary fixtures, without checking out the official suite.
+Changes confined to `workflow-script/oracle-counts` run these tests separately
+from the full RSpec suite.
+
 The serialized oracle tools are `script/oracle-runner` and
 `script/oracle-compare`.
 
