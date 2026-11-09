@@ -3,13 +3,13 @@
   "schema": {
     "repository": "go-task/task",
     "branch": "main",
-    "revision": "084a77e994eba8458c2dfbfa03c735a693c1c020",
+    "revision": "f31a5d606793895a8fc0b757b09f466475629810",
     "path": "website/src/public/schema.json"
   },
   "license": {
     "repository": "go-task/task",
     "branch": "main",
-    "revision": "084a77e994eba8458c2dfbfa03c735a693c1c020",
+    "revision": "f31a5d606793895a8fc0b757b09f466475629810",
     "path": "LICENSE",
     "spdx": "MIT",
     "sha256": "ae22882adc54d4c2cec2bb1ce5e0b252c7f3344efd55c72144738e8fcc89509b"
