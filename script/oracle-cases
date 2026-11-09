@@ -5,6 +5,7 @@ require "json"
 require_relative "../oracle/lib/case_catalog"
 
 catalog = SchemuraiOracle::CaseCatalog.new
+catalog.update_counts! if ARGV.delete("--update-counts")
 catalog.verify_counts!
 if ARGV.delete("--summary")
   puts JSON.pretty_generate(catalog.configuration.fetch("dialects").to_h { |dialect, _| [dialect, catalog.counts(dialect)] })

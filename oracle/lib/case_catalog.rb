@@ -57,6 +57,28 @@ module SchemuraiOracle
       true
     end
 
+    def update_counts!
+      updated = JSON.parse(JSON.generate(configuration))
+      updated.fetch("dialects").each do |dialect, settings|
+        actual = counts(dialect)
+        raise "official suite is empty for #{dialect}" if actual.fetch("selected").zero?
+
+        settings["expected_counts"] = actual
+      end
+
+      path = File.join(repository_root, "oracle/case_catalog.json")
+      source = File.read(path)
+      counts = updated.fetch("dialects").each_value.map { |settings| settings.fetch("expected_counts") }.each
+      # Preserve the catalog's compact arrays and objects; only counts are generated.
+      result = source.gsub(/("expected_counts"\s*:\s*)\{[^{}]*\}/) do
+        "#{$1}{#{counts.next.map { |key, value| "#{key.to_json}: #{value}" }.join(", ")}}"
+      end
+      raise "could not update only expected_counts" unless JSON.parse(result) == updated
+
+      File.write(path, result) unless result == source
+      configuration.replace(updated)
+    end
+
     def remotes
       return @remotes if defined?(@remotes)
 
