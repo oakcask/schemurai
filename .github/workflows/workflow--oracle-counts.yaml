@@ -1,0 +1,60 @@
+name: workflow / oracle counts
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - references/JSON-Schema-Test-Suite
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-counts-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    if: >-
+      github.event.pull_request.user.login == 'renovate[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.base_ref == 'main' &&
+      github.head_ref == 'renovate/references-json-schema-test-suite-digest'
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BUNDLE_ONLY: default test
+      SCHEMURAI_BACKEND: ruby
+      SCHEMURAI_NATIVE_LOADING: prohibited
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+        with:
+          bundler-cache: true
+      - name: Check update scope
+        run: ruby workflow-script/oracle-counts/check-update.rb
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      - name: Regenerate expected case counts
+        run: ruby script/oracle-cases --update-counts --summary
+      - name: Run Ruby tests before committing
+        run: bundle exec rspec
+      - id: gh-token-gen
+        uses: oakcask/gh-token-gen@4bd7b29d36a07b1de07b49c9fdbfe16c03d00bc2 # v5.1.0
+        with:
+          app-id: ${{ secrets.TOKEN_GEN_APP_ID }}
+          private-key: ${{ secrets.TOKEN_GEN_PRIVATE_KEY }}
+      - uses: int128/update-generated-files-action@1486b210d2f982ac40d27ef55660863b006722b0 # v2.115.0
+        with:
+          commit-message: "test: synchronize official suite case counts"
+          token: ${{ steps.gh-token-gen.outputs.token }}

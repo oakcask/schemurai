@@ -380,6 +380,13 @@ Verify the reviewed official-suite classifications with:
 ruby script/oracle-cases --summary
 ```
 
+After updating the official test suite, regenerate its expected counts with
+`ruby script/oracle-cases --update-counts --summary`, then run the tests. The
+`workflow / oracle counts` workflow does this for Renovate's official-suite PRs
+and commits the generated counts only after the Ruby tests pass. It rejects
+changes outside the suite and counts, including changes to format selection.
+The generated commit triggers CI again using the repository's GitHub App token.
+
 The serialized oracle tools are `script/oracle-runner` and
 `script/oracle-compare`.
 

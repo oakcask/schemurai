@@ -15,6 +15,7 @@ on:
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
+      - workflow-script/oracle-counts/**
       - script/build-native-gem
       - script/native-gem-loader.rb
       - script/native-benchmark-summary
@@ -33,6 +34,7 @@ on:
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
+      - workflow-script/oracle-counts/**
       - script/build-native-gem
       - script/native-gem-loader.rb
       - script/native-benchmark-summary
