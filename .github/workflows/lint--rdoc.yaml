@@ -6,17 +6,25 @@ on:
       - main
     paths:
       - .github/workflows/lint--rdoc.yaml
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - Rakefile
       - lib/**/*
       - README.md
+      - LICENSE
   pull_request:
     paths:
       - .github/workflows/lint--rdoc.yaml
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - Rakefile
       - lib/**/*
       - README.md
+      - LICENSE
 
 permissions:
   contents: read

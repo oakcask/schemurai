@@ -7,23 +7,37 @@ on:
     paths:
       - .github/workflows/test--rspec.yaml
       - .gitmodules
+      - references/JSON-Schema-Test-Suite
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
       - script/build-native-gem
       - script/native-gem-loader.rb
+      - script/native-benchmark-summary
+      - benchmark/support/comparison.rb
+      - benchmark/support/measurement.rb
       - spec/**/*
   pull_request:
     paths:
       - .github/workflows/test--rspec.yaml
       - .gitmodules
+      - references/JSON-Schema-Test-Suite
+      - .ruby-version
+      - Gemfile
       - Gemfile.lock
+      - schemurai.gemspec
       - lib/**/*
       - oracle/**/*
       - script/oracle-*
       - script/build-native-gem
       - script/native-gem-loader.rb
+      - script/native-benchmark-summary
+      - benchmark/support/comparison.rb
+      - benchmark/support/measurement.rb
       - spec/**/*
 
 permissions:

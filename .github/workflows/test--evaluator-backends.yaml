@@ -6,6 +6,7 @@ on:
     paths: &backend_paths
       - .github/workflows/test--evaluator-backends.yaml
       - .gitmodules
+      - references/JSON-Schema-Test-Suite
       - .ruby-version
       - Gemfile
       - Gemfile.lock
@@ -16,8 +17,8 @@ on:
       - test/native_backend_test.rb
       - oracle/**/*
       - test/evaluator_backend_test.rb
-      - spec/backend_regressions_spec.rb
       - spec/support/backend_regressions.rb
+      - spec/spec_helper.rb
   pull_request:
     paths: *backend_paths
 
