@@ -12,6 +12,10 @@
   "prBodyColumns": ["Package", "Update", "Change"],
   "prCreation": "immediate",
   "prConcurrentLimit": 1,
+  "git-submodules": {
+    "enabled": true,
+    "schedule": ["* * * * 1"]
+  },
   "packageRules": [
     {
       "matchDatasources": ["npm"],
