@@ -1,4 +1,5 @@
 /vendor
+/.bundle/
 /.pnpm-store
 /workflow-script/release-please/node_modules
 /rdoc
