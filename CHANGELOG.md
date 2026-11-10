@@ -1,5 +1,15 @@
 # Changelog
 
+## [3.1.2](https://github.com/oakcask/schemurai/compare/v3.1.1...v3.1.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* **deps:** update dependency release-please to v17.11.2 ([#301](https://github.com/oakcask/schemurai/issues/301)) ([fa661ea](https://github.com/oakcask/schemurai/commit/fa661ea94b19b6a17aa8405fb99c0fe040c582f8))
+* **deps:** update rust crate base64-turbo to 0.6.0 ([#279](https://github.com/oakcask/schemurai/issues/279)) ([64e39a0](https://github.com/oakcask/schemurai/commit/64e39a0bc25e9e44bccf666129022ad3c99eca7a))
+* encapsulate native Ruby value handles and views ([7865eba](https://github.com/oakcask/schemurai/commit/7865ebab10fc703c451c4d3a0f7d19b5f006bab2))
+* normalize Ruby kind checks with RTEST ([#288](https://github.com/oakcask/schemurai/issues/288)) ([3f42f89](https://github.com/oakcask/schemurai/commit/3f42f893890141d8912fe33eb985d2f395e072a9))
+
 ## [3.1.1](https://github.com/oakcask/schemurai/compare/v3.1.0...v3.1.1) (2026-10-31)
 
 
