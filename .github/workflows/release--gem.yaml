@@ -48,7 +48,7 @@ jobs:
           node-version: "26.13.0"
           cache: pnpm
           cache-dependency-path: workflow-script/release-please/pnpm-lock.yaml
-      - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
       - name: Install release PR dependencies
@@ -70,7 +70,7 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag_name }}
       - name: Set up Ruby
-        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
       - name: Build gem
         run: gem build schemurai.gemspec --output schemurai-${{ needs.release.outputs.version }}.gem
       - name: Upload gem
@@ -104,7 +104,7 @@ jobs:
         with:
           ref: ${{ needs.release.outputs.tag_name }}
       - name: Set up Ruby
-        uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
         with:
           ruby-version: ruby
       - name: Download source and native gems
